@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import {
   buildClaudeDesktopServerConfig,
+  buildRuntimeInstallArgs,
   collectInstallEnv,
   mergeClaudeDesktopConfig,
   resolveClaudeDesktopConfigPath,
@@ -81,4 +82,51 @@ test("resolveClaudeDesktopConfigPath honors explicit paths", () => {
 test("resolveClaudeDesktopRuntimeDir honors explicit paths", () => {
   const resolved = resolveClaudeDesktopRuntimeDir(join("/tmp", "proton-runtime"));
   assert.equal(resolved, "/tmp/proton-runtime");
+});
+
+test("buildClaudeDesktopServerConfig keeps explicitly provided env when includeEnv is false", () => {
+  // The setup wizard passes includeEnv:false (do not inherit ambient PROTONMAIL_*)
+  // together with the answers it collected. Those answers must survive.
+  const { serverConfig } = buildClaudeDesktopServerConfig({
+    runtimeDir: "/tmp/proton-runtime",
+    includeEnv: false,
+    env: {
+      PROTONMAIL_USERNAME: "user@example.com",
+      PROTONMAIL_PASSWORD: "bridge-password",
+    },
+  });
+
+  assert.equal(serverConfig.env.PROTONMAIL_USERNAME, "user@example.com");
+  assert.equal(serverConfig.env.PROTONMAIL_PASSWORD, "bridge-password");
+});
+
+test("buildClaudeDesktopServerConfig with includeEnv false still ignores ambient env", () => {
+  const previous = process.env.PROTONMAIL_USERNAME;
+  process.env.PROTONMAIL_USERNAME = "ambient@example.com";
+
+  try {
+    const { serverConfig } = buildClaudeDesktopServerConfig({
+      runtimeDir: "/tmp/proton-runtime",
+      includeEnv: false,
+    });
+
+    assert.equal(serverConfig.env, undefined);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PROTONMAIL_USERNAME;
+    } else {
+      process.env.PROTONMAIL_USERNAME = previous;
+    }
+  }
+});
+
+test("buildRuntimeInstallArgs uses npm ci only when a lockfile is present", () => {
+  assert.deepEqual(buildRuntimeInstallArgs(true), ["ci", "--omit=dev", "--ignore-scripts"]);
+  assert.deepEqual(buildRuntimeInstallArgs(false), [
+    "install",
+    "--omit=dev",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+  ]);
 });
