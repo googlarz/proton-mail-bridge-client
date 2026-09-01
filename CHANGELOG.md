@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed
+- **`setup-claude-desktop` permanently pinned the config to one exact Node version on Homebrew.** `buildClaudeDesktopServerConfig` wrote `process.execPath` verbatim into `claude_desktop_config.json`. On a Homebrew-installed Node, `process.execPath` resolves through the stable `bin/node` symlink to a version-pinned Cellar path (e.g. `/opt/homebrew/Cellar/node/25.8.0/bin/node`) — so the written config pointed at that exact path, not the symlink. The next `brew upgrade node && brew cleanup` deletes the old Cellar directory, and Claude Desktop can no longer spawn the server at all; it just silently stops working until someone manually re-runs setup. Flagged by a contributor in [PR #11](https://github.com/googlarz/proton-mail-bridge-client/pull/11)'s description but deliberately left out of that PR as a separate concern. Fixed by detecting the Homebrew Cellar layout and swapping in the stable sibling `bin/node` path — but only after verifying (via `realpath`) that the stable path currently resolves back to the exact binary in use, so a stale or mismatched symlink (e.g. mid-upgrade, or already pointing at a different version) safely falls back to the unresolved path instead of writing something wrong. nvm/asdf/system installs are untouched — the Cellar pattern simply doesn't match. Verified live on a real Homebrew install: before the fix, `install:claude-desktop` wrote the versioned Cellar path into the real config; after the fix, it writes `/opt/homebrew/bin/node`, and `doctor` confirms the server actually starts and connects through that path.
+
 ## [1.18.2] — 2026-09-01
 
 ### Added

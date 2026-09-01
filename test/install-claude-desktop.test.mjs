@@ -8,6 +8,7 @@ import {
   mergeClaudeDesktopConfig,
   resolveClaudeDesktopConfigPath,
   resolveClaudeDesktopRuntimeDir,
+  resolveStableNodeCommand,
 } from "../dist/scripts/install-claude-desktop.js";
 
 test("collectInstallEnv keeps only PROTONMAIL_* and DEBUG keys", () => {
@@ -129,4 +130,68 @@ test("buildRuntimeInstallArgs uses npm ci only when a lockfile is present", () =
     "--no-audit",
     "--no-fund",
   ]);
+});
+
+test("resolveStableNodeCommand swaps a Homebrew Cellar path for its verified stable symlink", () => {
+  // Reproduces the real bug: writing process.execPath verbatim into
+  // claude_desktop_config.json pins it to a version-specific Cellar path
+  // that `brew upgrade node && brew cleanup` deletes, silently breaking the
+  // server until setup is manually re-run.
+  const execPath = "/opt/homebrew/Cellar/node/25.8.0/bin/node";
+  const resolved = resolveStableNodeCommand(execPath, (path) => {
+    assert.equal(path, "/opt/homebrew/bin/node");
+    return execPath; // the stable symlink currently resolves back to this exact binary
+  });
+
+  assert.equal(resolved, "/opt/homebrew/bin/node");
+});
+
+test("resolveStableNodeCommand leaves non-Homebrew paths (nvm, system) untouched", () => {
+  assert.equal(
+    resolveStableNodeCommand("/Users/example/.nvm/versions/node/v24.13.1/bin/node"),
+    "/Users/example/.nvm/versions/node/v24.13.1/bin/node",
+  );
+  assert.equal(resolveStableNodeCommand("/usr/bin/node"), "/usr/bin/node");
+});
+
+test("resolveStableNodeCommand falls back to execPath when the stable symlink doesn't verify", () => {
+  const execPath = "/opt/homebrew/Cellar/node/25.8.0/bin/node";
+
+  // Symlink exists but currently points at a different (already-upgraded) version —
+  // trusting it blindly would silently swap in the wrong binary.
+  assert.equal(
+    resolveStableNodeCommand(execPath, () => "/opt/homebrew/Cellar/node/26.0.0/bin/node"),
+    execPath,
+  );
+
+  // Symlink doesn't exist at all (e.g. mid-upgrade, or already cleaned up).
+  assert.equal(
+    resolveStableNodeCommand(execPath, () => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }),
+    execPath,
+  );
+});
+
+test("buildClaudeDesktopServerConfig resolves a stable Node command by default", () => {
+  const previousExecPath = process.execPath;
+  Object.defineProperty(process, "execPath", {
+    value: "/opt/homebrew/Cellar/node/25.8.0/bin/node",
+    configurable: true,
+  });
+
+  try {
+    const { serverConfig } = buildClaudeDesktopServerConfig({ runtimeDir: "/tmp/proton-runtime" });
+    // No `command` override supplied, so it goes through resolveStableNodeCommand
+    // against the real filesystem — on a machine without that exact Cellar path,
+    // realpathSync throws and it falls straight back to execPath unchanged. Either
+    // outcome proves the code path runs without crashing and never produces a
+    // path other than the (possibly-resolved) execPath.
+    assert.ok(
+      serverConfig.command === "/opt/homebrew/Cellar/node/25.8.0/bin/node" ||
+        serverConfig.command === "/opt/homebrew/bin/node",
+    );
+  } finally {
+    Object.defineProperty(process, "execPath", { value: previousExecPath, configurable: true });
+  }
 });

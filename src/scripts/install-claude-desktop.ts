@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import { access, copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -98,7 +98,7 @@ function printHelp(): void {
       "  --server-name <name>  MCP server key to write (default: proton-mail-bridge)",
       "  --cwd <path>          Repo root to stage the MCP runtime from",
       "  --runtime-dir <path>  Stable runtime directory used by Claude Desktop",
-      "  --command <path>      Node executable to use (default: current process.execPath)",
+      "  --command <path>      Node executable to use (default: current process.execPath, resolved to the stable Homebrew symlink when detected)",
       "  --use-repo-build      Point Claude Desktop at the current repo build instead of a stable runtime copy",
       "  --no-env              Do not copy current PROTONMAIL_* / DEBUG env into config",
     ].join("\n"),
@@ -157,11 +157,52 @@ export function collectInstallEnv(sourceEnv: NodeJS.ProcessEnv = process.env): R
   );
 }
 
+// Homebrew's `node` formula installs into a version-pinned Cellar directory
+// (e.g. /opt/homebrew/Cellar/node/25.8.0/bin/node) and symlinks a stable
+// `bin/node` on top of it. `process.execPath` always resolves through that
+// symlink to the *versioned* path — so writing it verbatim into
+// claude_desktop_config.json permanently pins the config to one Node
+// version. The next `brew upgrade node && brew cleanup` deletes that exact
+// Cellar directory, and Claude Desktop can no longer spawn the server at
+// all — it just silently stops working until someone manually re-runs
+// setup. Flagged by a contributor in PR #11's description but deliberately
+// left out of that PR as a separate concern.
+//
+// Fix: if execPath sits under a Homebrew Cellar/node/<version>/bin
+// directory, prefer the stable sibling bin/node one level above Cellar/,
+// but only after confirming (via realpath) that the stable path actually
+// resolves back to this exact execPath — i.e. it really is the live
+// symlink for the version currently running, not some other stale/
+// mismatched install. Any nvm/asdf/system Node, or a Homebrew layout that
+// doesn't verify, falls straight through to execPath unchanged — those are
+// either already version-managed a different way or we can't safely assume
+// a stable alternative exists.
+export function resolveStableNodeCommand(
+  execPath: string,
+  realpath: (path: string) => string = (path) => realpathSync(path),
+): string {
+  const cellarMatch = execPath.match(/^(.*)\/Cellar\/node\/[^/]+\/bin\/node$/);
+  if (!cellarMatch) {
+    return execPath;
+  }
+
+  const stableCandidate = join(cellarMatch[1], "bin", "node");
+  try {
+    if (realpath(stableCandidate) === execPath) {
+      return stableCandidate;
+    }
+  } catch {
+    // Candidate doesn't exist or isn't resolvable — fall through.
+  }
+
+  return execPath;
+}
+
 export function buildClaudeDesktopServerConfig(
   options: InstallOptions = {},
 ): { serverName: string; serverConfig: ClaudeDesktopServerConfig } {
   const cwd = resolve(options.runtimeDir || options.cwd || resolveSourceRepoRoot());
-  const command = options.command || process.execPath;
+  const command = options.command || resolveStableNodeCommand(process.execPath);
   const env = {
     ...(options.includeEnv === false ? {} : collectInstallEnv()),
     ...(options.env ?? {}),
