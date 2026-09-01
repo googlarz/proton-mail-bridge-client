@@ -438,6 +438,7 @@ async function syncIndex(context: ReturnType<typeof createServer>, input: {
 function renderStatus(status: Record<string, unknown>): string {
   const lines = [
     "Proton Mail Bridge status",
+    `Version: ${status.version || "unknown"} (${status.entrypoint || "unknown entrypoint"})`,
     `Account: ${status.account || "unknown"}`,
     `IMAP: ${status.imapHost}:${status.imapPort}`,
     `SMTP: ${status.smtpHost}:${status.smtpPort}`,
@@ -487,6 +488,8 @@ async function runStatus(parsed: ParsedCliArgs): Promise<void> {
     ]);
 
     const result = {
+      version: await getPkgVersion(),
+      entrypoint: cliEntryPath(),
       account: config.smtp.username,
       imapHost: config.imap.host,
       imapPort: config.imap.port,
@@ -527,6 +530,11 @@ async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
 
     const result = {
       ok: imapOk && smtpOk,
+      // A stale/orphaned install elsewhere on disk (wrong path, old
+      // version) looks identical to a fresh one on every other field
+      // above — this is the field that actually distinguishes them.
+      version: await getPkgVersion(),
+      entrypoint: cliEntryPath(),
       account: config.smtp.username,
       imapOk,
       smtpOk,

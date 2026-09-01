@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as pathResolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -1281,7 +1282,7 @@ const TOOLS = [
   },
   {
     name: "get_connection_status",
-    description: "Check whether Proton Bridge SMTP and IMAP are reachable and return authentication status for each. Use to diagnose connectivity before sending or syncing, or when tools return connection errors. Returns individual pass/fail for each protocol. Prefer run_doctor for a full end-to-end health check including index integrity.",
+    description: "Check whether Proton Bridge SMTP and IMAP are reachable and return authentication status for each. Use to diagnose connectivity before sending or syncing, or when tools return connection errors. Returns individual pass/fail for each protocol, plus this server's own version and entrypoint path — check these first if behavior doesn't match the latest release notes; an old/orphaned install elsewhere on disk can silently shadow an upgrade. Prefer run_doctor for a full end-to-end health check including index integrity.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
   },
@@ -1293,7 +1294,7 @@ const TOOLS = [
   },
   {
     name: "run_doctor",
-    description: "Run a comprehensive production health check covering SMTP auth, IMAP auth, optional IMAP IDLE probe, SQLite index integrity, sync-failed drafts, runtime policy validation, and what this server can/cannot do (capabilities). Connection failures include a classified diagnosis (authentication_failed vs bridge_unreachable) with a specific fix. Use to fully diagnose or validate the setup. Prefer get_connection_status for a quick protocol-only reachability check.",
+    description: "Run a comprehensive production health check covering SMTP auth, IMAP auth, optional IMAP IDLE probe, SQLite index integrity, sync-failed drafts, runtime policy validation, and what this server can/cannot do (capabilities). Also reports this server's own version and entrypoint path — worth checking first when behavior doesn't match the changelog, since an old/orphaned install elsewhere on disk can silently shadow an upgrade and every other field here would still report healthy. Connection failures include a classified diagnosis (authentication_failed vs bridge_unreachable) with a specific fix. Use to fully diagnose or validate the setup. Prefer get_connection_status for a quick protocol-only reachability check.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -4966,6 +4967,14 @@ export function createServer(
 
           return createTextResult({
             checkedAt: new Date().toISOString(),
+            // A running server has no other way to tell an MCP client which
+            // install it's actually talking to — a stale/orphaned install
+            // (wrong path, old version) looks identical to a fresh one from
+            // every other field here. Found this gap while diagnosing a
+            // real 5-month-stale install that silently caused timeouts long
+            // after the underlying bugs were fixed upstream.
+            version: PACKAGE_VERSION,
+            entrypoint: fileURLToPath(import.meta.url),
             smtp: {
               ok: smtpStatus.status === "fulfilled",
               message:
@@ -5045,6 +5054,11 @@ export function createServer(
 
           return createTextResult({
             checkedAt: new Date().toISOString(),
+            // See get_connection_status for why this matters: from inside
+            // the tool, a stale install is indistinguishable from a fresh
+            // one on every other field here.
+            version: PACKAGE_VERSION,
+            entrypoint: fileURLToPath(import.meta.url),
             runtime: sanitizeRuntimeConfig(config.runtime),
             smtp: {
               ok: smtpStatus.status === "fulfilled",

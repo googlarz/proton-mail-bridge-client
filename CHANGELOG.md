@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+- `get_connection_status`, `run_doctor`, `proton-mail-bridge-client status`, and `proton-mail-bridge-client doctor` now report the running server's `version` and `entrypoint` (the exact file path it's executing from). Found while diagnosing a real case where Claude Desktop was silently running a 5-month-stale install from a pre-rename path — every diagnostic field these tools already reported (IMAP/SMTP OK, index healthy, etc.) still looked perfectly fine, because nothing in the server ever identified *which build* was actually running. An orphaned or shadowed install is otherwise undiagnosable from inside the tool itself.
+
 ## [1.18.1] — 2026-08-20
 
 ### Added
