@@ -162,13 +162,10 @@ export function buildClaudeDesktopServerConfig(
 ): { serverName: string; serverConfig: ClaudeDesktopServerConfig } {
   const cwd = resolve(options.runtimeDir || options.cwd || resolveSourceRepoRoot());
   const command = options.command || process.execPath;
-  const env =
-    options.includeEnv === false
-      ? undefined
-      : {
-          ...collectInstallEnv(),
-          ...(options.env ?? {}),
-        };
+  const env = {
+    ...(options.includeEnv === false ? {} : collectInstallEnv()),
+    ...(options.env ?? {}),
+  };
 
   return {
     serverName: options.serverName || DEFAULT_SERVER_NAME,
@@ -181,15 +178,32 @@ export function buildClaudeDesktopServerConfig(
   };
 }
 
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await access(target, fsConstants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function getNpmExecutable(): string {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
-async function installRuntimeDependencies(runtimeDir: string): Promise<void> {
+export function buildRuntimeInstallArgs(hasLockfile: boolean): string[] {
+  // `npm ci` requires a lockfile. npm never ships package-lock.json inside a published
+  // tarball, so a global/npx install has none and must fall back to `npm install`.
+  return hasLockfile
+    ? ["ci", "--omit=dev", "--ignore-scripts"]
+    : ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"];
+}
+
+async function installRuntimeDependencies(runtimeDir: string, hasLockfile: boolean): Promise<void> {
   // On Windows, .cmd files (npm.cmd) require shell: true — execFile cannot run them directly.
   const shellOpts = process.platform === "win32" ? { shell: true } : {};
 
-  await execFileAsync(getNpmExecutable(), ["ci", "--omit=dev", "--ignore-scripts"], {
+  await execFileAsync(getNpmExecutable(), buildRuntimeInstallArgs(hasLockfile), {
     cwd: runtimeDir,
     env: process.env,
     ...shellOpts,
@@ -224,8 +238,17 @@ export async function prepareClaudeDesktopRuntime(options: InstallOptions = {}):
   await rm(join(runtimeDir, "dist"), { recursive: true, force: true });
   await cp(join(sourceCwd, "dist"), join(runtimeDir, "dist"), { recursive: true, force: true });
   await copyFile(join(sourceCwd, "package.json"), join(runtimeDir, "package.json"));
-  await copyFile(join(sourceCwd, "package-lock.json"), join(runtimeDir, "package-lock.json"));
-  await installRuntimeDependencies(runtimeDir);
+
+  // Only present when installing from a git checkout; published tarballs never contain it.
+  const lockfilePath = join(sourceCwd, "package-lock.json");
+  const hasLockfile = await pathExists(lockfilePath);
+  if (hasLockfile) {
+    await copyFile(lockfilePath, join(runtimeDir, "package-lock.json"));
+  } else {
+    await rm(join(runtimeDir, "package-lock.json"), { force: true });
+  }
+
+  await installRuntimeDependencies(runtimeDir, hasLockfile);
 
   return {
     runtimeDir,
