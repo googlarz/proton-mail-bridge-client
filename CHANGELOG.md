@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [1.18.6] — 2026-09-02
 
 ### Fixed
 - **A whole class of write operations reported success for an email id that doesn't exist.** IMAP's flag/copy/move/expunge commands are all silent no-ops for a UID that doesn't match any message on the server — no error, no exception. Six tools inherited this as a real bug because nothing checked whether the operation actually touched anything:
