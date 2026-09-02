@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed
+- **A whole class of write operations reported success for an email id that doesn't exist.** IMAP's flag/copy/move/expunge commands are all silent no-ops for a UID that doesn't match any message on the server — no error, no exception. Six tools inherited this as a real bug because nothing checked whether the operation actually touched anything:
+  - `mark_email_read`/`star_email`/`update_message_flags`/`flag_thread` (shared `verifyFlags`): the post-STORE re-FETCH used to verify flags actually applied `if (msg !== false) {...}` with no `else` — a nonexistent UID (`fetchOne` returns `false`) skipped the check entirely, leaving `notApplied: []`, which every caller reads as "verified, all flags correctly applied."
+  - `move_email`: `messageMove`'s own `moved === false` check only catches an empty/invalid range, not a valid-looking UID that matches nothing — the returned `uidMap` (populated when the server has UIDPLUS, confirmed live on this account) simply had no entry for the requested UID, and nothing checked that.
+  - `bulk_update_flags`: the post-flag-change FETCH loop only iterates messages that exist, so a fake UID never got a per-UID verification entry — but the code still unconditionally reported `ok:true, notApplied:[]` for every requested UID regardless.
+  - `update_message_labels`: `messageCopy` has the identical `moved === false`-only blind spot as `move_email`; a fake UID reported `added:["Labels/X"]` for a message that was never touched.
+  - `delete_email`: the most severe instance — `messageDelete`'s EXPUNGE only reflects whether the server accepted the command, not whether anything matched, so this **irreversible** operation reported `deleted:true` for a message that never existed.
+  - `bulk_move`: identical gap to `move_email`, at bulk scale — every requested UID was unconditionally marked `ok:true`, `uidMap` was never even read.
+
+  All six confirmed live against a real Proton Bridge account with a deliberately-fake UID mixed into otherwise-real requests. Fixed by actually checking existence/uidMap before or after the operation (pre-check for the irreversible delete; the UIDPLUS-gated `uidMap` check, guarded by a regression test confirming no false failures on a server without UIDPLUS, for move/bulk-move). 12 new regression tests; every real, existing-message case re-verified live to confirm no regression.
+
 ## [1.18.5] — 2026-09-02
 
 ### Fixed

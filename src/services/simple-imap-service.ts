@@ -1162,17 +1162,24 @@ export class SimpleIMAPService {
     expectPresent: boolean,
   ): Promise<string[]> {
     const notApplied: string[] = [];
-    try {
-      const msg = await client.fetchOne(String(uid), { flags: true }, { uid: true });
-      if (msg !== false) {
-        const actual = new Set(Array.from(msg.flags ?? []).map((f: string) => f.toLowerCase()));
-        for (const flag of expectedFlags) {
-          const present = actual.has(flag.toLowerCase());
-          if (expectPresent && !present) notApplied.push(flag);
-          if (!expectPresent && present) notApplied.push(flag);
-        }
-      }
-    } catch { /* best-effort */ }
+    const msg = await client.fetchOne(String(uid), { flags: true }, { uid: true });
+    if (msg === false) {
+      // IMAP's STORE command silently no-ops for a UID that doesn't exist —
+      // no error, no exception — so the preceding messageFlagsAdd/Remove
+      // call above already "succeeded" against nothing. This re-FETCH is
+      // the only signal that the target never existed at all; treating it
+      // as "best-effort, ignore" (the old behavior) made every flag
+      // operation on a stale/wrong/nonexistent UID silently report success
+      // with an empty notApplied — found live via batch_email_action on a
+      // deliberately-fake UID.
+      throw new Error(`Email not found for uid ${uid} in ${client.mailbox && "path" in client.mailbox ? client.mailbox.path : "mailbox"}`);
+    }
+    const actual = new Set(Array.from(msg.flags ?? []).map((f: string) => f.toLowerCase()));
+    for (const flag of expectedFlags) {
+      const present = actual.has(flag.toLowerCase());
+      if (expectPresent && !present) notApplied.push(flag);
+      if (!expectPresent && present) notApplied.push(flag);
+    }
     return notApplied;
   }
 
@@ -1243,6 +1250,21 @@ export class SimpleIMAPService {
         throw new Error(`Server did not move email ${emailId} to ${targetFolder}`);
       }
       targetUid = moved.uidMap?.get(uid);
+      // `moved === false` above only catches an empty/invalid range given to
+      // the client, not a UID that's syntactically valid but doesn't match
+      // any message on the server — IMAP's MOVE command silently succeeds
+      // with nothing moved in that case (same class of bug just fixed in
+      // verifyFlags). Without this check the caller got a success-shaped
+      // response with no `error` field, just a silently-missing targetUid,
+      // making move_email on a stale/wrong/nonexistent id look like it
+      // worked. Found live via move_email on a deliberately-fake UID.
+      // `uidMap` is only populated when the server has UIDPLUS (Proton
+      // Bridge does, confirmed live) — gate on that capability so a server
+      // without it doesn't get a false failure here for a move that
+      // actually succeeded.
+      if (targetUid === undefined && client.capabilities.has("UIDPLUS")) {
+        throw new Error(`Email not found for id ${emailId}`);
+      }
     });
 
     const cached = this.messageCache.get(emailId);
@@ -1279,6 +1301,19 @@ export class SimpleIMAPService {
 
     await this.withMailbox(folder, false, async (client) => {
       this.assertMailboxUidValidity(client, uidValidity);
+      // messageDelete's own truthy/falsy result only reflects whether the
+      // server accepted the EXPUNGE command, not whether any message
+      // actually matched — a nonexistent UID's preceding \Deleted flag add
+      // is itself a silent no-op (same class of bug fixed elsewhere in
+      // this file), so EXPUNGE legitimately "succeeds" having deleted
+      // nothing. This is the most severe instance of that bug class since
+      // deletion is irreversible: found live, delete_email on a
+      // deliberately-fake UID reported deleted:true. Confirm the message
+      // actually exists before issuing a permanent delete against it.
+      const exists = await client.fetchOne(String(uid), { uid: true }, { uid: true });
+      if (exists === false) {
+        throw new Error(`Email not found for id ${emailId}`);
+      }
       const deleted = await client.messageDelete(String(uid), { uid: true });
       if (!deleted) {
         throw new Error(`Server did not delete email ${emailId}`);
@@ -1307,14 +1342,29 @@ export class SimpleIMAPService {
     const notFound: string[] = [];
     const failedLabels: string[] = [];
 
-    // Retrieve the Message-ID header once (needed for label removal lookup)
+    // Retrieve the Message-ID header once (needed for label removal lookup).
+    // Also doubles as an existence check: messageCopy's own `result ===
+    // false` check below only catches an empty/invalid range, not a
+    // syntactically valid UID that doesn't match any message — IMAP's COPY
+    // command silently "succeeds" with nothing copied in that case (same
+    // class of bug as markEmailRead/moveEmail/bulkUpdateFlags). Without
+    // failing here first, a fake/stale UID reported added:[<label>] for
+    // every label requested. Found live: update_message_labels on a
+    // deliberately-fake UID against a real label folder. Checked via
+    // `msg !== false` rather than a defined messageId, since a genuinely
+    // existing message could still legitimately lack a Message-ID header.
     let messageId: string | undefined;
+    let sourceExists = false;
     await this.withMailbox(folder, true, async (client) => {
       const msg = await client.fetchOne(String(uid), { uid: true, envelope: true }, { uid: true });
       if (msg !== false) {
+        sourceExists = true;
         messageId = msg.envelope?.messageId;
       }
     });
+    if (!sourceExists) {
+      throw new Error(`Email not found for id ${emailId}`);
+    }
 
     // Add labels: COPY can partially succeed if multiple labels are added and a later COPY fails.
     for (const label of labelsToAdd) {
@@ -1525,14 +1575,33 @@ export class SimpleIMAPService {
     if (uids.length > 0) {
       const uidSet = uids.join(",");
       try {
+        let uidMap: Map<number, number> | undefined;
+        let hasUidPlus = false;
         await this.withMailbox(folder, false, async (client) => {
           const moved = await client.messageMove(uidSet, input.targetFolder, { uid: true });
           if (moved === false) {
             throw new Error(`Server did not move uid set ${uidSet}`);
           }
+          uidMap = moved.uidMap;
+          hasUidPlus = client.capabilities.has("UIDPLUS");
         });
         for (const uid of uids) {
           const emailId = createEmailId(folder, uid);
+          // `moved === false` above only catches an empty/invalid range,
+          // not a syntactically valid UID that doesn't match any message —
+          // IMAP's MOVE silently succeeds with nothing moved in that case
+          // (same class of bug fixed in moveEmail/bulkUpdateFlags/
+          // updateMessageLabels/deleteEmail). uidMap only reflects reality
+          // when UIDPLUS is active (confirmed live on this Bridge account);
+          // without it, fall back to trusting the bulk result as before —
+          // no reliable per-UID signal exists on such a server. Found live:
+          // bulk_move with one real id and one deliberately fake one
+          // reported ok:true for both.
+          if (hasUidPlus && !uidMap?.has(uid)) {
+            results.push({ uid, emailId, ok: false, error: `Email not found for uid ${uid}` });
+            failed++;
+            continue;
+          }
           this.messageCache.delete(emailId);
           results.push({ uid, emailId, ok: true });
           succeeded++;
@@ -1662,8 +1731,20 @@ export class SimpleIMAPService {
         });
         for (const uid of uids) {
           const emailId = createEmailId(folder, uid);
-          const notApplied = notAppliedByUid.get(uid) ?? [];
-          results.push({ uid, emailId, ok: true, notApplied });
+          // A UID absent from the fetch loop above (never got a
+          // notAppliedByUid entry) means the IMAP FETCH found no message
+          // for it — the earlier STORE call already silently no-op'd for
+          // it too (same class of bug fixed in markEmailRead/moveEmail).
+          // The old code defaulted to notApplied:[] here, reporting
+          // ok:true for a UID that was never actually touched. Found live
+          // via bulk_update_flags with one real id and one deliberately
+          // fake one.
+          if (!notAppliedByUid.has(uid)) {
+            results.push({ uid, emailId, ok: false, error: `Email not found for uid ${uid}` });
+            failed++;
+            continue;
+          }
+          results.push({ uid, emailId, ok: true, notApplied: notAppliedByUid.get(uid) as string[] });
           succeeded++;
         }
       } catch (err) {

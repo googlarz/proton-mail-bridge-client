@@ -184,6 +184,154 @@ test("deleteThread(permanent:false) errors instead of silently permanent-deletin
   assert.deepEqual(calls, []);
 });
 
+test("markEmailRead throws instead of silently reporting success for a UID that doesn't exist", async () => {
+  // Reproduces a real bug: IMAP's STORE command silently no-ops for a UID
+  // that doesn't match any message — no error — so messageFlagsAdd already
+  // "succeeded" against nothing. verifyFlags's re-FETCH was the only real
+  // signal the target never existed (fetchOne returns false), but the old
+  // code wrapped it in `if (msg !== false) { ...check... }` with no else —
+  // skipping the check entirely left notApplied as [], which callers read
+  // as "verified, all flags correctly applied." Found live via
+  // batch_email_action on a deliberately-fake UID: reported ok:true.
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    messageFlagsAdd: async () => true,
+    fetchOne: async () => false, // no message matches this UID
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  await assert.rejects(
+    () => service.markEmailRead("INBOX::999999", true),
+    /not found/i,
+  );
+});
+
+test("moveEmail throws instead of silently reporting success for a UID that doesn't exist (UIDPLUS server)", async () => {
+  // Same class of bug as markEmailRead above: IMAP's MOVE command silently
+  // succeeds with nothing moved for a non-matching UID. messageMove's own
+  // `moved === false` check only catches an empty/invalid range, not this
+  // case — moved.uidMap (populated only when UIDPLUS is active, which
+  // Proton Bridge is confirmed to support live) simply has no entry for the
+  // requested UID, and the old code let that through as a "successful"
+  // move with a silently-missing targetUid instead of an error. Found live
+  // via move_email on a deliberately-fake UID.
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    capabilities: new Map([["UIDPLUS", true]]),
+    getMailboxLock: async () => ({ release() {} }),
+    messageMove: async () => ({ path: "INBOX", destination: "Archive", uidMap: new Map() }),
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  await assert.rejects(
+    () => service.moveEmail("INBOX::999999", "Archive"),
+    /not found/i,
+  );
+});
+
+test("moveEmail does not falsely fail on a server without UIDPLUS, even though uidMap is unavailable", async () => {
+  // Guards the fix above from over-correcting: a server without UIDPLUS
+  // never populates uidMap at all, by design (see imapflow's own docs) —
+  // that must not be misread as "nothing was moved."
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    capabilities: new Map(), // no UIDPLUS
+    getMailboxLock: async () => ({ release() {} }),
+    messageMove: async () => ({ path: "INBOX", destination: "Archive" }), // no uidMap at all
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  const result = await service.moveEmail("INBOX::42", "Archive");
+  assert.equal(result.targetUid, undefined);
+});
+
+test("bulkUpdateFlags reports failure for a UID absent from the mailbox instead of defaulting to success", async () => {
+  // Reproduces a real bug: the post-flag-change FETCH loop only iterates
+  // messages that actually exist, so a fake/stale UID never gets a
+  // notAppliedByUid entry — but the old code still unconditionally pushed
+  // {ok:true, notApplied:[]} for every requested UID, misreporting a UID
+  // the FETCH never touched as "verified, flags correctly applied." Found
+  // live via bulk_update_flags with one real id and one deliberately fake
+  // one — reported ok:true for both.
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    messageFlagsAdd: async () => true,
+    // Only uid 10 actually exists — 999 (requested below) never appears here.
+    async *fetch() {
+      yield { uid: 10, flags: new Set(["\\Flagged"]) };
+    },
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+  service.resolveUidsForBulkOp = async () => [10, 999];
+
+  const result = await service.bulkUpdateFlags({ emailIds: ["INBOX::10", "INBOX::999"], flagsToAdd: ["\\Flagged"] });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 1);
+  const ok = result.results.find((r) => r.uid === 10);
+  const bad = result.results.find((r) => r.uid === 999);
+  assert.equal(ok.ok, true);
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /not found/i);
+});
+
+test("updateMessageLabels throws instead of silently reporting a label added to a nonexistent message", async () => {
+  // Reproduces a real bug: messageCopy's own `result === false` check only
+  // catches an empty/invalid range, not a syntactically valid UID that
+  // doesn't match any message — IMAP's COPY command silently "succeeds"
+  // with nothing copied in that case. The up-front fetchOne (originally
+  // just to grab the Message-ID for label *removal*) is the only real
+  // existence signal, but the old code let a `msg === false` result pass
+  // through silently (messageId just stayed undefined) instead of failing
+  // the whole call. Found live: update_message_labels on a
+  // deliberately-fake UID against a real label folder reported
+  // added:["Labels/X"].
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    fetchOne: async () => false, // no message matches this UID
+    messageCopy: async () => ({ path: "INBOX", destination: "Labels/X", uidMap: new Map() }),
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  await assert.rejects(
+    () => service.updateMessageLabels("INBOX::999999", ["Labels/X"], []),
+    /not found/i,
+  );
+});
+
 test("isLikelyAuthenticationError and isLikelyConnectionError classify errors correctly", () => {
   const authError = new Error("Incorrect login credentials.");
   assert.equal(isLikelyAuthenticationError(authError), true);
@@ -272,4 +420,115 @@ test("pickNewestUids picks by date, not by UID order (GitHub issue #6)", () => {
   const picked = pickNewestUids(dated, 3);
 
   assert.deepEqual(picked.sort(), [1, 2, 3]);
+});
+
+test("deleteEmail throws instead of silently reporting deleted:true for a UID that doesn't exist", async () => {
+  // Reproduces a real bug, the most severe instance of a pattern found
+  // repeatedly in this file: messageDelete's EXPUNGE only reflects whether
+  // the server accepted the command, not whether any message actually
+  // matched — the preceding \Deleted flag add is itself a silent no-op for
+  // a nonexistent UID (same root cause as markEmailRead/moveEmail/
+  // bulkUpdateFlags/updateMessageLabels), so EXPUNGE legitimately succeeds
+  // having deleted nothing. Because this operation is irreversible, found
+  // and fixed with a pre-existence check rather than a post-hoc one. Found
+  // live: delete_email on a deliberately-fake UID reported deleted:true.
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    fetchOne: async () => false, // no message matches this UID
+    messageDelete: async () => true, // would "succeed" if reached — must not be
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  await assert.rejects(
+    () => service.deleteEmail("INBOX::999999"),
+    /not found/i,
+  );
+});
+
+test("deleteEmail still deletes a genuinely existing message", async () => {
+  const service = new SimpleIMAPService(createConfig());
+
+  let deleteCalledWith;
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    fetchOne: async () => ({ uid: 42 }),
+    messageDelete: async (range) => {
+      deleteCalledWith = range;
+      return true;
+    },
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  const result = await service.deleteEmail("INBOX::42");
+  assert.equal(result.deleted, true);
+  assert.equal(deleteCalledWith, "42");
+});
+
+test("bulkMove reports per-UID failure for a UID that doesn't exist (UIDPLUS server), instead of marking everything ok", async () => {
+  // Reproduces a real bug: bulkMove only checked `moved === false` (which
+  // only catches an empty/invalid range) and otherwise unconditionally
+  // marked *every* requested UID as ok:true, ignoring moved.uidMap
+  // entirely — even a UID the MOVE never actually touched. Found live:
+  // bulk_move with one real id and one deliberately fake one reported
+  // ok:true for both; after the fix, exactly the real one succeeds.
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    capabilities: new Map([["UIDPLUS", true]]),
+    getMailboxLock: async () => ({ release() {} }),
+    // Only uid 10 actually gets an entry — 999 (requested below) never appears.
+    messageMove: async () => ({ path: "INBOX", destination: "Archive", uidMap: new Map([[10, 100]]) }),
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+  service.resolveUidsForBulkOp = async () => [10, 999];
+
+  const result = await service.bulkMove({ emailIds: ["INBOX::10", "INBOX::999"], targetFolder: "Archive" });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 1);
+  const ok = result.results.find((r) => r.uid === 10);
+  const bad = result.results.find((r) => r.uid === 999);
+  assert.equal(ok.ok, true);
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /not found/i);
+});
+
+test("bulkMove does not falsely fail on a server without UIDPLUS, even though uidMap is unavailable", async () => {
+  // Guards the fix above from over-correcting — mirrors the identical
+  // guard test for moveEmail.
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    capabilities: new Map(), // no UIDPLUS
+    getMailboxLock: async () => ({ release() {} }),
+    messageMove: async () => ({ path: "INBOX", destination: "Archive" }), // no uidMap at all
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+  service.resolveUidsForBulkOp = async () => [10, 20];
+
+  const result = await service.bulkMove({ emailIds: ["INBOX::10", "INBOX::20"], targetFolder: "Archive" });
+  assert.equal(result.succeeded, 2);
+  assert.equal(result.failed, 0);
 });
