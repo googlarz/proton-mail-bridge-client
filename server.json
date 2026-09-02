@@ -6,13 +6,13 @@
     "url": "https://github.com/googlarz/proton-mail-bridge-client",
     "source": "github"
   },
-  "version": "1.18.3",
+  "version": "1.18.4",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "proton-mail-bridge-client",
-      "version": "1.18.3",
+      "version": "1.18.4",
       "transport": {
         "type": "stdio"
       },
