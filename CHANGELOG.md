@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [1.18.7] — 2026-09-02
 
 ### Fixed
 - **`bulk_delete` had the same silent-success gap as `bulk_move`/`delete_email`.** Both branches — permanent delete and move-to-Trash — unconditionally marked every requested UID `ok:true` regardless of whether the underlying IMAP command actually matched anything. Confirmed live: `bulk_delete` with one real id and one deliberately fake one reported `ok:true` for both, in both the permanent and Trash-move modes. The permanent branch (irreversible) is fixed with a pre-delete existence search rather than trying to infer success after the fact, since `messageDelete`'s EXPUNGE gives no reliable per-UID signal at all; the Trash-move branch reuses the same UIDPLUS-gated `uidMap` check added to `bulk_move`.
