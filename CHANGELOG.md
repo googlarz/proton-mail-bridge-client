@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [1.18.5] — 2026-09-02
 
 ### Fixed
 - Cleared two newly-disclosed dependency advisories, both transitive via `@modelcontextprotocol/sdk`: `fast-uri` (high, host-confusion/SSRF via IDN and IPv6 normalization bugs, GHSA-5jgf-p345-68v8 and related) and `qs` (moderate, array-limit bypass and DoS, GHSA-x5fp-wj9c-mxmx and related). `npm audit fix` resolved both cleanly within existing ranges — no `package.json` changes, no `--force`, no breaking version jump. Verified: build clean, full test suite passes, live-connected via the MCP transport and confirmed the server still starts and responds correctly.
