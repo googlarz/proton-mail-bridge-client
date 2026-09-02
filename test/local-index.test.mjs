@@ -363,6 +363,121 @@ test("indexed search supports domain and label normalization shortcuts", async (
   }
 });
 
+test("search_indexed_emails' mailboxRole filter actually filters by folder, not silently ignored", async () => {
+  // Found live: search_indexed_emails documents mailboxRole ("Normalized
+  // mailbox role like Inbox, Sent, Archive, or Trash") but the filter was
+  // never checked anywhere in matchesIndexedSearch — mailboxRole:"trash"
+  // returned a message that was actually in Sent. The live-IMAP
+  // search_emails path (matchesLocalSearchFilters) already implemented
+  // this filter correctly, which is how the gap was found.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-mailbox-role-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-03-25T10:00:00.000Z",
+      folders: [
+        { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 },
+        { path: "Sent", name: "Sent", delimiter: "/", specialUse: "\\Sent", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 },
+      ],
+      folderStats: [
+        { folder: "INBOX", fetched: 1, total: 1, strategy: "recent" },
+        { folder: "Sent", fetched: 1, total: 1, strategy: "recent" },
+      ],
+      emails: [
+        {
+          id: "INBOX::30", folder: "INBOX", uid: 30, seq: 30,
+          messageId: "<inbound@example.com>", subject: "Inbound message",
+          from: [{ address: "someone@example.com" }], to: [{ address: "owner@example.com" }],
+          cc: [], bcc: [], replyTo: [],
+          date: "2026-03-25T09:00:00.000Z", internalDate: "2026-03-25T09:00:00.000Z",
+          isRead: false, isStarred: false, flags: [],
+          preview: "Inbound", hasAttachments: false, attachments: [], labels: [],
+        },
+        {
+          id: "Sent::31", folder: "Sent", uid: 31, seq: 31,
+          messageId: "<outbound@example.com>", subject: "Outbound message",
+          from: [{ address: "owner@example.com" }], to: [{ address: "someone@example.com" }],
+          cc: [], bcc: [], replyTo: [],
+          date: "2026-03-25T08:00:00.000Z", internalDate: "2026-03-25T08:00:00.000Z",
+          isRead: true, isStarred: false, flags: ["\\Seen"],
+          preview: "Outbound", hasAttachments: false, attachments: [], labels: [],
+        },
+      ],
+    });
+
+    const trashResult = await service.search({ mailboxRole: "trash", limit: 10 });
+    assert.equal(trashResult.total, 0, "neither message is in Trash");
+
+    const sentResult = await service.search({ mailboxRole: "sent", limit: 10 });
+    assert.equal(sentResult.total, 1);
+    assert.equal(sentResult.emails[0].id, "Sent::31");
+
+    const inboxResult = await service.search({ mailboxRole: "inbox", limit: 10 });
+    assert.equal(inboxResult.total, 1);
+    assert.equal(inboxResult.emails[0].id, "INBOX::30");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("dateFrom/dateTo set to the same day includes that day's messages instead of excluding it", async () => {
+  // Found live: dateTo:"2026-09-02" did `COALESCE(internal_date, date) <=
+  // "2026-09-02"` — a raw string comparison against a full ISO timestamp
+  // ("2026-09-02T17:14:06.000Z" <= "2026-09-02" is false, the longer
+  // string sorts after the bare-date prefix), so every message on the
+  // dateTo day itself was silently excluded. dateFrom:dateTo set to the
+  // same real day returned zero results despite messages from that day
+  // existing. Fixed by treating dateTo as an exclusive upper bound at the
+  // start of the next day, matching how the live-IMAP search path
+  // (buildSearchQuery's `query.before = nextDay(dateTo)`) already handles it.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-date-boundary-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-09-02T18:00:00.000Z",
+      folders: [
+        { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 2, unseen: 0 },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: 2, total: 2, strategy: "recent" }],
+      emails: [
+        {
+          id: "INBOX::40", folder: "INBOX", uid: 40, seq: 40,
+          messageId: "<today@example.com>", subject: "Today's message",
+          from: [{ address: "someone@example.com" }], to: [{ address: "owner@example.com" }],
+          cc: [], bcc: [], replyTo: [],
+          date: "2026-09-02T17:14:06.000Z", internalDate: "2026-09-02T17:14:06.000Z",
+          isRead: false, isStarred: false, flags: [],
+          preview: "Today", hasAttachments: false, attachments: [], labels: [],
+        },
+        {
+          id: "INBOX::41", folder: "INBOX", uid: 41, seq: 41,
+          messageId: "<yesterday@example.com>", subject: "Yesterday's message",
+          from: [{ address: "someone@example.com" }], to: [{ address: "owner@example.com" }],
+          cc: [], bcc: [], replyTo: [],
+          date: "2026-09-01T10:00:00.000Z", internalDate: "2026-09-01T10:00:00.000Z",
+          isRead: false, isStarred: false, flags: [],
+          preview: "Yesterday", hasAttachments: false, attachments: [], labels: [],
+        },
+      ],
+    });
+
+    const sameDayResult = await service.search({ dateFrom: "2026-09-02", dateTo: "2026-09-02", limit: 10 });
+    assert.equal(sameDayResult.total, 1, "today's message must be included when dateFrom/dateTo are both today");
+    assert.equal(sameDayResult.emails[0].id, "INBOX::40");
+
+    const excludesYesterday = await service.search({ dateFrom: "2026-09-02", limit: 10 });
+    assert.equal(excludesYesterday.total, 1, "yesterday's message must still be excluded by dateFrom");
+
+    const dateToYesterdayResult = await service.search({ dateTo: "2026-09-01", limit: 10 });
+    assert.equal(dateToYesterdayResult.total, 1);
+    assert.equal(dateToYesterdayResult.emails[0].id, "INBOX::41", "dateTo boundary must still exclude the next day");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("recordSnapshot preserves preview/attachmentText across a flags-only re-sync of the same UID", async () => {
   // Reproduces the "cheapen the no-change sync cycle" fix: an unchanged incremental
   // window re-syncs with no message source fetched, so preview/attachmentText come

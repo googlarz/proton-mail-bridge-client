@@ -20,6 +20,7 @@ import {
   extractDomain,
   extractMessageIdList,
   lowerCaseAddress,
+  nextDay,
   normalizeMailboxLabel,
   normalizeMessageId,
   normalizeSubjectForThread,
@@ -181,6 +182,25 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
     return false;
   }
 
+  // Was accepted and documented by search_indexed_emails's schema
+  // ("Normalized mailbox role like Inbox, Sent, Archive, or Trash") but
+  // never actually checked here — every call silently ignored it and
+  // returned matches from any folder. The live-IMAP search_emails path
+  // (matchesLocalSearchFilters in utils/helpers.ts) already implements this
+  // correctly; mirrored here.
+  if (normalizedFilters.mailboxRole) {
+    const roleNeedle = normalizedFilters.mailboxRole.toLowerCase();
+    const roles = new Set(
+      [email.folder, ...email.labels]
+        .map((value) => normalizeMailboxLabel(value))
+        .filter((value): value is string => Boolean(value))
+        .map((value) => value.toLowerCase()),
+    );
+    if (!roles.has(roleNeedle)) {
+      return false;
+    }
+  }
+
   if (
     typeof normalizedFilters.hasAttachment === "boolean" &&
     email.hasAttachments !== normalizedFilters.hasAttachment
@@ -268,7 +288,9 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   }
 
   if (normalizedFilters.dateTo && emailDate) {
-    if (new Date(emailDate).getTime() > new Date(normalizedFilters.dateTo).getTime()) {
+    // Exclusive upper bound at the start of the next day — see the
+    // identical fix and rationale on the SQL dateTo condition above.
+    if (new Date(emailDate).getTime() >= nextDay(new Date(normalizedFilters.dateTo)).getTime()) {
       return false;
     }
   }
@@ -1630,8 +1652,17 @@ export class LocalIndexService {
       params.push(filters.dateFrom);
     }
     if (filters.dateTo) {
-      conditions.push(`COALESCE(internal_date, date) <= ?`);
-      params.push(filters.dateTo);
+      // dateTo is commonly a bare date ("2026-09-02") without a time
+      // component. `<= "2026-09-02"` did a raw string comparison against
+      // full ISO timestamps ("2026-09-02T17:14:06.000Z" <= "2026-09-02" is
+      // false, since the longer string sorts after the shorter prefix) —
+      // silently excluding every message on the dateTo day itself. Found
+      // live: dateFrom and dateTo both set to today returned zero results
+      // despite messages from today existing. Fixed the same way the
+      // live-IMAP search path (buildSearchQuery) already does it: treat
+      // dateTo as an exclusive upper bound at the start of the *next* day.
+      conditions.push(`COALESCE(internal_date, date) < ?`);
+      params.push(nextDay(new Date(filters.dateTo)).toISOString());
     }
 
     if (conditions.length > 0) {

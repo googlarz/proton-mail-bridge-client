@@ -74,7 +74,12 @@ export class DeliveryQueueService {
     this.timer.unref?.();
   }
 
-  async enqueue(payload: SendEmailInput, sendAt: string, kind: DeliveryQueueKind): Promise<DeliveryQueueRecord> {
+  async enqueue(
+    payload: SendEmailInput,
+    sendAt: string,
+    kind: DeliveryQueueKind,
+    sourceDraftId?: string,
+  ): Promise<DeliveryQueueRecord> {
     const record: DeliveryQueueRecord = {
       id: randomUUID(),
       kind,
@@ -82,6 +87,7 @@ export class DeliveryQueueService {
       sendAt,
       status: "pending",
       payload,
+      ...(sourceDraftId ? { sourceDraftId } : {}),
     };
     await this.withLock(async () => {
       const store = await this.loadUnlocked();

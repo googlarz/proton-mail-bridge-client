@@ -283,6 +283,34 @@ test("a 'sending' record left over from a crashed process is never auto-resent o
   });
 });
 
+test("enqueue stores an optional sourceDraftId, used by send_draft to detect a still-pending scheduled send", async () => {
+  // schedule_draft passes the draft's id here so send_draft can refuse to
+  // fire a second, independent send for the same draft — found live: a
+  // draft scheduled then immediately sent produced two separate successful
+  // SMTP transactions.
+  await withTempDir(async (dataDir) => {
+    const queue = new DeliveryQueueService(createConfig(dataDir), fakeSmtp());
+    const record = await queue.enqueue(
+      payload,
+      new Date(Date.now() + 60_000).toISOString(),
+      "scheduled_send",
+      "draft-abc-123",
+    );
+
+    assert.equal(record.sourceDraftId, "draft-abc-123");
+    const items = await queue.list();
+    assert.equal(items[0].sourceDraftId, "draft-abc-123");
+  });
+});
+
+test("enqueue omits sourceDraftId when not given (undo_send has no source draft)", async () => {
+  await withTempDir(async (dataDir) => {
+    const queue = new DeliveryQueueService(createConfig(dataDir), fakeSmtp());
+    const record = await queue.enqueue(payload, new Date(Date.now() + 60_000).toISOString(), "undo_send");
+    assert.equal(record.sourceDraftId, undefined);
+  });
+});
+
 test("a second process writing the same dataDir is visible without restarting this instance (no forever-cache)", async () => {
   await withTempDir(async (dataDir) => {
     const config = createConfig(dataDir);

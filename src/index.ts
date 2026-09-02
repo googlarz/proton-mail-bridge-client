@@ -404,7 +404,7 @@ const TOOLS = [
   },
   {
     name: "create_forward_draft",
-    description: "Create a forward draft for an existing email, pre-filling the original message as quoted body. Use when you have an emailId and want to stage a forward for review before sending. Prefer forward_email to send immediately without saving. Returns a draftId for later update or send via send_draft.",
+    description: "Create a forward draft for an existing email, pre-filling the original message as quoted body and preserving its attachments. Use when you have an emailId and want to stage a forward for review before sending. Prefer forward_email to send immediately without saving. Returns a draftId for later update or send via send_draft.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -421,6 +421,7 @@ const TOOLS = [
           description: "Whether to sync the draft to the Proton Drafts mailbox when IMAP is available.",
           default: true,
         },
+        includeAttachments: { type: "boolean", description: "Include the original email's attachments in the draft.", default: true },
         attachments: {
           type: "array",
           description: "Attachments with base64 encoded content.",
@@ -530,7 +531,7 @@ const TOOLS = [
   },
   {
     name: "send_draft",
-    description: "Send a previously saved local draft through Proton Bridge SMTP. Use as the final step in a draft-review-send workflow after create_draft and optional update_draft. Marks the draft as sent in the local store but does not delete it. Requires PROTONMAIL_ALLOW_SEND.",
+    description: "Send a previously saved local draft through Proton Bridge SMTP. Use as the final step in a draft-review-send workflow after create_draft and optional update_draft. Marks the draft as sent in the local store but does not delete it. Refuses if this draft has a still-pending scheduled send (from schedule_draft) — cancel that with cancel_send first, otherwise sending now would deliver the draft twice. Requires PROTONMAIL_ALLOW_SEND.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -3838,11 +3839,27 @@ export function createServer(
           const to = parseEmails(requireString(args, "to"));
           const cc = parseEmails(optionalString(args, "cc"));
           const bcc = parseEmails(optionalString(args, "bcc"));
-          const attachments = optionalAttachmentList(args.attachments);
+          const callerAttachments = optionalAttachmentList(args.attachments) ?? [];
 
           ensureValidEmails(to, "to");
           ensureValidEmails(cc, "cc");
           ensureValidEmails(bcc, "bcc");
+
+          // Same bug fixed earlier this session in forward_email: only the
+          // caller-supplied `attachments` (new attachments to add) were ever
+          // used — the original email's own attachments were never fetched,
+          // regardless of the tool's "preserving attachments" description.
+          // Found live: forwarding a fixture with one attachment produced a
+          // draft with zero attachments.
+          const includeAttachments = normalizeBoolean(args.includeAttachments, true);
+          const originalAttachments = includeAttachments
+            ? await Promise.all(
+                detail.attachments
+                  .filter((a) => a.id)
+                  .map((a) => imapService.getAttachmentForForward(detail.id, a.id as string)),
+              )
+            : [];
+          const attachments = [...originalAttachments, ...callerAttachments];
 
           const result = await withAudit(auditService, name, args, async () => {
             const draft = await draftStore.createDraft({
@@ -4043,6 +4060,20 @@ export function createServer(
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Send draft ${String(args.draftId ?? "?")}`);
           ensureSendAllowed(config.runtime);
           const draft = await draftStore.getDraft(requireString(args, "draftId"));
+          // Found live: schedule_draft followed by send_draft on the same
+          // draft sent it twice — two independent, successful SMTP
+          // transactions, since nothing here knew about the still-pending
+          // scheduled send. Refuse instead; cancel_send first if the
+          // immediate send is actually what's wanted.
+          const pendingScheduled = (await deliveryQueueService.list()).find(
+            (record) => record.sourceDraftId === draft.id && record.status === "pending",
+          );
+          if (pendingScheduled) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              `This draft already has a pending scheduled send (id ${pendingScheduled.id}, sendAt ${pendingScheduled.sendAt}). Sending now would deliver it twice. Cancel that scheduled send with cancel_send first, or wait for it to fire.`,
+            );
+          }
           ensureValidEmails(draft.to, "to");
           ensureValidEmails(draft.cc, "cc");
           ensureValidEmails(draft.bcc, "bcc");
@@ -4183,6 +4214,7 @@ export function createServer(
               },
               new Date(sendAtTime).toISOString(),
               "scheduled_send",
+              draft.id,
             ),
           );
 

@@ -585,8 +585,19 @@ export function renderMarkdown(markdown: string): { html: string; text: string }
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
     .replace(/~~(.+?)~~/g, "<del>$1</del>")
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
-      const safeUrl = /^(https?:|mailto:)/i.test((url as string).trim()) ? url : "#";
-      return `<a href="${safeUrl}">${text}</a>`;
+      const trimmedUrl = (url as string).trim();
+      const safeUrl = /^(https?:|mailto:)/i.test(trimmedUrl) ? trimmedUrl : "#";
+      // safeUrl still lands inside a double-quoted HTML attribute — a `"`
+      // in the URL (e.g. http://example.com/" onmouseover="alert(1)) would
+      // otherwise close the attribute early and let arbitrary attributes
+      // get injected into the <a> tag. Found live: sent through with
+      // sanitizeHtml:false (a real, documented opt-out path), the raw
+      // outbound HTML contained the injected onmouseover attribute
+      // verbatim. The default sanitizeHtml:true path already strips
+      // unknown attributes as a backstop, but this must not depend on that
+      // second layer holding.
+      const escapedUrl = safeUrl.replace(/"/g, "&quot;");
+      return `<a href="${escapedUrl}">${text}</a>`;
     });
 
   // Restore protected blocks

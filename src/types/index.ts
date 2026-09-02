@@ -77,6 +77,11 @@ export interface DeliveryQueueRecord {
   sentAt?: string;
   sentMessageId?: string;
   failureReason?: string;
+  // Set only for kind:"scheduled_send" entries created from schedule_draft —
+  // lets send_draft detect and refuse a still-pending scheduled send for the
+  // same draft, instead of firing a second, independent send. See the
+  // schedule_draft/send_draft handlers.
+  sourceDraftId?: string;
 }
 
 export interface SendEmailInput {
