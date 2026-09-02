@@ -1786,10 +1786,28 @@ export class SimpleIMAPService {
   ): Promise<Array<{ folder: string; uid: number; emailId: string }>> {
     const results: Array<{ folder: string; uid: number; emailId: string }> = [];
 
-    const foldersToSearch = folders && folders.length > 0
-      ? folders
-      : await this.resolveSelectableFolderPaths(20);
-    void acrossFolders;
+    // acrossFolders was previously accepted and documented ("Also search
+    // Sent and All Mail.", default false) but silently discarded — every
+    // call unconditionally scanned every selectable folder (up to 20),
+    // regardless of what the caller asked for. On a real account with more
+    // than a handful of folders/labels this reliably exceeds a client's
+    // request timeout (confirmed live: 14 folders -> 28 sequential
+    // Message-ID/References searches -> guaranteed 60s+ timeout on every
+    // move_thread/delete_thread/flag_thread call). Honor it: the narrow
+    // default only searches INBOX and Sent (where a thread's own messages
+    // realistically live), expanding to every selectable folder only when
+    // the caller opts in.
+    let foldersToSearch: string[];
+    if (folders && folders.length > 0) {
+      foldersToSearch = folders;
+    } else if (acrossFolders) {
+      foldersToSearch = await this.resolveSelectableFolderPaths(20);
+    } else {
+      const allFolders = await this.getFolders();
+      foldersToSearch = allFolders
+        .filter((entry) => entry.specialUse === "\\Sent" || entry.path === "INBOX")
+        .map((entry) => entry.path);
+    }
 
     for (const folder of foldersToSearch) {
       try {
@@ -1860,9 +1878,15 @@ export class SimpleIMAPService {
       return { messageId: input.messageId, deleted: matches.length, dryRun: true };
     }
 
+    // No .catch() here — a Trash-resolution failure must propagate as a
+    // hard error rather than silently falling into the permanent-delete
+    // branch below when the caller explicitly asked for permanent:false.
+    // Matches bulkDelete's (correct) handling of the identical situation;
+    // this method previously swallowed the rejection and permanent-deleted
+    // instead, contradicting its own documented "false moves to Trash".
     const trashFolder = input.permanent
       ? undefined
-      : await this.resolveSpecialFolder("\\Trash", ["Trash", "INBOX.Trash"]).catch(() => undefined);
+      : await this.resolveSpecialFolder("\\Trash", ["Trash", "INBOX.Trash"]);
 
     let deleted = 0;
 

@@ -137,6 +137,53 @@ test("emptyFolder rejects INBOX before making IMAP calls", async () => {
   assert.equal(connectCalls, 0);
 });
 
+test("deleteThread(permanent:false) errors instead of silently permanent-deleting when Trash can't be resolved", async () => {
+  // Reproduces a real bug: unlike bulkDelete (identical Trash-resolution
+  // logic, but lets a resolution failure propagate as a hard error) and
+  // trashEmail, deleteThread used to swallow resolveSpecialFolder's
+  // rejection with `.catch(() => undefined)`. The resulting `!trashFolder`
+  // check then silently fell into the *permanent*-delete branch even
+  // though the caller explicitly asked for permanent:false — directly
+  // contradicting the tool's own documented contract ("false moves to
+  // Trash"). A transient IMAP hiccup, permission issue, or unusual mailbox
+  // layout with no Trash-like folder turned a "safe" reversible delete
+  // into an unannounced, unrecoverable one.
+  const service = new SimpleIMAPService(createConfig());
+
+  // A mailbox with a matching message but genuinely no Trash-like folder —
+  // resolveSpecialFolder("\\Trash", ["Trash", "INBOX.Trash"]) throws.
+  service.getFolders = async () => [
+    { path: "INBOX", name: "INBOX", delimiter: "/", flags: [], messages: 1, unseen: 0, uidNext: 2 },
+  ];
+
+  const calls = [];
+  const fakeClient = {
+    usable: true,
+    getMailboxLock: async () => ({ release() {} }),
+    search: async (query) => (query?.header?.["Message-ID"] === "<msg-1@example.com>" ? [42] : []),
+    messageDelete: async (uidSet) => {
+      calls.push({ op: "delete", uidSet });
+      return true;
+    },
+    messageMove: async (uidSet, target) => {
+      calls.push({ op: "move", uidSet, target });
+      return true;
+    },
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  await assert.rejects(
+    () => service.deleteThread({ messageId: "<msg-1@example.com>", permanent: false }),
+    /unable to find target folder/i,
+  );
+  // No delete or move ever happened — the failure surfaced before touching
+  // any message, instead of silently expunging it.
+  assert.deepEqual(calls, []);
+});
+
 test("isLikelyAuthenticationError and isLikelyConnectionError classify errors correctly", () => {
   const authError = new Error("Incorrect login credentials.");
   assert.equal(isLikelyAuthenticationError(authError), true);

@@ -1686,16 +1686,16 @@ const TOOLS = [
   },
   {
     name: "import_email",
-    description: "Import a raw RFC822 message (.eml content) into a folder via IMAP APPEND. Use to restore a backed-up message or migrate mail from another provider's export. Does not send anything — this only inserts a message directly into the mailbox.",
+    description: "Import a raw RFC822 message (.eml content) into a folder via IMAP APPEND. Use to restore a backed-up message or migrate mail from another provider's export. Does not send anything — this only inserts a message directly into the mailbox. Many real .eml exports use a legacy 8-bit charset (ISO-8859-1, Windows-1252, etc.) rather than UTF-8 for their header/body text outside of MIME-encoded parts — passing that content through `raw` corrupts or rejects it. Use `rawBase64` instead for any message not already known to be valid UTF-8.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
       properties: {
-        raw: { type: "string", description: "Full raw RFC822 message source (the .eml file content) as a UTF-8 string." },
+        raw: { type: "string", description: "Full raw RFC822 message source (the .eml file content) as a UTF-8 string. Use rawBase64 instead for non-UTF-8 content. Exactly one of raw/rawBase64 is required." },
+        rawBase64: { type: "string", description: "Full raw RFC822 message source (the .eml file content), base64-encoded, for byte-exact import of non-UTF-8 content. Exactly one of raw/rawBase64 is required." },
         targetFolder: { type: "string", description: "Destination folder. Defaults to INBOX." },
         markAsRead: { type: "boolean", description: "Set the \\Seen flag on import.", default: false },
       },
-      required: ["raw"],
     },
   },
   {
@@ -5701,7 +5701,22 @@ export function createServer(
 
         case "import_email": {
           ensureMailboxWriteAllowed(config.runtime);
-          const raw = Buffer.from(requireString(args, "raw"), "utf8");
+          const rawText = optionalString(args, "raw");
+          const rawBase64 = optionalString(args, "rawBase64");
+          if (!rawText && !rawBase64) {
+            throw new McpError(ErrorCode.InvalidParams, "Provide raw or rawBase64.");
+          }
+          if (rawText && rawBase64) {
+            throw new McpError(ErrorCode.InvalidParams, "Provide raw OR rawBase64, not both.");
+          }
+          // Many real .eml exports use a legacy 8-bit charset (ISO-8859-1,
+          // Windows-1252, etc.) outside of MIME-encoded parts — decoding
+          // those bytes as UTF-8 either mangles them or throws outright.
+          // rawBase64 preserves the message byte-for-byte regardless of
+          // its original encoding.
+          const raw = rawBase64
+            ? Buffer.from(rawBase64, "base64")
+            : Buffer.from(rawText as string, "utf8");
           const result = await withAudit(auditService, name, args, async () =>
             imapService.importEmail({
               raw,

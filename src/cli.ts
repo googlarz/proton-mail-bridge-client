@@ -1764,6 +1764,12 @@ interface ToolOnlyCommand {
   // positional (for content too large/unwieldy to pass as an argv token,
   // e.g. a full .eml source). Not included in `positionals`.
   fileField?: string;
+  // Companion arg name the file's raw bytes are sent as, base64-encoded,
+  // instead of fileField's UTF-8 decode — for tools (like import_email)
+  // that accept a byte-exact alternative. A real .eml file frequently uses
+  // a legacy 8-bit charset (ISO-8859-1, Windows-1252, ...) outside of its
+  // MIME-encoded parts; decoding those bytes as UTF-8 corrupts or throws.
+  fileFieldBase64?: string;
 }
 
 export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
@@ -1825,7 +1831,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "save-attachments", tool: "save_attachments", positionals: ["emailId"], help: "Save all attachments from an email to disk" },
   { command: "save-attachment", tool: "save_attachment", positionals: ["emailId", "attachmentId"], help: "Save one attachment to disk" },
   { command: "export-email", tool: "export_email", positionals: ["emailId"], help: "Save raw .eml source to disk" },
-  { command: "import-email", tool: "import_email", positionals: [], fileField: "raw", help: "Import a .eml message via IMAP APPEND (--file <path.eml>)" },
+  { command: "import-email", tool: "import_email", positionals: [], fileFieldBase64: "rawBase64", help: "Import a .eml message via IMAP APPEND (--file <path.eml>)" },
   { command: "clear-index", tool: "clear_index", positionals: [], help: "Delete the local SQLite mailbox index" },
   { command: "get-audit-logs", tool: "get_audit_logs", positionals: [], help: "Recent write-operation audit log entries" },
 ];
@@ -1841,17 +1847,22 @@ async function runToolOnlyCommand(entry: ToolOnlyCommand, parsed: ParsedCliArgs)
     args[field] = value;
   });
 
-  if (entry.fileField) {
+  if (entry.fileField || entry.fileFieldBase64) {
     const filePath = getStringFlag(parsed.flags, "file");
     if (filePath) {
-      args[entry.fileField] = await readFile(filePath, "utf8");
+      if (entry.fileFieldBase64) {
+        args[entry.fileFieldBase64] = (await readFile(filePath)).toString("base64");
+      } else if (entry.fileField) {
+        args[entry.fileField] = await readFile(filePath, "utf8");
+      }
     }
   }
 
   Object.assign(args, (await parseToolArgs(parsed)) ?? {});
 
-  if (entry.fileField && args[entry.fileField] === undefined) {
-    throw new Error(`${entry.command} requires --file <path>, or ${entry.fileField} via --args.`);
+  const requiredFileField = entry.fileFieldBase64 ?? entry.fileField;
+  if (requiredFileField && args[requiredFileField] === undefined) {
+    throw new Error(`${entry.command} requires --file <path>, or ${requiredFileField} via --args.`);
   }
 
   await withMcpClient(async (client) => {
