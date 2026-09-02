@@ -1651,19 +1651,44 @@ export class SimpleIMAPService {
     if (uids.length > 0) {
       const uidSet = uids.join(",");
       try {
+        let existingUids: Set<number>;
         if (input.permanent || !trashFolder) {
+          // messageDelete's EXPUNGE gives no reliable per-UID signal at
+          // all — its truthy result only means the server accepted the
+          // command, not that any given UID actually matched a message
+          // (same class of bug fixed in deleteEmail). Since this branch is
+          // permanent and irreversible, confirm existence with a search
+          // *before* issuing the delete rather than trying to infer it
+          // after the fact. Found live: bulk_delete with one real id and
+          // one deliberately fake one reported ok:true for both.
+          existingUids = await this.withMailbox(folder, true, async (client) => {
+            const found = await client.search({ uid: uidSet }, { uid: true });
+            return new Set(Array.isArray(found) ? found : []);
+          });
           await this.withMailbox(folder, false, async (client) => {
             const deleted = await client.messageDelete(uidSet, { uid: true });
             if (!deleted) throw new Error(`Server did not delete uid set ${uidSet}`);
           });
         } else {
+          let uidMap: Map<number, number> | undefined;
+          let hasUidPlus = false;
           await this.withMailbox(folder, false, async (client) => {
             const moved = await client.messageMove(uidSet, trashFolder, { uid: true });
             if (moved === false) throw new Error(`Server did not move uid set ${uidSet} to trash`);
+            uidMap = moved.uidMap;
+            hasUidPlus = client.capabilities.has("UIDPLUS");
           });
+          // Same UIDPLUS-gated check as bulkMove — see its comment for why
+          // a server lacking UIDPLUS falls back to trusting the bulk result.
+          existingUids = hasUidPlus && uidMap ? new Set(uidMap.keys()) : new Set(uids);
         }
         for (const uid of uids) {
           const emailId = createEmailId(folder, uid);
+          if (!existingUids.has(uid)) {
+            results.push({ uid, emailId, ok: false, error: `Email not found for uid ${uid}` });
+            failed++;
+            continue;
+          }
           this.messageCache.delete(emailId);
           results.push({ uid, emailId, ok: true });
           succeeded++;
@@ -2369,10 +2394,15 @@ export class SimpleIMAPService {
       query.before = nextDay(dateTo);
     }
 
-    if (input.sizeLarger) {
+    // typeof checks, not truthy checks: sizeSmaller:0 is a legitimate,
+    // meaningful value ("smaller than 0 bytes" — logically always zero
+    // results) that a truthy check silently dropped, turning it into "no
+    // size filter at all" and returning every message instead. Found live:
+    // count_messages with sizeSmaller:0 returned the full unfiltered count.
+    if (typeof input.sizeLarger === "number") {
       query.larger = input.sizeLarger;
     }
-    if (input.sizeSmaller) {
+    if (typeof input.sizeSmaller === "number") {
       query.smaller = input.sizeSmaller;
     }
     if (input.listId || input.messageId) {

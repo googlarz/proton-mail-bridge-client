@@ -4173,6 +4173,17 @@ export function createServer(
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Schedule draft ${String(args.draftId ?? "?")} to send later`);
           ensureSendAllowed(config.runtime);
           const draft = await draftStore.getDraft(requireString(args, "draftId"));
+          // Mirrors send_draft's own pendingScheduled guard, for the reverse
+          // ordering: send_draft already delivered this draft once, and
+          // scheduling it again here would deliver it a second time at
+          // sendAt. Found live: send_draft then schedule_draft on the same
+          // (already-sent) draft queued a second, independent delivery.
+          if (draft.status === "sent") {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              `Draft ${draft.id} was already sent — scheduling it again would deliver it twice. Use create_draft to compose a new message instead.`,
+            );
+          }
           const sendAt = requireString(args, "sendAt");
           const sendAtTime = new Date(sendAt).getTime();
           if (Number.isNaN(sendAtTime)) {

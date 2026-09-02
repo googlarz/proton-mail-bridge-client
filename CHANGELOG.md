@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Fixed
+- **`bulk_delete` had the same silent-success gap as `bulk_move`/`delete_email`.** Both branches — permanent delete and move-to-Trash — unconditionally marked every requested UID `ok:true` regardless of whether the underlying IMAP command actually matched anything. Confirmed live: `bulk_delete` with one real id and one deliberately fake one reported `ok:true` for both, in both the permanent and Trash-move modes. The permanent branch (irreversible) is fixed with a pre-delete existence search rather than trying to infer success after the fact, since `messageDelete`'s EXPUNGE gives no reliable per-UID signal at all; the Trash-move branch reuses the same UIDPLUS-gated `uidMap` check added to `bulk_move`.
+- **`schedule_draft` could queue an already-sent draft for a second, independent delivery.** The reverse ordering of the `schedule_draft` → `send_draft` double-send fixed earlier this release: nothing stopped `send_draft` → `schedule_draft` on the same draft either. Confirmed live: scheduling a draft after it had already been sent queued a real second send. Fixed by checking the draft's own `status` before scheduling.
+- **`count_messages`/`search_emails`'s `sizeSmaller`/`sizeLarger` silently ignored a value of `0`.** `if (input.sizeLarger)` treated `0` — bytes, a real value — as absent, dropping the filter entirely instead of applying it. Confirmed live: `sizeSmaller:0` returned the full unfiltered folder count instead of (semantically) zero results. Fixed to check `typeof === "number"` instead of truthiness. Note for future readers: the underlying `imapflow` library (v1.4.8) has its own truthy-check bug in its `LARGER`/`SMALLER` search-term compiler, so `sizeLarger:0` specifically does not yet produce the semantically "correct" all-messages result even after this fix — that residual gap lives in a third-party dependency, not this codebase, and wasn't patched here.
+
 ## [1.18.6] — 2026-09-02
 
 ### Fixed

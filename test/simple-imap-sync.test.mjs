@@ -532,3 +532,64 @@ test("bulkMove does not falsely fail on a server without UIDPLUS, even though ui
   assert.equal(result.succeeded, 2);
   assert.equal(result.failed, 0);
 });
+
+test("bulkDelete (permanent) reports failure for a UID that doesn't exist instead of marking everything ok", async () => {
+  // Reproduces a real bug: messageDelete's EXPUNGE gives no reliable
+  // per-UID signal at all (same root cause as deleteEmail) — the old code
+  // unconditionally marked every requested UID ok:true. Since this branch
+  // is irreversible, fixed with a pre-delete search confirming which UIDs
+  // actually exist, rather than trying to infer it after the fact. Found
+  // live: bulk_delete(permanent:true) with one real id and one
+  // deliberately fake one reported ok:true for both.
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    search: async () => [10], // only uid 10 actually exists; 999 does not
+    messageDelete: async () => true,
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+  service.resolveUidsForBulkOp = async () => [10, 999];
+
+  const result = await service.bulkDelete({ emailIds: ["INBOX::10", "INBOX::999"], permanent: true });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 1);
+  const ok = result.results.find((r) => r.uid === 10);
+  const bad = result.results.find((r) => r.uid === 999);
+  assert.equal(ok.ok, true);
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /not found/i);
+});
+
+test("bulkDelete (to Trash) reports failure for a UID that doesn't exist (UIDPLUS server)", async () => {
+  // Same bug as bulkMove for its non-permanent (move-to-Trash) branch.
+  const service = new SimpleIMAPService(createConfig());
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    capabilities: new Map([["UIDPLUS", true]]),
+    getMailboxLock: async () => ({ release() {} }),
+    messageMove: async () => ({ path: "INBOX", destination: "Trash", uidMap: new Map([[10, 100]]) }),
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+  service.resolveUidsForBulkOp = async () => [10, 999];
+  service.resolveSpecialFolder = async () => "Trash";
+
+  const result = await service.bulkDelete({ emailIds: ["INBOX::10", "INBOX::999"], permanent: false });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 1);
+  const bad = result.results.find((r) => r.uid === 999);
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /not found/i);
+});
