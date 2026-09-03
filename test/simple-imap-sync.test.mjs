@@ -137,6 +137,57 @@ test("emptyFolder rejects INBOX before making IMAP calls", async () => {
   assert.equal(connectCalls, 0);
 });
 
+test("getEmailById resolves real Proton labels instead of always reporting an empty array", async () => {
+  // Found live: toSummary's `labels` field comes from imapflow's `labels`
+  // fetch option, which maps to Gmail's X-GM-LABELS IMAP extension — Proton
+  // Bridge doesn't implement it, so that field is always empty/undefined
+  // regardless of a message's real Proton labels (applied via
+  // updateMessageLabels's COPY to a Labels/<name> virtual folder). A message
+  // freshly labeled and confirmed present in Labels/mcptest-label still read
+  // back labels:[] via get_email_by_id/read. Fixed by resolving labels with
+  // a bounded Message-ID search across known label folders, run only for
+  // this single-message detail fetch (not the bulk list paths).
+  const service = new SimpleIMAPService(createConfig());
+  service.getFolders = async () => [
+    { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [] },
+    { path: "Labels/mcptest-label", name: "mcptest-label", delimiter: "/", listed: true, subscribed: true, flags: [] },
+    { path: "Labels/other-label", name: "other-label", delimiter: "/", listed: true, subscribed: true, flags: [] },
+  ];
+
+  const raw = Buffer.from(
+    ["From: alice@example.com", "To: owner@example.com", "Subject: Test", "Message-ID: <abc@example.com>", "", "Hello"].join(
+      "\r\n",
+    ),
+  );
+
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    fetchOne: async () => ({
+      uid: 1,
+      seq: 1,
+      flags: new Set(["\\Seen"]),
+      envelope: { messageId: "<abc@example.com>", subject: "Test", from: [], to: [], cc: [], bcc: [], replyTo: [] },
+      bodyStructure: {},
+      source: raw,
+    }),
+    // Only Labels/mcptest-label actually has this Message-ID; other-label doesn't.
+    search: async () => (fakeClient.mailbox.path === "Labels/mcptest-label" ? [7] : []),
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+  service.withMailbox = async (folder, readOnly, action) => {
+    fakeClient.mailbox = { path: folder };
+    return action(fakeClient);
+  };
+
+  const detail = await service.getEmailById("INBOX::1");
+  assert.deepEqual(detail.labels, ["Labels/mcptest-label"]);
+});
+
 test("deleteThread(permanent:false) errors instead of silently permanent-deleting when Trash can't be resolved", async () => {
   // Reproduces a real bug: unlike bulkDelete (identical Trash-resolution
   // logic, but lets a resolution failure propagate as a hard error) and

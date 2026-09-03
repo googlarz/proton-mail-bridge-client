@@ -2565,7 +2565,7 @@ export class SimpleIMAPService {
   }> {
     const { folder, uid } = parseEmailId(emailId);
 
-    return this.withMailbox(folder, true, async (client) => {
+    const { enriched, parsed } = await this.withMailbox(folder, true, async (client) => {
       // NOTE: UIDs can be reused after mailbox recreation (UIDVALIDITY change).
       // assertMailboxUidValidity handles this at the withMailbox level for mutating
       // ops. For read-only fetches, callers should re-sync after a UIDVALIDITY
@@ -2578,16 +2578,67 @@ export class SimpleIMAPService {
       const summary = this.toSummary(folder, message);
       const parsed = await this.parseSource(message.source);
       const enriched = this.enrichSummaryFromParsed(summary, parsed, true);
-      const detail: EmailDetail = {
-        ...enriched,
-        text: parsed.text || stripHtmlToText(typeof parsed.html === "string" ? parsed.html : undefined),
-        html: parsed.html,
-        headers: this.mapHeaders(parsed),
-      };
-
-      this.messageCache.set(detail.id, detail);
-      return { detail, parsed };
+      return { enriched, parsed };
     });
+
+    // toSummary's `labels` comes from imapflow's `labels` fetch field, which
+    // maps to Gmail's X-GM-LABELS extension — Proton Bridge doesn't
+    // implement it, so that field is always empty here regardless of the
+    // message's real Proton labels (applied via updateMessageLabels's COPY
+    // to a Labels/<name> virtual folder). Found live: a message freshly
+    // labeled and confirmed present in Labels/mcptest-label still read back
+    // labels:[]. Resolve them the same way updateMessageLabels's own
+    // label-removal path already does — a bounded Message-ID search across
+    // known label folders — for this single-message detail fetch only;
+    // doing this per-message in a bulk list (getEmails/searchEmails) would
+    // multiply IMAP round-trips by folder count and isn't worth that cost.
+    // Must run AFTER the mailbox lock above is released: withMailbox holds a
+    // single-client exclusive lock per call, and resolveMessageLabels needs
+    // to select other folders on that same client — calling it from inside
+    // the outer withMailbox's callback deadlocked (found immediately, live,
+    // the very first time this ran: `read` never returned).
+    const resolvedLabels = await this.resolveMessageLabels(enriched.messageId, folder);
+    const detail: EmailDetail = {
+      ...enriched,
+      labels: resolvedLabels.length > 0 ? resolvedLabels : enriched.labels,
+      text: parsed.text || stripHtmlToText(typeof parsed.html === "string" ? parsed.html : undefined),
+      html: parsed.html,
+      headers: this.mapHeaders(parsed),
+    };
+
+    this.messageCache.set(detail.id, detail);
+    return { detail, parsed };
+  }
+
+  private async resolveMessageLabels(messageId: string | undefined, ownFolder: string): Promise<string[]> {
+    if (!messageId) {
+      return [];
+    }
+
+    const folders = await this.getFolders();
+    const labelFolders = folders
+      .map((entry) => entry.path)
+      .filter((path) => path.startsWith("Labels/") && path !== ownFolder)
+      // Same bound as resolveSelectableFolderPaths — caps worst-case IMAP
+      // round-trips for accounts with many labels.
+      .slice(0, 20);
+
+    const labels: string[] = [];
+    for (const labelFolder of labelFolders) {
+      try {
+        const found = await this.withMailbox(labelFolder, true, async (client) => {
+          const uids = await client.search({ header: { "Message-ID": messageId } }, { uid: true });
+          return Array.isArray(uids) && uids.length > 0;
+        });
+        if (found) {
+          labels.push(labelFolder);
+        }
+      } catch {
+        // Best-effort — a transient SELECT/SEARCH failure on one label
+        // folder shouldn't fail the whole read.
+      }
+    }
+    return labels;
   }
 
   private readHeaderValue(parsed: ParsedMail | undefined, headerName: string): string | undefined {
