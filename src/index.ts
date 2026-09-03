@@ -50,6 +50,7 @@ import {
   normalizeBoolean,
   normalizeLimit,
   normalizeJsonValue,
+  parseEmailId,
   parseEmails,
   projectFields,
   renderMarkdown,
@@ -1862,7 +1863,7 @@ function sanitizeAuditValue(value: unknown): unknown {
   return value;
 }
 
-async function withAudit<T>(
+export async function withAudit<T>(
   auditService: AuditService,
   tool: string,
   input: Record<string, unknown>,
@@ -2747,12 +2748,22 @@ function getBulkNotFoundEmailIds(emailIds: string[] | undefined, folder: string)
   }
 
   return emailIds.filter((emailId) => {
-    const separator = emailId.lastIndexOf("::");
-    if (separator <= 0 || separator === emailId.length - 2) {
+    // Found live: this compared the emailId's folder segment against
+    // `folder` as raw, still-percent-encoded text — createEmailId encodes
+    // it (Folders/MCP-Snoozed -> Folders%2FMCP-Snoozed) but `folder` here
+    // is the plain path callers actually pass. Every real emailId in any
+    // folder with a "/" or other encoded character (any Folders/* or
+    // Labels/* path, not just top-level INBOX/Archive/etc.) never matched,
+    // so bulk_move/bulk_delete/bulk_update_flags/bulk_update_labels
+    // reported genuinely valid ids as notFound. parseEmailId already does
+    // the matching decodeURIComponent correctly — reuse it instead of
+    // hand-rolling the same parse a second, inconsistent way.
+    try {
+      const parsed = parseEmailId(emailId);
+      return parsed.folder !== folder;
+    } catch {
       return true;
     }
-    const uid = Number.parseInt(emailId.slice(separator + 2), 10);
-    return emailId.slice(0, separator) !== folder || Number.isNaN(uid);
   });
 }
 

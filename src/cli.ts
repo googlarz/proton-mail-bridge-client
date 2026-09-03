@@ -6,11 +6,11 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { buildConfigFromEnv, createServer } from "./index.js";
+import { buildConfigFromEnv, createServer, withAudit } from "./index.js";
 import { isMainModule } from "./is-main.js";
 import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import type { EmailAddress, EmailDetail, EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
-import { ensureMailboxWriteAllowed, ensureSendAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
+import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, ensureSendAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
 import { isValidEmail, lowerCaseAddress, parseEmails, ensureValidEmails } from "./utils/helpers.js";
 import { getClaudeDesktopInstallStatus } from "./scripts/check-claude-desktop.js";
 import { installClaudeDesktopConfig } from "./scripts/install-claude-desktop.js";
@@ -895,9 +895,16 @@ async function runMove(parsed: ParsedCliArgs): Promise<void> {
   if (!emailId) throw new Error("move requires an emailId");
   if (!targetFolder) throw new Error("move requires a target folder as a second argument or --folder");
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
+  await withServices(async ({ config, imapService, auditService }) => {
     ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.moveEmail(emailId, targetFolder);
+    // Found live: every write command in this file called the service
+    // directly, so none of them ever produced an audit.log entry — unlike
+    // the identical action through an MCP tool call, which withAudit always
+    // records. Confirmed live: a real CLI `star` left audit.log's line
+    // count unchanged. Mirrored across every write command below.
+    const result = await withAudit(auditService, "move_email", { emailId, targetFolder }, () =>
+      imapService.moveEmail(emailId, targetFolder),
+    );
     process.stdout.write(wantJson ? json(result) : `Moved ${emailId} → ${result.targetFolder}\n`);
   });
 }
@@ -906,9 +913,15 @@ async function runArchive(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("archive requires an emailId");
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.archiveEmail(emailId);
+  await withServices(async ({ config, imapService, auditService }) => {
+    // Found live: this called the service directly, bypassing the MCP
+    // tool layer's ensureEmailActionAllowed entirely — with
+    // PROTONMAIL_ALLOWED_ACTIONS restricting which actions are permitted,
+    // `tool trash_email` correctly refused a disallowed action, but the
+    // matching CLI shortcuts (archive/trash/restore/mark-read/star) all
+    // performed it anyway. Same fix mirrored across all five below.
+    ensureEmailActionAllowed(config.runtime, "archive");
+    const result = await withAudit(auditService, "archive_email", { emailId }, () => imapService.archiveEmail(emailId));
     process.stdout.write(wantJson ? json(result) : `Archived ${emailId} → ${result.targetFolder}\n`);
   });
 }
@@ -917,9 +930,9 @@ async function runTrash(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("trash requires an emailId");
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.trashEmail(emailId);
+  await withServices(async ({ config, imapService, auditService }) => {
+    ensureEmailActionAllowed(config.runtime, "trash");
+    const result = await withAudit(auditService, "trash_email", { emailId }, () => imapService.trashEmail(emailId));
     process.stdout.write(wantJson ? json(result) : `Trashed ${emailId} → ${result.targetFolder}\n`);
   });
 }
@@ -928,9 +941,12 @@ async function runRestore(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("restore requires an emailId");
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.restoreEmail(emailId, getStringFlag(parsed.flags, "folder"));
+  await withServices(async ({ config, imapService, auditService }) => {
+    ensureEmailActionAllowed(config.runtime, "restore");
+    const targetFolder = getStringFlag(parsed.flags, "folder");
+    const result = await withAudit(auditService, "restore_email", { emailId, targetFolder }, () =>
+      imapService.restoreEmail(emailId, targetFolder),
+    );
     process.stdout.write(wantJson ? json(result) : `Restored ${emailId} → ${result.targetFolder}\n`);
   });
 }
@@ -940,9 +956,11 @@ async function runMarkRead(parsed: ParsedCliArgs): Promise<void> {
   if (!emailId) throw new Error("mark-read requires an emailId");
   const isRead = !isTruthyFlag(parsed.flags.unread);
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.markEmailRead(emailId, isRead);
+  await withServices(async ({ config, imapService, auditService }) => {
+    ensureEmailActionAllowed(config.runtime, isRead ? "mark_read" : "mark_unread");
+    const result = await withAudit(auditService, "mark_email_read", { emailId, isRead }, () =>
+      imapService.markEmailRead(emailId, isRead),
+    );
     process.stdout.write(wantJson ? json(result) : `Marked ${emailId} as ${result.isRead ? "read" : "unread"}\n`);
   });
 }
@@ -952,9 +970,11 @@ async function runStar(parsed: ParsedCliArgs): Promise<void> {
   if (!emailId) throw new Error("star requires an emailId");
   const isStarred = !isTruthyFlag(parsed.flags.unstar);
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.starEmail(emailId, isStarred);
+  await withServices(async ({ config, imapService, auditService }) => {
+    ensureEmailActionAllowed(config.runtime, isStarred ? "star" : "unstar");
+    const result = await withAudit(auditService, "star_email", { emailId, isStarred }, () =>
+      imapService.starEmail(emailId, isStarred),
+    );
     process.stdout.write(wantJson ? json(result) : `${result.isStarred ? "Starred" : "Unstarred"} ${emailId}\n`);
   });
 }
@@ -963,9 +983,15 @@ async function runDelete(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("delete requires an emailId");
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
+  await withServices(async ({ config, imapService, auditService }) => {
     ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.deleteEmail(emailId);
+    // Found live: this called the service directly, bypassing the MCP
+    // tool layer's ensureDestructiveConfirmed entirely — with
+    // PROTONMAIL_CONFIRM_DESTRUCTIVE=true, `tool delete_email` correctly
+    // refused without confirmed:true, but this shortcut permanently
+    // deleted the message anyway, no confirmation asked or possible.
+    ensureDestructiveConfirmed(config.runtime, isTruthyFlag(parsed.flags.confirmed), `Permanently delete ${emailId} (cannot be recovered)`);
+    const result = await withAudit(auditService, "delete_email", { emailId }, () => imapService.deleteEmail(emailId));
     process.stdout.write(wantJson ? json(result) : `Deleted ${emailId}\n`);
   });
 }
@@ -1076,19 +1102,21 @@ async function runReply(parsed: ParsedCliArgs): Promise<void> {
   if (!body) throw new Error("reply requires --body or body piped via stdin");
 
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, smtpService, imapService }) => {
+  await withServices(async ({ config, smtpService, imapService, auditService }) => {
     ensureSendAllowed(config.runtime);
     const detail = await imapService.getEmailById(emailId);
     const recipients = getReplyRecipients(detail, config.smtp.username, replyAll);
     if (recipients.to.length === 0) throw new Error("Unable to infer reply recipient.");
-    const result = await smtpService.sendEmail({
-      to: recipients.to,
-      cc: recipients.cc,
-      subject: prefixedSubject(detail.subject, "Re:"),
-      body: buildReplyText(detail, body!),
-      inReplyTo: detail.messageId,
-      references: detail.messageId ? [detail.messageId] : undefined,
-    });
+    const result = await withAudit(auditService, "reply_to_email", { emailId, replyAll }, () =>
+      smtpService.sendEmail({
+        to: recipients.to,
+        cc: recipients.cc,
+        subject: prefixedSubject(detail.subject, "Re:"),
+        body: buildReplyText(detail, body!),
+        inReplyTo: detail.messageId,
+        references: detail.messageId ? [detail.messageId] : undefined,
+      }),
+    );
     process.stdout.write(wantJson ? json({ repliedTo: emailId, to: recipients.to, messageId: result.messageId }) : `Reply sent to ${recipients.to.join(", ")}\n`);
   });
 }
@@ -1108,15 +1136,17 @@ async function runForward(parsed: ParsedCliArgs): Promise<void> {
   }
 
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, smtpService, imapService }) => {
+  await withServices(async ({ config, smtpService, imapService, auditService }) => {
     ensureSendAllowed(config.runtime);
     ensureValidEmails(to, "to");
     const detail = await imapService.getEmailById(emailId);
-    const result = await smtpService.sendEmail({
-      to,
-      subject: prefixedSubject(detail.subject, "Fwd:"),
-      body: buildForwardText(detail, body),
-    });
+    const result = await withAudit(auditService, "forward_email", { emailId, to }, () =>
+      smtpService.sendEmail({
+        to,
+        subject: prefixedSubject(detail.subject, "Fwd:"),
+        body: buildForwardText(detail, body),
+      }),
+    );
     process.stdout.write(wantJson ? json({ forwardedMessage: emailId, to, messageId: result.messageId }) : `Forwarded to ${to.join(", ")}\n`);
   });
 }
@@ -1125,9 +1155,9 @@ async function runCreateFolder(parsed: ParsedCliArgs): Promise<void> {
   const path = parsed.positionals[0] || getStringFlag(parsed.flags, "path");
   if (!path) throw new Error("create-folder requires a path argument");
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
+  await withServices(async ({ config, imapService, auditService }) => {
     ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.createFolder(path);
+    const result = await withAudit(auditService, "create_folder", { path }, () => imapService.createFolder(path));
     process.stdout.write(wantJson ? json(result) : `${result.created ? "Created" : "Already existed"}: ${result.path}\n`);
   });
 }
@@ -1138,9 +1168,9 @@ async function runRenameFolder(parsed: ParsedCliArgs): Promise<void> {
   if (!path) throw new Error("rename-folder requires a source path argument");
   if (!newPath) throw new Error("rename-folder requires a target path as second argument or --to");
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
+  await withServices(async ({ config, imapService, auditService }) => {
     ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.renameFolder(path, newPath);
+    const result = await withAudit(auditService, "rename_folder", { path, newPath }, () => imapService.renameFolder(path, newPath));
     process.stdout.write(wantJson ? json(result) : `Renamed: ${result.path} → ${result.newPath}\n`);
   });
 }
@@ -1149,9 +1179,11 @@ async function runDeleteFolder(parsed: ParsedCliArgs): Promise<void> {
   const path = parsed.positionals[0] || getStringFlag(parsed.flags, "path");
   if (!path) throw new Error("delete-folder requires a path argument");
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService }) => {
+  await withServices(async ({ config, imapService, auditService }) => {
     ensureMailboxWriteAllowed(config.runtime);
-    const result = await imapService.deleteFolder(path);
+    // Same bypass as runDelete's identical gap — see its comment.
+    ensureDestructiveConfirmed(config.runtime, isTruthyFlag(parsed.flags.confirmed), `Permanently delete folder and all messages in it: ${path}`);
+    const result = await withAudit(auditService, "delete_folder", { path }, () => imapService.deleteFolder(path));
     process.stdout.write(wantJson ? json(result) : `Deleted folder: ${result.path}\n`);
   });
 }
