@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [1.18.10] — 2026-09-03
+
+### Fixed
+- **`SnoozeService.wake()` held the new cross-process file lock (added in 1.18.9) for the duration of a real network IMAP move.** This codebase has already documented similar operations taking 60s+ under real conditions elsewhere — well past the lock's 30s stale-timeout — risking the lock being stolen mid-move by another process and silently reintroducing the exact lost-update race it exists to prevent. Restructured to a two-phase claim (mirroring `DeliveryQueueService.checkDue()`'s existing pattern): lock briefly to flip `pending` -> `waking`, move OUTSIDE any lock, lock briefly again to record the outcome. Live-verified against a genuine race — an explicit `cancel_snooze` racing the background 15s wake timer on the same id — exactly one wake happened, correctly, with an accurate reported UID. Added a `"waking"` status and a crash-recovery pass at `start()`, mirroring `DeliveryQueueService`'s existing `recoverInterruptedSends()`.
+- **`file-lock.ts`'s `release()` unlinked the lock file unconditionally, with no ownership check.** If a legitimately slow holder's lock got stolen as stale by another process, the slow holder finishing later would delete *that* process's active lock — letting a third caller acquire while the second still believed it held exclusivity. Fixed with a per-acquisition token that `release()` must match before unlinking. New regression test proves this: it fails against the old unconditional-unlink code (a third caller starts while the second's hold is still genuinely in progress) and passes against the fix.
+
 ## [1.18.9] — 2026-09-03
 
 ### Fixed
