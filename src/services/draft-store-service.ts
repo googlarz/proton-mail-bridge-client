@@ -9,6 +9,7 @@ import type {
   DraftSendResult,
   ProtonMailConfig,
 } from "../types/index.js";
+import { withFileLock } from "../utils/file-lock.js";
 import { extractDomain } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
 
@@ -29,7 +30,6 @@ function createEmptyStore(): DraftStoreFile {
 export class DraftStoreService {
   private readonly draftPath: string;
   private _lock: Promise<void> = Promise.resolve();
-  private loadedStore?: DraftStoreFile;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -265,7 +265,6 @@ export class DraftStoreService {
 
   async clear(): Promise<{ path: string; removed: boolean }> {
     return this.withLock(async () => {
-      this.loadedStore = undefined;
       try {
         await rm(this.draftPath);
         return { path: this.draftPath, removed: true };
@@ -284,8 +283,15 @@ export class DraftStoreService {
     });
   }
 
+  // In-process chain (cheap, no I/O) still serializes calls within this
+  // process; withFileLock additionally serializes against every OTHER
+  // process sharing this dataDir — see file-lock.ts for why that's a real,
+  // everyday scenario here, not just a testing artifact. This closes GAP-16
+  // (below), which used to warn that concurrent server instances weren't
+  // supported at all.
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this._lock.then(fn, fn);
+    const locked = () => withFileLock(this.draftPath, fn);
+    const run = this._lock.then(locked, locked);
     this._lock = run.then(
       () => undefined,
       () => undefined,
@@ -297,16 +303,11 @@ export class DraftStoreService {
     return this.withLock(() => this.loadUnlocked());
   }
 
+  // Always reads from disk (no in-memory cache) — same reasoning as
+  // DeliveryQueueService.loadUnlocked: a second process sharing this
+  // dataDir must never be invisible to this instance, and its write must
+  // never be silently clobbered by a stale in-memory copy on the next save().
   private async loadUnlocked(): Promise<DraftStoreFile> {
-    if (this.loadedStore) {
-      return this.loadedStore;
-    }
-
-    // GAP-16: Concurrent server instances are NOT supported. This service uses an
-    // in-process promise chain (_lock) for serialisation, which provides no protection
-    // against a second server process operating on the same drafts.json simultaneously.
-    // Running multiple instances against the same dataDir will cause lost updates.
-
     // GAP-09: Clean up orphaned .tmp files left by a previous crashed write.
     await this.cleanOrphanedTempFiles();
 
@@ -316,12 +317,11 @@ export class DraftStoreService {
       const drafts = Object.fromEntries(
         Object.entries(parsed.drafts ?? {}).map(([id, draft]) => [id, this.normalizeDraft(draft)]),
       );
-      this.loadedStore = {
+      return {
         ...createEmptyStore(),
         ...parsed,
         drafts,
       };
-      return this.loadedStore;
     } catch (error) {
       if (
         error &&
@@ -329,9 +329,7 @@ export class DraftStoreService {
         "code" in error &&
         (error as { code?: string }).code === "ENOENT"
       ) {
-        const empty = createEmptyStore();
-        this.loadedStore = empty;
-        return empty;
+        return createEmptyStore();
       }
 
       // GAP-09: JSON parse failure means the file is corrupted. Back it up so the
@@ -352,9 +350,7 @@ export class DraftStoreService {
         );
       }
 
-      const empty = createEmptyStore();
-      this.loadedStore = empty;
-      return empty;
+      return createEmptyStore();
     }
   }
 
@@ -378,17 +374,8 @@ export class DraftStoreService {
   private async save(store: DraftStoreFile): Promise<void> {
     await mkdir(dirname(this.draftPath), { recursive: true });
     const tempPath = `${this.draftPath}.tmp`;
-    try {
-      await writeFile(tempPath, JSON.stringify(store, null, 2), "utf8");
-      await rename(tempPath, this.draftPath);
-    } catch (error) {
-      // #17: If the write fails (disk full, permission error, etc.), the in-memory
-      // loadedStore may already reflect mutations from the caller. Reset it so the
-      // next operation re-reads from disk and doesn't operate on stale state.
-      this.loadedStore = undefined;
-      throw error;
-    }
-    this.loadedStore = store;
+    await writeFile(tempPath, JSON.stringify(store, null, 2), "utf8");
+    await rename(tempPath, this.draftPath);
   }
 
   private normalizeDraft(draft: DraftRecord): DraftRecord {

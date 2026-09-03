@@ -48,6 +48,38 @@ function createConfig(dataDir) {
   };
 }
 
+test("two separate DraftStoreService instances against the same dataDir don't lose each other's writes", async () => {
+  // Found live: Claude Desktop can and does run more than one MCP server
+  // process against the same account (confirmed live: two server processes,
+  // both children of one Claude.app, running concurrently). This service
+  // additionally cached its store in memory (this.loadedStore) — even with
+  // a cross-process lock, a second process's write was invisible to a
+  // process still holding a stale cached copy from before the lock was
+  // ever taken, and the next save() from the stale side would have
+  // silently clobbered it. Removed the cache (matching the other three
+  // JSON stores' "always read from disk" pattern) alongside adding the
+  // lock — this test uses two separate instances (standing in for two
+  // separate processes) so it would have caught either gap on its own.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-drafts-race-"));
+  try {
+    const a = new DraftStoreService(createConfig(dataDir));
+    const b = new DraftStoreService(createConfig(dataDir));
+
+    await Promise.all([
+      a.createDraft({ subject: "from-a", body: "ba", to: ["a@example.com"] }),
+      b.createDraft({ subject: "from-b", body: "bb", to: ["b@example.com"] }),
+    ]);
+
+    const drafts = await a.listDrafts();
+    assert.deepEqual(
+      drafts.map((d) => d.subject).sort(),
+      ["from-a", "from-b"],
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("DraftStoreService serializes concurrent draft creation", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "protonmail-drafts-"));
   const store = new DraftStoreService(createConfig(dataDir));

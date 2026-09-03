@@ -3,6 +3,7 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ProtonMailConfig, SnoozeRecord } from "../types/index.js";
+import { withFileLock } from "../utils/file-lock.js";
 import { parseEmailId } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { SimpleIMAPService } from "./simple-imap-service.js";
@@ -175,8 +176,18 @@ export class SnoozeService {
     }
   }
 
+  // In-process chain (cheap, no I/O) still serializes calls within this
+  // process; withFileLock additionally serializes against every OTHER
+  // process sharing this dataDir — a real, everyday scenario, not just a
+  // testing artifact: Claude Desktop can and does run more than one MCP
+  // server instance against the same account (confirmed live: two server
+  // processes, both children of one Claude.app, running concurrently).
+  // Without this, two processes racing a load-modify-save cycle silently
+  // lost one side's write — confirmed live via a snooze wake racing a
+  // manual cancel on the same id.
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this._lock.then(fn, fn);
+    const locked = () => withFileLock(this.storePath, fn);
+    const run = this._lock.then(locked, locked);
     this._lock = run.then(
       () => undefined,
       () => undefined,

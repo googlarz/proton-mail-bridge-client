@@ -110,6 +110,35 @@ test("delete removes a template and list no longer includes it", async () => {
   }
 });
 
+test("two separate instances against the same dataDir don't lose each other's concurrent writes", async () => {
+  // Found live: Claude Desktop can and does run more than one MCP server
+  // process against the same account (confirmed live: two server processes,
+  // both children of one Claude.app, running concurrently, sharing one
+  // dataDir). Each service's in-process lock only serializes calls within
+  // its own process — two separate instances (standing in here for two
+  // separate processes) racing create() used to silently lose one side's
+  // write: both load the same pre-write state, both save, last write wins.
+  // Fixed with withFileLock providing real cross-process serialization.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-templates-race-test-"));
+  try {
+    const a = new TemplateService(createConfig(dataDir));
+    const b = new TemplateService(createConfig(dataDir));
+
+    await Promise.all([
+      a.create({ name: "from-a", subject: "sa", body: "ba" }),
+      b.create({ name: "from-b", subject: "sb", body: "bb" }),
+    ]);
+
+    const list = await a.list();
+    assert.deepEqual(
+      list.map((t) => t.name).sort(),
+      ["from-a", "from-b"],
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("a template store reopened against the same dataDir sees items persisted by a prior instance", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "protonmail-templates-test-"));
   try {

@@ -3,6 +3,7 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DeliveryQueueKind, DeliveryQueueRecord, ProtonMailConfig, SendEmailInput } from "../types/index.js";
+import { withFileLock } from "../utils/file-lock.js";
 import { ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { SMTPService } from "./smtp-service.js";
@@ -215,8 +216,13 @@ export class DeliveryQueueService {
     });
   }
 
+  // In-process chain (cheap, no I/O) still serializes calls within this
+  // process; withFileLock additionally serializes against every OTHER
+  // process sharing this dataDir — see file-lock.ts for why that's a real,
+  // everyday scenario here, not just a testing artifact.
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this._lock.then(fn, fn);
+    const locked = () => withFileLock(this.queuePath, fn);
+    const run = this._lock.then(locked, locked);
     this._lock = run.then(
       () => undefined,
       () => undefined,
