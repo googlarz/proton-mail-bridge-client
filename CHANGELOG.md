@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [1.18.8] — 2026-09-03
+
+### Fixed
+- **`send_draft` sent a draft twice if called twice.** Nothing checked `draft.status` before sending, so calling it a second time on an already-sent draft sent it again. Confirmed live: two independent SMTP transactions for identical content. Mirrors the `schedule_draft` guard added last release, for the direct double-send case that one didn't cover.
+- **`search_indexed_emails`'s `from`/`to`/`messageId` filters missed matches older than the SQL candidate window.** They were applied correctly *after* fetching candidates, but the SQL scan that builds the candidate set never narrowed by them — only the newest 500 (or `limit*10`) rows were considered at all, so a genuine match older than that window was silently dropped before the correct filter ever saw it. Added SQL pre-filters mirroring the existing `senderDomain` pattern. Regression test reproduces it with 500 rows of noise plus one true match outside the window (the real account only has 229 messages, too few to trigger this live).
+- **`send_draft`/`schedule_draft`'s `RESTRICT_OUTBOUND_TO_SELF` check used the wrong identity.** It compared recipients against `config.imap.username` instead of `config.smtp.username` — the only 2 of ~9 call sites doing this. When `PROTONMAIL_IMAP_USERNAME` differs from the account's actual send identity, this rejected mail to the real self as "external" (confirmed live) and, the other direction, would have let mail through to an IMAP-only alias as if it were self.
+- **The CLI's `draft-send` shortcut ignored `--args` entirely**, so `draft-send <id> --args '{"dryRun":true}'` silently sent for real instead of previewing — found live while verifying the fix above, when it caused one unintended (harmless, self-addressed) real send. Merged `parseToolArgs` like every table-driven 1:1 command already does.
+- **The CLI's `delete`/`delete-folder` commands bypassed `PROTONMAIL_CONFIRM_DESTRUCTIVE` entirely.** They call the service layer directly instead of going through the MCP tool's `ensureDestructiveConfirmed` check. Confirmed live: with the safety flag on, `tool delete_email` correctly refused without `confirmed:true`; the `delete` CLI shortcut permanently deleted anyway.
+- **The CLI's `archive`/`trash`/`restore`/`mark-read`/`star` commands bypassed `PROTONMAIL_ALLOWED_ACTIONS`** the same way. Confirmed live: restricting to `archive` only, the MCP tool refused `trash_email`, but `trash` via the CLI still trashed the message.
+- **Every CLI write command left zero trace in `audit.log`.** `move`/`archive`/`trash`/`restore`/`mark-read`/`star`/`delete`/`reply`/`forward`/`create-folder`/`rename-folder`/`delete-folder` all called the service layer directly, bypassing the `withAudit` wrapper every MCP tool call goes through. Confirmed live: a real CLI `star` left `audit.log`'s line count unchanged. Exported `withAudit` from the server module and wired it into all twelve commands.
+- **`getBulkNotFoundEmailIds` compared a percent-encoded folder against a plain one.** `createEmailId` encodes `/` in folder paths (`Folders/MCP-Snoozed` → `Folders%2FMCP-Snoozed`), but this notFound check compared that encoded prefix against the plain, unencoded folder argument callers actually pass — so every genuinely valid emailId in any folder with an encoded character (any `Folders/*` or `Labels/*` path, not just top-level `INBOX`/`Archive`/etc.) was reported `notFound` by `bulk_move`/`bulk_delete`/`bulk_update_flags`/`bulk_update_labels`. Confirmed live in `Folders/MCP-Snoozed`. Fixed by reusing the existing `parseEmailId` decoder instead of a second, inconsistent hand-rolled parse.
+
 ## [1.18.7] — 2026-09-02
 
 ### Fixed
