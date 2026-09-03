@@ -4060,6 +4060,16 @@ export function createServer(
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Send draft ${String(args.draftId ?? "?")}`);
           ensureSendAllowed(config.runtime);
           const draft = await draftStore.getDraft(requireString(args, "draftId"));
+          // Found live: calling send_draft twice on the same draft sent it
+          // twice — nothing here checked whether it was already marked
+          // "sent" before sending again. Refuse; create_draft for a new
+          // message instead.
+          if (draft.status === "sent") {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              `Draft ${draft.id} was already sent (at ${draft.sentAt ?? "an earlier time"}) — sending it again would deliver it twice. Use create_draft to compose a new message instead.`,
+            );
+          }
           // Found live: schedule_draft followed by send_draft on the same
           // draft sent it twice — two independent, successful SMTP
           // transactions, since nothing here knew about the still-pending
@@ -4082,7 +4092,15 @@ export function createServer(
           }
           if (config.runtime.restrictOutboundToSelf) {
             const allRecipients = [...draft.to, ...draft.cc, ...draft.bcc];
-            const selfAddr = config.imap.username.toLowerCase();
+            // Found live: with PROTONMAIL_IMAP_USERNAME set to a different
+            // address than the account's send identity, this compared
+            // recipients against the IMAP login instead — rejecting mail to
+            // the real self as "external" (and, the other way round, would
+            // let mail to that IMAP-only address through as if it were
+            // self). Every other RESTRICT_OUTBOUND_TO_SELF check in this
+            // file already uses smtp.username, since that's the identity
+            // mail actually sends as; this was the one inconsistent copy.
+            const selfAddr = config.smtp.username.toLowerCase();
             const external = allRecipients.filter(r => r.toLowerCase() !== selfAddr);
             if (external.length > 0) throw new McpError(ErrorCode.InvalidParams, "PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF is enabled. All recipients must be the authenticated user.");
           }
@@ -4200,7 +4218,8 @@ export function createServer(
           }
           if (config.runtime.restrictOutboundToSelf) {
             const allRecipients = [...draft.to, ...draft.cc, ...draft.bcc];
-            const selfAddr = config.imap.username.toLowerCase();
+            // Same fix as send_draft's identical check — see its comment.
+            const selfAddr = config.smtp.username.toLowerCase();
             const external = allRecipients.filter((r) => r.toLowerCase() !== selfAddr);
             if (external.length > 0) throw new McpError(ErrorCode.InvalidParams, "PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF is enabled. All recipients must be the authenticated user.");
           }

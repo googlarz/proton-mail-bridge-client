@@ -1643,6 +1643,26 @@ export class LocalIndexService {
       conditions.push(`LOWER(from_json) LIKE ? ESCAPE '\\'`);
       params.push(`%${escapeLike(filters.senderDomain.toLowerCase())}%`);
     }
+    // from/to/messageId were accepted by search_indexed_emails but never
+    // narrowed the SQL candidate scan — only applied afterward by
+    // matchesIndexedSearch, against whatever the plain date-ordered LIMIT
+    // happened to fetch. On a mailbox bigger than that candidate window
+    // (500, or limit*10), a from/to/messageId search silently misses every
+    // genuine match older than the window instead of finding it. Mirror the
+    // existing senderDomain LIKE pattern (a safe superset pre-filter).
+    if (filters.from) {
+      conditions.push(`LOWER(from_json) LIKE ? ESCAPE '\\'`);
+      params.push(`%${escapeLike(filters.from.toLowerCase())}%`);
+    }
+    if (filters.to) {
+      conditions.push(`(LOWER(to_json) LIKE ? ESCAPE '\\' OR LOWER(cc_json) LIKE ? ESCAPE '\\' OR LOWER(bcc_json) LIKE ? ESCAPE '\\')`);
+      const toNeedle = `%${escapeLike(filters.to.toLowerCase())}%`;
+      params.push(toNeedle, toNeedle, toNeedle);
+    }
+    if (filters.messageId) {
+      conditions.push(`message_id = ?`);
+      params.push(filters.messageId);
+    }
     if (filters.threadId) {
       conditions.push(`thread_id = ?`);
       params.push(filters.threadId);

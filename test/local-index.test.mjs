@@ -421,6 +421,63 @@ test("search_indexed_emails' mailboxRole filter actually filters by folder, not 
   }
 });
 
+test("search_indexed_emails' from filter finds matches older than the SQL candidate window", async () => {
+  // Found via code inspection, confirmed with this test: loadCandidateEmails
+  // only pre-filtered the SQL scan by folder/isRead/isStarred/hasAttachment/
+  // subject/senderDomain/threadId/dateFrom/dateTo — from/to/messageId were
+  // accepted by the tool schema and correctly checked afterward by
+  // matchesIndexedSearch, but never applied in SQL. The SQL scan takes only
+  // the newest `limitHint` (500, or limit*10) rows by date before that JS
+  // filter ever runs, so a from/to/messageId match older than that window
+  // was silently dropped — it never made it into the candidate set to be
+  // filtered in the first place. Reproduced here with 500 unrelated recent
+  // messages plus one true match older than all of them.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-candidate-window-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    const emails = [];
+    for (let i = 0; i < 500; i += 1) {
+      emails.push({
+        id: `INBOX::${1000 + i}`, folder: "INBOX", uid: 1000 + i, seq: 1000 + i,
+        messageId: `<noise-${i}@example.com>`, subject: "Noise",
+        from: [{ address: "noise@example.com" }], to: [{ address: "owner@example.com" }],
+        cc: [], bcc: [], replyTo: [],
+        date: `2026-08-${String(2 + (i % 27)).padStart(2, "0")}T10:00:00.000Z`,
+        internalDate: `2026-08-${String(2 + (i % 27)).padStart(2, "0")}T10:00:00.000Z`,
+        isRead: false, isStarred: false, flags: [],
+        preview: "Noise", hasAttachments: false, attachments: [], labels: [],
+      });
+    }
+    emails.push({
+      id: "INBOX::1", folder: "INBOX", uid: 1, seq: 1,
+      messageId: "<real-match@example.com>", subject: "The one I'm looking for",
+      from: [{ address: "target@example.com" }], to: [{ address: "owner@example.com" }],
+      cc: [], bcc: [], replyTo: [],
+      date: "2020-01-01T00:00:00.000Z", internalDate: "2020-01-01T00:00:00.000Z",
+      isRead: false, isStarred: false, flags: [],
+      preview: "Old but relevant", hasAttachments: false, attachments: [], labels: [],
+    });
+
+    await service.recordSnapshot({
+      syncedAt: "2026-08-29T00:00:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: emails.length, unseen: 0 }],
+      folderStats: [{ folder: "INBOX", fetched: emails.length, total: emails.length, strategy: "full" }],
+      emails,
+    });
+
+    const byFrom = await service.search({ from: "target@example.com", limit: 10 });
+    assert.equal(byFrom.total, 1, "from filter must find the match even though it's older than the 500-row candidate window");
+    assert.equal(byFrom.emails[0].id, "INBOX::1");
+
+    const byMessageId = await service.search({ messageId: "<real-match@example.com>", limit: 10 });
+    assert.equal(byMessageId.total, 1);
+    assert.equal(byMessageId.emails[0].id, "INBOX::1");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("dateFrom/dateTo set to the same day includes that day's messages instead of excluding it", async () => {
   // Found live: dateTo:"2026-09-02" did `COALESCE(internal_date, date) <=
   // "2026-09-02"` — a raw string comparison against a full ISO timestamp

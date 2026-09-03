@@ -1696,8 +1696,15 @@ async function runDraftSend(parsed: ParsedCliArgs): Promise<void> {
   const draftId = parsed.positionals[0] || getStringFlag(parsed.flags, "id");
   if (!draftId) throw new Error("draft-send requires a draft id");
   const wantJson = isTruthyFlag(parsed.flags.json);
+  // Found live: this ignored --args entirely, so `draft-send <id> --args
+  // '{"dryRun":true}'` silently sent for real instead of previewing — the
+  // exact opposite of what dryRun promises. Merge it in like every
+  // table-driven 1:1 command already does (see parseToolArgs's other call
+  // site above).
+  const args: Record<string, unknown> = { draftId };
+  Object.assign(args, (await parseToolArgs(parsed)) ?? {});
   await withMcpClient(async (client) => {
-    const result = await client.callTool({ name: "send_draft", arguments: { draftId } });
+    const result = await client.callTool({ name: "send_draft", arguments: args });
     printToolCallResult(result as Record<string, unknown>, wantJson);
   });
 }
