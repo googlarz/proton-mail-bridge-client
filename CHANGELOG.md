@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [1.18.9] — 2026-09-03
+
+### Fixed
+- **`get_email_by_id`/`read` always reported `labels: []`, even on a message with real Proton labels.** The `labels` field is populated from imapflow's `labels` fetch option, which maps to Gmail's `X-GM-LABELS` IMAP extension — Proton Bridge doesn't implement it. Confirmed live: a message labeled and verified present in `Labels/mcptest-label` via direct IMAP search still read back `labels: []`. Fixed by resolving labels with a bounded Message-ID search across known label folders, scoped to the single-message read path (bulk listing is a deliberate, documented exception — doing this per message there would multiply IMAP round-trips by folder count).
+- **Caught during that fix: a self-introduced deadlock.** The first version of the label fix called the new resolver from inside an existing IMAP mailbox lock — a second, nested lock on the same client deadlocks. Confirmed live immediately (the first `read` after the change hung indefinitely) and fixed by resolving labels after the outer lock releases.
+- **Two live MCP server processes sharing one account silently lost each other's writes.** Confirmed live this is a real, everyday scenario, not a contrived one: Claude Desktop can and does run more than one server instance against the same account (found two, both children of one Claude.app, running concurrently). `SnoozeService`, `DeliveryQueueService`, `DraftStoreService`, and `TemplateService` each only serialized writes within their own process; a second process racing the same load-modify-save cycle silently clobbered the first's write. Confirmed live via a snooze wake racing a manual cancel on the same id — a genuinely-existing message reported "not found." Fixed with a new cross-process advisory file lock (no new dependency) wired into all four services. `DraftStoreService` additionally cached its store in memory, which would have kept a stale copy invisible to the new lock too — removed, matching the other three stores' "always read from disk" pattern, closing the long-standing "GAP-16: concurrent server instances are NOT supported" gap outright. Live-verified: 8 concurrent `create-template` calls from 8 separate processes all persisted correctly.
+
 ## [1.18.8] — 2026-09-03
 
 ### Fixed
