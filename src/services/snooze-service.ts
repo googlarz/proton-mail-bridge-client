@@ -48,7 +48,13 @@ export class SnoozeService {
   start(): void {
     if (this.started) return;
     this.started = true;
-    void this.checkDue();
+    // A record stuck in "waking" means the previous process died between
+    // claiming it and recording the outcome — mirrors
+    // DeliveryQueueService.recoverInterruptedSends(). Unlike a queued send,
+    // retrying a move is safe (worst case: "not found" if it already moved),
+    // so this reverts to "pending" for a normal retry on the next
+    // checkDue() pass, rather than a terminal "failed".
+    void this.recoverInterruptedWakes().then(() => this.checkDue());
     this.scheduleNext();
   }
 
@@ -94,8 +100,20 @@ export class SnoozeService {
 
   // Wakes a snooze immediately (used by both cancel and the timer). Moves the
   // email back to its original folder and marks the record accordingly.
+  //
+  // Two-phase, mirroring DeliveryQueueService.checkDue()'s claim pattern:
+  // claim under a brief lock (flip pending -> waking, so a second wake()
+  // racing the same id — e.g. the 15s timer firing while a manual cancel is
+  // in flight — sees "waking" and backs off instead of double-moving), do
+  // the real network IMAP move OUTSIDE any lock, then re-lock briefly to
+  // record the outcome. Doing the move *inside* the lock held the new
+  // cross-process file lock (file-lock.ts) for a real network round trip —
+  // long enough, under real degraded network conditions, to exceed its
+  // stale-lock timeout and have the lock stolen mid-move by another
+  // process, silently reintroducing the exact lost-update race that lock
+  // exists to prevent.
   private async wake(id: string, status: "woken" | "canceled"): Promise<SnoozeRecord> {
-    return this.withLock(async () => {
+    const claimed = await this.withLock(async () => {
       const store = await this.loadUnlocked();
       const record = store.items[id];
       if (!record) {
@@ -104,7 +122,41 @@ export class SnoozeService {
       if (record.status !== "pending") {
         return record;
       }
-      const moved = await this.imapService.moveEmail(record.currentEmailId, record.originalFolder);
+      record.status = "waking";
+      await this.save(store);
+      return record;
+    });
+
+    if (claimed.status !== "waking") {
+      // Already resolved by another wake() call, or nothing to do.
+      return claimed;
+    }
+
+    let moved: Awaited<ReturnType<SimpleIMAPService["moveEmail"]>>;
+    try {
+      moved = await this.imapService.moveEmail(claimed.currentEmailId, claimed.originalFolder);
+    } catch (error) {
+      // Revert the claim so checkDue()'s existing failure-counting catch
+      // handler (which only updates a record still "pending") still finds
+      // it there, and the item gets retried on the next checkDue() pass
+      // instead of getting stuck in "waking" forever.
+      await this.withLock(async () => {
+        const store = await this.loadUnlocked();
+        const record = store.items[id];
+        if (record && record.status === "waking") {
+          record.status = "pending";
+          await this.save(store);
+        }
+      });
+      throw error;
+    }
+
+    return this.withLock(async () => {
+      const store = await this.loadUnlocked();
+      const record = store.items[id];
+      if (!record) {
+        throw new Error(`Snoozed email not found for id ${id}`);
+      }
       record.currentEmailId = moved.targetEmailId ?? record.currentEmailId;
       record.status = status;
       record.wokenAt = new Date().toISOString();
@@ -164,6 +216,19 @@ export class SnoozeService {
       }
     }
     return { woken, failed };
+  }
+
+  private async recoverInterruptedWakes(): Promise<void> {
+    await this.withLock(async () => {
+      const store = await this.loadUnlocked();
+      let changed = false;
+      for (const record of Object.values(store.items)) {
+        if (record.status !== "waking") continue;
+        record.status = "pending";
+        changed = true;
+      }
+      if (changed) await this.save(store);
+    });
   }
 
   private async ensureSnoozeFolder(): Promise<void> {

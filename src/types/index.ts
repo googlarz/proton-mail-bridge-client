@@ -31,7 +31,10 @@ export interface EmailAttachmentInput {
   contentDisposition?: string;
 }
 
-export type SnoozeStatus = "pending" | "woken" | "canceled" | "failed";
+// "waking" is a brief transitional claim state — see SnoozeService.wake()'s
+// comment for why the network move happens outside any lock, between the
+// two writes that set and clear it.
+export type SnoozeStatus = "pending" | "waking" | "woken" | "canceled" | "failed";
 
 export interface SnoozeRecord {
   id: string;

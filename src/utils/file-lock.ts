@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { logger } from "./logger.js";
@@ -39,16 +40,25 @@ async function isStale(lockPath: string): Promise<boolean> {
   }
 }
 
-async function acquire(lockPath: string): Promise<void> {
+// Returns a token unique to this acquisition — release() must present it
+// back before unlinking, so a slow holder whose lock got stolen as stale
+// can never delete the *new* owner's active lock out from under it (found
+// on review: the previous version unlinked unconditionally, so a stolen
+// lock's original holder finishing late would delete whoever stole it,
+// letting a third caller acquire while the second still believed it held
+// exclusivity — reintroducing the exact lost-update race this exists to
+// prevent).
+async function acquire(lockPath: string): Promise<string> {
   await mkdir(dirname(lockPath), { recursive: true });
   const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS;
+  const token = `${process.pid}-${randomUUID()}`;
 
   for (;;) {
     try {
       const handle = await open(lockPath, "wx");
-      await handle.writeFile(String(process.pid));
+      await handle.writeFile(token);
       await handle.close();
-      return;
+      return token;
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;
       if (code !== "EEXIST") {
@@ -64,7 +74,7 @@ async function acquire(lockPath: string): Promise<void> {
       if (Date.now() > deadline) {
         const owner = await readFile(lockPath, "utf8").catch(() => "unknown");
         throw new Error(
-          `Timed out after ${LOCK_ACQUIRE_TIMEOUT_MS}ms waiting for lock ${lockPath} (held by pid ${owner.trim()}). ` +
+          `Timed out after ${LOCK_ACQUIRE_TIMEOUT_MS}ms waiting for lock ${lockPath} (held by ${owner.trim()}). ` +
             "Another process is using the same data directory right now.",
         );
       }
@@ -74,7 +84,14 @@ async function acquire(lockPath: string): Promise<void> {
   }
 }
 
-async function release(lockPath: string): Promise<void> {
+async function release(lockPath: string, token: string): Promise<void> {
+  const current = await readFile(lockPath, "utf8").catch(() => undefined);
+  if (current !== undefined && current !== token) {
+    // Stolen as stale by another process while we were still working —
+    // that lock is now theirs. Deleting it here would let a third caller
+    // acquire while they still believe they hold it.
+    return;
+  }
   await unlink(lockPath).catch(() => undefined);
 }
 
@@ -83,10 +100,10 @@ async function release(lockPath: string): Promise<void> {
 // if `fn` throws.
 export async function withFileLock<T>(storePath: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = lockPathFor(storePath);
-  await acquire(lockPath);
+  const token = await acquire(lockPath);
   try {
     return await fn();
   } finally {
-    await release(lockPath);
+    await release(lockPath, token);
   }
 }
