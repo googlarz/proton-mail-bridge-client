@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [1.19.0] — 2026-09-04
+
+### Added
+- **HTML-only email bodies now convert to Markdown instead of being stripped to plain text.** A message with no `text/plain` alternative part (increasingly common for marketing/newsletter mail) used to lose all structure — links, lists, emphasis all discarded by the old tag-stripping fallback. Now converts via `turndown`, preserving links (`[text](url)`), lists, and emphasis. A sender's own authored plain-text part is left untouched; this only changes the HTML-only fallback path. Inline `<img>` tags become a `[image: alt]` marker instead of dumping the raw (often tracking-pixel) `src` URL into the token stream.
+- **Deep-thread quoted history now folds instead of repeating verbatim.** A message far down a thread that quotes every prior reply at the bottom now gets that trailing block collapsed to a short marker (e.g. `[169 lines of quoted earlier message(s) folded]`) when read via `get_email_by_id`/`get_emails_by_ids` — verified live, a real 169-line quoted tail folded correctly. Detects the standard `On <date>, <name> wrote:` boundary, an Outlook-style `-----Original Message-----` banner, or a long unmarked run of `>` lines; a short inline quote is left alone. Applied only at the tool-output layer — `reply_to_email`/`create_reply_draft`/forward composition still quote the real, full original (verified live: a reply draft got the complete 14,946-char quote, no marker).
+- **`emailId`s now carry an integrity checksum.** `Drafts::269::bc0d6f26` instead of `Drafts::269` — a corrupted, hand-edited, or fabricated id is now rejected outright (`Invalid emailId`) instead of silently resolving, closing the class of bug where a plausible-but-wrong id could resolve to the wrong message. Folder and uid stay human-readable in the id (this codebase has a CLI for direct human use, unlike a model-only MCP server, so full opaque-encoding wasn't the right trade here) and there's no session-issuance whitelist (would break `drafts.json`/`snoozed.json`/`delivery-queue.json`, which resolve real emailIds across process restarts). Backward compatible: the legacy `folder::uid` shape (no checksum) still parses — verified live against real persisted old-format ids.
+
 ## [1.18.11] — 2026-09-04
 
 ### Fixed

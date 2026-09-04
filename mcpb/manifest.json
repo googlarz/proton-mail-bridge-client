@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "proton-mail-bridge-client",
   "display_name": "Proton Mail Bridge",
-  "version": "1.18.11",
+  "version": "1.19.0",
   "description": "Read, search, send, draft, and triage your Proton Mail inbox from Claude Desktop — entirely local via Proton Bridge, no third-party relay.",
   "long_description": "Give Claude full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders and labels, save attachments, and more — 95 tools in total.\n\nEvery step stays on your machine: Proton Bridge decrypts your mail locally and exposes it over local IMAP/SMTP, this server reads that local connection and builds a local SQLite search index, and Claude Desktop talks to it as a local stdio process. No email ever leaves your machine except through your own Proton account when you send.\n\nRequires Proton Bridge to be installed, signed in, and running first — see proton.me/mail/bridge.",
   "author": {
