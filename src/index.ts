@@ -44,6 +44,7 @@ import type {
 } from "./types/index.js";
 import {
   ensureValidEmails,
+  foldQuotedHistory,
   isTextLikeMimeType,
   isValidEmail,
   lowerCaseAddress,
@@ -1925,6 +1926,15 @@ function formatEmailDetailOutput(
   let displayBody = preferHtml
     ? (typeof detail.html === "string" ? detail.html : detail.text ?? "")
     : (detail.text ?? "");
+  // Only the plain-text path: quote-boundary detection is regex-based on
+  // ">"-prefixed lines and "wrote:" markers, which doesn't map onto HTML
+  // (blockquotes, interspersed tags) — folding raw HTML here would corrupt
+  // it, not shrink it. Comparison against other Proton MCP servers found
+  // this is real, avoidable token bloat on a message deep in a thread that
+  // repeats every prior reply verbatim at the bottom.
+  if (!preferHtml && displayBody) {
+    displayBody = foldQuotedHistory(displayBody);
+  }
   if (maxBodyLength) {
     const codepoints = [...displayBody];
     if (codepoints.length > maxBodyLength) {

@@ -1,4 +1,5 @@
 import type { MessageAddressObject, MessageStructureObject } from "imapflow";
+import TurndownService from "turndown";
 import type {
   EmailAddress,
   EmailAttachmentSummary,
@@ -103,6 +104,114 @@ export function stripHtmlToText(value?: string): string | undefined {
     .replace(/&gt;/gi, ">");
 
   return previewText(withoutTags, 10_000);
+}
+
+let markdownConverter: TurndownService | undefined;
+
+function getMarkdownConverter(): TurndownService {
+  if (markdownConverter) {
+    return markdownConverter;
+  }
+
+  markdownConverter = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+  // Inline image syntax (![alt](src)) would dump the raw src URL into the
+  // token stream — often a long tracking-pixel URL with no value to a
+  // model reading the message. Keep the alt text as a plain marker instead.
+  markdownConverter.addRule("image-as-marker", {
+    filter: "img",
+    replacement: (_content, node) => {
+      const alt = (node as unknown as { getAttribute?: (name: string) => string | null }).getAttribute?.("alt");
+      return alt ? `[image: ${alt}]` : "[image]";
+    },
+  });
+
+  return markdownConverter;
+}
+
+// Structure-preserving alternative to stripHtmlToText, for HTML-only emails
+// (no text/plain alternative part) — this is the fallback path in
+// getParsedMailDetail, not a replacement for a sender's own authored plain
+// text. Markdown keeps links, lists, and emphasis instead of discarding
+// them, and (per real-world comparison against other Proton MCP servers)
+// costs meaningfully fewer tokens than passing raw HTML to a model.
+export function htmlToMarkdown(value?: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  let markdown: string;
+  try {
+    markdown = getMarkdownConverter().turndown(value);
+  } catch {
+    // Malformed HTML turndown can't parse — fall back to the plain-text
+    // stripper rather than surfacing an error for what's still readable mail.
+    return stripHtmlToText(value);
+  }
+
+  // Not previewText: previewText collapses all whitespace to single spaces,
+  // which would erase the newlines Markdown structure depends on (headings,
+  // list items, paragraph breaks). Cap length only.
+  const trimmed = markdown.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.length > 10_000 ? `${trimmed.slice(0, 10_000)}...` : trimmed;
+}
+
+const QUOTE_BOUNDARY_LINE = /^>*\s*On .{0,160}\bwrote:\s*$/i;
+const ORIGINAL_MESSAGE_BANNER = /^-{2,}\s*Original Message\s*-{2,}$/i;
+// Some clients (Outlook-style) quote without either boundary line above —
+// only ">"-prefixed lines. Only fold on a run this long so a one-line
+// inline quote ("> just this part, right?") is left untouched.
+const MIN_UNMARKED_QUOTE_RUN = 4;
+
+function findQuoteBoundary(lines: string[]): number {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (QUOTE_BOUNDARY_LINE.test(lines[index]) || ORIGINAL_MESSAGE_BANNER.test(lines[index])) {
+      return index;
+    }
+  }
+
+  let run = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim().startsWith(">")) {
+      run += 1;
+      if (run >= MIN_UNMARKED_QUOTE_RUN) {
+        return index - run + 1;
+      }
+    } else if (lines[index].trim() !== "") {
+      run = 0;
+    }
+  }
+
+  return -1;
+}
+
+// Collapses a trailing quoted-reply block — "On <date>, <name> wrote:" (or
+// an Outlook-style "-----Original Message-----" banner, or a long run of
+// unmarked ">" lines) followed by everything after it — into a short
+// marker instead of repeating potentially many prior replies' worth of
+// text. Only ever touches a TRAILING run starting at the first recognized
+// boundary; a quote appearing earlier in the body (e.g. one line quoted
+// inline to respond to it) is left completely alone. Comparison against
+// other Proton MCP servers found this is real, avoidable token bloat on
+// any single deep-thread message, not just when reading several at once.
+export function foldQuotedHistory(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const boundary = findQuoteBoundary(lines);
+  if (boundary === -1) {
+    return text;
+  }
+
+  const kept = lines.slice(0, boundary).join("\n").trimEnd();
+  const folded = lines.slice(boundary);
+  const foldedLineCount = folded.filter((line) => line.trim() !== "").length;
+  if (foldedLineCount === 0) {
+    return text;
+  }
+
+  const marker = `[${foldedLineCount} line${foldedLineCount === 1 ? "" : "s"} of quoted earlier message(s) folded]`;
+  return kept ? `${kept}\n\n${marker}` : marker;
 }
 
 export function extractMessageIdList(value?: string | string[]): string[] {

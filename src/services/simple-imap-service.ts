@@ -32,6 +32,7 @@ import {
   nextDay,
   normalizeLimit,
   parseDateInput,
+  htmlToMarkdown,
   parseEmailId,
   previewText,
   sanitizeFileName,
@@ -2615,7 +2616,16 @@ export class SimpleIMAPService {
     const detail: EmailDetail = {
       ...enriched,
       labels: resolvedLabels.length > 0 ? resolvedLabels : enriched.labels,
-      text: parsed.text || stripHtmlToText(typeof parsed.html === "string" ? parsed.html : undefined),
+      // parsed.text (the sender's own authored plain-text part, when
+      // present) is left untouched — only the HTML-only fallback goes
+      // through Markdown conversion instead of stripHtmlToText, so links,
+      // lists, and emphasis survive instead of being discarded outright.
+      // This raw text is reused as-is by reply/forward composition
+      // (buildReplyText/buildForwardText in index.ts) — quote-folding for
+      // display happens later, only in the tool-output formatting layer
+      // (formatEmailDetailOutput), so composing a reply or forward still
+      // quotes the real original rather than a folded marker.
+      text: parsed.text || htmlToMarkdown(typeof parsed.html === "string" ? parsed.html : undefined),
       html: parsed.html,
       headers: this.mapHeaders(parsed),
     };

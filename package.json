@@ -75,13 +75,15 @@
     "imapflow": "^1.4.8",
     "mailparser": "^3.9.14",
     "nodemailer": "^9.0.3",
-    "sanitize-html": "^2.17.4"
+    "sanitize-html": "^2.17.4",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.2",
     "@types/nodemailer": "^6.4.19",
     "@types/sanitize-html": "^2.16.1",
+    "@types/turndown": "^5.0.6",
     "typescript": "^5.7.2"
   },
   "files": [

@@ -1,6 +1,66 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { projectFields, renderMarkdown } from "../dist/utils/helpers.js";
+import { foldQuotedHistory, htmlToMarkdown, projectFields, renderMarkdown } from "../dist/utils/helpers.js";
+
+test("htmlToMarkdown preserves links, emphasis, and lists instead of stripping them", () => {
+  const html = "<h1>Hello</h1><p>This is <b>bold</b> and a <a href=\"https://example.com\">link</a>.</p><ul><li>one</li><li>two</li></ul>";
+  const markdown = htmlToMarkdown(html);
+  assert.match(markdown, /# Hello/);
+  assert.match(markdown, /\*\*bold\*\*/);
+  assert.match(markdown, /\[link\]\(https:\/\/example\.com\)/);
+  assert.match(markdown, /one/);
+  assert.match(markdown, /two/);
+});
+
+test("htmlToMarkdown replaces images with an alt-text marker instead of dumping the raw (often tracking) src URL", () => {
+  const html = "<img src=\"https://tracker.example.com/pixel.gif?very=long&tracking=id\" alt=\"Company logo\">";
+  const markdown = htmlToMarkdown(html);
+  assert.match(markdown, /\[image: Company logo\]/);
+  assert.doesNotMatch(markdown, /tracker\.example\.com/);
+});
+
+test("htmlToMarkdown returns undefined for empty/missing input", () => {
+  assert.equal(htmlToMarkdown(undefined), undefined);
+  assert.equal(htmlToMarkdown(""), undefined);
+});
+
+test("foldQuotedHistory collapses a trailing \"On ... wrote:\" quoted block into a marker", () => {
+  const text = [
+    "Sure, sounds good to me!",
+    "",
+    "On Mon, Sep 1, 2026 at 10:00 AM, Alice <alice@example.com> wrote:",
+    "> Are we still on for the meeting tomorrow?",
+    "> I also wanted to ask about the budget.",
+  ].join("\n");
+  const folded = foldQuotedHistory(text);
+  assert.match(folded, /^Sure, sounds good to me!/);
+  assert.match(folded, /\[\d+ lines? of quoted earlier message\(s\) folded\]/);
+  assert.doesNotMatch(folded, /Are we still on/);
+});
+
+test("foldQuotedHistory collapses an Outlook-style \"-----Original Message-----\" banner and everything after it", () => {
+  const text = ["My reply text.", "", "-----Original Message-----", "From: bob@example.com", "The original content."].join("\n");
+  const folded = foldQuotedHistory(text);
+  assert.match(folded, /^My reply text\./);
+  assert.doesNotMatch(folded, /original content/);
+});
+
+test("foldQuotedHistory folds a long unmarked run of \">\" lines even with no boundary line", () => {
+  const text = ["New content here.", "", "> line one", "> line two", "> line three", "> line four"].join("\n");
+  const folded = foldQuotedHistory(text);
+  assert.match(folded, /^New content here\./);
+  assert.doesNotMatch(folded, /line one/);
+});
+
+test("foldQuotedHistory leaves a short inline quote (below the fold threshold) untouched", () => {
+  const text = "Responding here.\n\n> just one quoted line\n\nMore text after.";
+  assert.equal(foldQuotedHistory(text), text);
+});
+
+test("foldQuotedHistory leaves text with no quote boundary at all untouched", () => {
+  const text = "Just a normal message with no quoting.";
+  assert.equal(foldQuotedHistory(text), text);
+});
 
 test("projectFields returns items unchanged when no fields are requested", () => {
   const items = [{ id: "1", subject: "Hello", from: [{ address: "a@example.com" }] }];
