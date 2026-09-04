@@ -726,6 +726,7 @@ export class SimpleIMAPService {
     path: string;
     newPath: string;
     folder?: FolderInfo;
+    warning?: string;
   }> {
     const fromPath = path?.trim();
     const toPath = newPath?.trim();
@@ -751,7 +752,20 @@ export class SimpleIMAPService {
     const folders = await this.getFolders(true);
     const folder = folders.find((entry) => entry.path === response.newPath);
 
-    return { path: response.path, newPath: response.newPath, folder };
+    // The IMAP RENAME response only means the server accepted the command —
+    // it's not proof the source path is actually gone. Found via a live
+    // report: renaming a Gmail-import label left BOTH the old and new
+    // labels behind (Bridge/Proton apparently implemented it as create-new
+    // + leave-old-orphaned for that label, not an atomic rename), and this
+    // method had no way to detect or surface that — it just reported a
+    // clean rename. Check for the source path still existing and warn
+    // instead of silently claiming success.
+    const stillExists = folders.some((entry) => entry.path === response.path);
+    const warning = stillExists
+      ? `Rename reported success, but "${response.path}" still exists alongside "${response.newPath}" — this looks like a duplicate, not a clean rename. Verify both and delete the stale one manually if so.`
+      : undefined;
+
+    return { path: response.path, newPath: response.newPath, folder, warning };
   }
 
   async deleteFolder(path: string): Promise<{
