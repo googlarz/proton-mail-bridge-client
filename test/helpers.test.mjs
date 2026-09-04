@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { foldQuotedHistory, htmlToMarkdown, projectFields, renderMarkdown } from "../dist/utils/helpers.js";
+import { createEmailId, foldQuotedHistory, htmlToMarkdown, parseEmailId, projectFields, renderMarkdown } from "../dist/utils/helpers.js";
 
 test("htmlToMarkdown preserves links, emphasis, and lists instead of stripping them", () => {
   const html = "<h1>Hello</h1><p>This is <b>bold</b> and a <a href=\"https://example.com\">link</a>.</p><ul><li>one</li><li>two</li></ul>";
@@ -22,6 +22,37 @@ test("htmlToMarkdown replaces images with an alt-text marker instead of dumping 
 test("htmlToMarkdown returns undefined for empty/missing input", () => {
   assert.equal(htmlToMarkdown(undefined), undefined);
   assert.equal(htmlToMarkdown(""), undefined);
+});
+
+test("createEmailId/parseEmailId round-trip, and the id stays human-readable (folder + uid visible)", () => {
+  const id = createEmailId("INBOX", 42);
+  assert.match(id, /^INBOX::42::[0-9a-f]{8}$/);
+  assert.deepEqual(parseEmailId(id), { folder: "INBOX", uid: 42 });
+});
+
+test("createEmailId/parseEmailId round-trip a folder path containing special characters", () => {
+  const id = createEmailId("Folders/MCP-Snoozed", 7);
+  assert.deepEqual(parseEmailId(id), { folder: "Folders/MCP-Snoozed", uid: 7 });
+});
+
+test("parseEmailId rejects an id with a tampered checksum instead of silently resolving it", () => {
+  const id = createEmailId("INBOX", 42);
+  const tampered = id.slice(0, -1) + (id.endsWith("0") ? "1" : "0");
+  assert.throws(() => parseEmailId(tampered), /Invalid emailId/);
+});
+
+test("parseEmailId still accepts the legacy pre-checksum format (folder::uid) for backward compatibility with persisted ids", () => {
+  // drafts.json/snoozed.json/delivery-queue.json can hold ids written
+  // before this format existed, resolved long after the writing process
+  // exited — these must keep working, not just newly-created ids.
+  assert.deepEqual(parseEmailId("INBOX::42"), { folder: "INBOX", uid: 42 });
+  assert.deepEqual(parseEmailId("Folders%2FMCP-Snoozed::7"), { folder: "Folders/MCP-Snoozed", uid: 7 });
+});
+
+test("parseEmailId rejects garbage that isn't either the new or legacy shape", () => {
+  assert.throws(() => parseEmailId("not-an-email-id"), /Invalid emailId/);
+  assert.throws(() => parseEmailId("INBOX::not-a-number"), /Invalid emailId/);
+  assert.throws(() => parseEmailId(""), /Invalid emailId/);
 });
 
 test("foldQuotedHistory collapses a trailing \"On ... wrote:\" quoted block into a marker", () => {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { MessageAddressObject, MessageStructureObject } from "imapflow";
 import TurndownService from "turndown";
 import type {
@@ -32,28 +33,67 @@ export function ensureValidEmails(emails: string[], fieldName: string): void {
   }
 }
 
+const EMAIL_ID_INVALID_MESSAGE =
+  "Invalid emailId. Expected the email identifier returned by get_emails or search_emails.";
+
+// Cheap, dependency-free integrity check on an emailId — not a security
+// boundary (this doesn't defend against a determined attacker, just catches
+// a corrupted, hand-edited, or hallucinated id before it silently resolves
+// to whatever Number(garbage) happens to produce, possibly a real UID in
+// the wrong folder). Deliberately keeps folder+uid human-readable in the id
+// itself, rather than fully opaque-encoding them — unlike a model-only MCP
+// server, this codebase has a CLI meant for direct human use, and every log
+// line, audit entry, and error message shows raw emailIds; a base64 blob
+// would be a real debuggability regression for that, not just a style
+// choice. `folder` is the encodeURIComponent'd segment, not the decoded
+// name, so the checksum also catches a folder segment tampered with after
+// encoding (encodeURIComponent output never contains "::" itself, since it
+// escapes ":", so this can't collide with the separator).
+function computeEmailIdChecksum(encodedFolder: string, uid: number): string {
+  return createHash("sha256").update(`${encodedFolder}${EMAIL_ID_SEPARATOR}${uid}`).digest("hex").slice(0, 8);
+}
+
 export function createEmailId(folder: string, uid: number): string {
-  return `${encodeURIComponent(folder)}${EMAIL_ID_SEPARATOR}${uid}`;
+  const encodedFolder = encodeURIComponent(folder);
+  const checksum = computeEmailIdChecksum(encodedFolder, uid);
+  return `${encodedFolder}${EMAIL_ID_SEPARATOR}${uid}${EMAIL_ID_SEPARATOR}${checksum}`;
 }
 
 export function parseEmailId(emailId: string): { folder: string; uid: number } {
-  const index = emailId.lastIndexOf(EMAIL_ID_SEPARATOR);
-  if (index === -1) {
-    throw new Error(
-      "Invalid emailId. Expected the email identifier returned by get_emails or search_emails.",
-    );
+  const lastSep = emailId.lastIndexOf(EMAIL_ID_SEPARATOR);
+  if (lastSep === -1) {
+    throw new Error(EMAIL_ID_INVALID_MESSAGE);
   }
 
-  const folder = decodeURIComponent(emailId.slice(0, index));
-  const uid = Number(emailId.slice(index + EMAIL_ID_SEPARATOR.length));
+  const trailing = emailId.slice(lastSep + EMAIL_ID_SEPARATOR.length);
+  const payload = emailId.slice(0, lastSep);
+  const midSep = payload.lastIndexOf(EMAIL_ID_SEPARATOR);
 
-  if (!folder || !Number.isInteger(uid) || uid <= 0) {
-    throw new Error(
-      "Invalid emailId. Expected the email identifier returned by get_emails or search_emails.",
-    );
+  // New format: <encodedFolder>::<uid>::<checksum> — verify before trusting.
+  if (midSep !== -1) {
+    const encodedFolder = payload.slice(0, midSep);
+    const uidPart = payload.slice(midSep + EMAIL_ID_SEPARATOR.length);
+    const uid = Number(uidPart);
+    if (Number.isInteger(uid) && uid > 0 && computeEmailIdChecksum(encodedFolder, uid) === trailing) {
+      const folder = decodeURIComponent(encodedFolder);
+      if (folder) {
+        return { folder, uid };
+      }
+    }
   }
 
-  return { folder, uid };
+  // Backward compat: ids persisted before the checksum suffix was added —
+  // <encodedFolder>::<uid>, no checksum. These can live indefinitely in
+  // drafts.json/snoozed.json/delivery-queue.json, resolved long after the
+  // process that wrote them exits, so old ids must keep working — no
+  // integrity check is possible on this legacy shape, same as before.
+  const folder = decodeURIComponent(payload);
+  const uid = Number(trailing);
+  if (folder && Number.isInteger(uid) && uid > 0) {
+    return { folder, uid };
+  }
+
+  throw new Error(EMAIL_ID_INVALID_MESSAGE);
 }
 
 export function mapEnvelopeAddresses(addresses?: MessageAddressObject[]): EmailAddress[] {
