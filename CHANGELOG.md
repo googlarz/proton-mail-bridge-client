@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [1.18.11] — 2026-09-04
+
+### Fixed
+- **`rename_folder`/`rename_label` silently reported success on a duplicate, not a clean rename.** Found live: renaming a Gmail-import label left BOTH the old and new labels behind — Bridge/Proton apparently implemented that rename as create-new-label + leave-old-orphaned rather than an atomic rename for that label, and the tool had no way to detect or surface it, so it reported a clean rename regardless. Added a post-rename check: if the source path still exists in the fresh folder listing, the result now includes a `warning` field explaining the duplicate instead of silently claiming success. This doesn't fix the underlying Bridge/Proton behavior (out of this codebase's control) — it stops it from being misreported.
+
 ## [1.18.10] — 2026-09-03
 
 ### Fixed
