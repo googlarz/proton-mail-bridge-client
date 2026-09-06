@@ -105,7 +105,7 @@ const HARD_IDLE_TIMEOUT_GRACE_MS = 5_000;
 // each item so a stuck one becomes a reported per-item failure instead of an
 // unrecoverable hang, and force a reconnect so the item after it gets a
 // fresh, healthy connection rather than retrying the same wedged one.
-const BULK_ITEM_TIMEOUT_MS = 30_000;
+export const BULK_ITEM_TIMEOUT_MS = 30_000;
 // Same reasoning as BULK_ITEM_TIMEOUT_MS, for the single-command bulk paths
 // (bulkMove's one messageMove over the whole uid set) — longer because one
 // legitimate call covering many messages can reasonably take longer than a
@@ -1653,9 +1653,22 @@ export class SimpleIMAPService {
     }
 
     if (emailIds !== undefined) {
+      // parseEmailId throws on anything malformed. index.ts's
+      // getBulkNotFoundEmailIds already expects a bad/wrong-folder id to be
+      // silently excluded here and reported separately as notFound — but a
+      // throw instead of a skip took the whole batch down with it. Found
+      // live: bulk_move with 10 valid ids and one malformed one threw
+      // "Invalid emailId" and moved none of the 10 valid ones, instead of
+      // moving them and reporting just the bad one as notFound.
       return emailIds
-        .map((id) => parseEmailId(id))
-        .filter((parsed) => parsed.folder === folder)
+        .map((id) => {
+          try {
+            return parseEmailId(id);
+          } catch {
+            return undefined;
+          }
+        })
+        .filter((parsed): parsed is ReturnType<typeof parseEmailId> => parsed !== undefined && parsed.folder === folder)
         .map((parsed) => parsed.uid);
     }
 
@@ -2097,10 +2110,14 @@ export class SimpleIMAPService {
 
     for (const { folder, uid, emailId } of matches) {
       try {
-        await this.withMailbox(folder, false, async (client) => {
-          const result = await client.messageMove(String(uid), input.destination, { uid: true });
-          if (result === false) throw new Error(`Server did not move uid ${uid}`);
-        });
+        await this.withTimeout(
+          this.withMailbox(folder, false, async (client) => {
+            const result = await client.messageMove(String(uid), input.destination, { uid: true });
+            if (result === false) throw new Error(`Server did not move uid ${uid}`);
+          }),
+          BULK_ITEM_TIMEOUT_MS,
+          `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms moving uid ${uid} for thread ${input.messageId}`,
+        );
         this.messageCache.delete(emailId);
         moved++;
       } catch {
@@ -2138,15 +2155,18 @@ export class SimpleIMAPService {
 
     for (const { folder, uid, emailId } of matches) {
       try {
-        if (input.permanent || !trashFolder) {
-          await this.withMailbox(folder, false, async (client) => {
-            await client.messageDelete(String(uid), { uid: true });
-          });
-        } else {
-          await this.withMailbox(folder, false, async (client) => {
-            await client.messageMove(String(uid), trashFolder, { uid: true });
-          });
-        }
+        const action = input.permanent || !trashFolder
+          ? this.withMailbox(folder, false, async (client) => {
+              await client.messageDelete(String(uid), { uid: true });
+            })
+          : this.withMailbox(folder, false, async (client) => {
+              await client.messageMove(String(uid), trashFolder, { uid: true });
+            });
+        await this.withTimeout(
+          action,
+          BULK_ITEM_TIMEOUT_MS,
+          `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms deleting uid ${uid} for thread ${input.messageId}`,
+        );
         this.messageCache.delete(emailId);
         deleted++;
       } catch { /* best-effort */ }
@@ -2176,21 +2196,25 @@ export class SimpleIMAPService {
 
     for (const { folder, uid } of matches) {
       try {
-        await this.withMailbox(folder, false, async (client) => {
-          if (flagsToAdd.length > 0) {
-            await client.messageFlagsAdd(String(uid), flagsToAdd, { uid: true });
-          }
-          if (flagsToRemove.length > 0) {
-            await client.messageFlagsRemove(String(uid), flagsToRemove, { uid: true });
-          }
-          const notAppliedAdds = flagsToAdd.length > 0
-            ? await this.verifyFlags(client, uid, flagsToAdd, true)
-            : [];
-          const notAppliedRemoves = flagsToRemove.length > 0
-            ? await this.verifyFlags(client, uid, flagsToRemove, false)
-            : [];
-          allNotApplied.push(...notAppliedAdds, ...notAppliedRemoves);
-        });
+        await this.withTimeout(
+          this.withMailbox(folder, false, async (client) => {
+            if (flagsToAdd.length > 0) {
+              await client.messageFlagsAdd(String(uid), flagsToAdd, { uid: true });
+            }
+            if (flagsToRemove.length > 0) {
+              await client.messageFlagsRemove(String(uid), flagsToRemove, { uid: true });
+            }
+            const notAppliedAdds = flagsToAdd.length > 0
+              ? await this.verifyFlags(client, uid, flagsToAdd, true)
+              : [];
+            const notAppliedRemoves = flagsToRemove.length > 0
+              ? await this.verifyFlags(client, uid, flagsToRemove, false)
+              : [];
+            allNotApplied.push(...notAppliedAdds, ...notAppliedRemoves);
+          }),
+          BULK_ITEM_TIMEOUT_MS,
+          `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms flagging uid ${uid} for thread ${input.messageId}`,
+        );
         affected++;
       } catch { /* best-effort */ }
     }
@@ -3078,7 +3102,10 @@ export class SimpleIMAPService {
   // also force a disconnect, otherwise the abandoned command would still be
   // holding the mailbox lock the *next* item's withMailbox() call needs,
   // turning "one slow item" into "every item after it hangs too."
-  private async withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  // Public: index.ts's applyBatchEmailAction (batch_email_action/apply_thread_action)
+  // reuses this exact per-item timeout+reconnect behavior rather than
+  // duplicating it, since it drives the same shared IMAP connection.
+  async withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     let timedOut = false;
     try {

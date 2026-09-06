@@ -765,6 +765,23 @@ export function renderMarkdown(markdown: string): { html: string; text: string }
 // of the full EmailSummary (preview, attachments, labels, flags, ...) on every
 // row. "id" is always kept regardless of the requested field list, since it's
 // what every follow-up tool call (get_email_by_id, star_email, ...) needs.
+// Generic per-call bound, no side effects (unlike SimpleIMAPService's own
+// withTimeout, which additionally force-disconnects its IMAP client — not
+// meaningful here). Used by services whose per-item background loops
+// (delivery queue sends, snooze wakes) had no timeout at all: one wedged
+// call used to silently stall every other queued item indefinitely, since
+// each loop's next tick only re-arms after the current pass fully settles.
+export function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+      timer.unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 export function projectFields<T extends { id: string }>(
   items: T[],
   fields?: string[],

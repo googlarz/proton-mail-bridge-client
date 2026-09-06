@@ -23,7 +23,7 @@ import { BackgroundSyncService } from "./services/background-sync-service.js";
 import { DeliveryQueueService } from "./services/delivery-queue-service.js";
 import { DraftStoreService } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
-import { describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, SimpleIMAPService } from "./services/simple-imap-service.js";
+import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, SimpleIMAPService } from "./services/simple-imap-service.js";
 import { applySignature, SMTPService } from "./services/smtp-service.js";
 import { SnoozeService } from "./services/snooze-service.js";
 import { TemplateService } from "./services/template-service.js";
@@ -2655,9 +2655,21 @@ async function applyBatchEmailAction(
 ): Promise<BatchActionResult> {
   for (const emailId of input.emailIds) {
     try {
-      const result = input.dryRun
-        ? await previewEmailAction(imapService, emailId, input.action, input.targetFolder)
-        : await runEmailAction(imapService, emailId, input.action, input.targetFolder);
+      // Unlike SimpleIMAPService's own bulk*/thread* loops, this one had no
+      // per-item bound — a single wedged IMAP call (same shared connection,
+      // same churn from the perpetual IDLE watcher) hung the *entire*
+      // tools/call response forever, with no timeout to degrade it to a
+      // per-item failure. Reused verbatim rather than duplicated, since it
+      // also forces the same reconnect-on-timeout SimpleIMAPService's other
+      // callers rely on to keep the item after it from wedging too.
+      const action = input.dryRun
+        ? previewEmailAction(imapService, emailId, input.action, input.targetFolder)
+        : runEmailAction(imapService, emailId, input.action, input.targetFolder);
+      const result = await imapService.withTimeout(
+        action,
+        BULK_ITEM_TIMEOUT_MS,
+        `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms running ${input.action} on ${emailId}`,
+      );
       entries.push({
         emailId,
         ok: true,

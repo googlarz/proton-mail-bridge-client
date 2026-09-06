@@ -21,6 +21,7 @@ const CHECK_INTERVAL_MS = 15_000;
 // or deleted before wakeAt so moveEmail can no longer find it), stop retrying
 // every 15s forever and mark the snooze terminally "failed" instead.
 const MAX_WAKE_FAILURES = 5;
+const SNOOZE_WAKE_TIMEOUT_MS = 30_000;
 
 interface SnoozeFile {
   version: number;
@@ -134,7 +135,16 @@ export class SnoozeService {
 
     let moved: Awaited<ReturnType<SimpleIMAPService["moveEmail"]>>;
     try {
-      moved = await this.imapService.moveEmail(claimed.currentEmailId, claimed.originalFolder);
+      // No bound here used to mean one wedged move (same shared IMAP
+      // connection, same churn from the perpetual IDLE watcher) silently
+      // stalled every other pending snooze indefinitely — checkDue() only
+      // reschedules its next tick after the whole pass settles, so this
+      // wake() call blocking the loop blocked every later due item too.
+      moved = await this.imapService.withTimeout(
+        this.imapService.moveEmail(claimed.currentEmailId, claimed.originalFolder),
+        SNOOZE_WAKE_TIMEOUT_MS,
+        `Timed out after ${SNOOZE_WAKE_TIMEOUT_MS}ms waking snooze ${id}`,
+      );
     } catch (error) {
       // Revert the claim so checkDue()'s existing failure-counting catch
       // handler (which only updates a record still "pending") still finds

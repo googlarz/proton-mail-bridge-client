@@ -46,6 +46,11 @@ function fakeImap() {
     async createFolder() {
       return { path: "Folders/MCP-Snoozed", created: true };
     },
+    // Real SimpleIMAPService.withTimeout is a public passthrough-with-a-race;
+    // this fake only needs the passthrough half since it never actually hangs.
+    async withTimeout(promise) {
+      return promise;
+    },
     async moveEmail(emailId, targetFolder) {
       this.moves.push({ from: emailId, to: targetFolder });
       const targetUid = nextUid++;
@@ -157,6 +162,7 @@ test("checkDue stops retrying a permanently-failing wake and marks it terminally
     const imap = {
       async createFolder() { return { path: "Folders/MCP-Snoozed", created: true }; },
       async moveEmail() { throw new Error("message not found"); },
+      async withTimeout(promise) { return promise; },
     };
     const service = new SnoozeService(createConfig(dataDir), imap);
 

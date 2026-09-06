@@ -6,7 +6,10 @@ import type { DeliveryQueueKind, DeliveryQueueRecord, ProtonMailConfig, SendEmai
 import { withFileLock } from "../utils/file-lock.js";
 import { ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { withTimeout } from "../utils/helpers.js";
 import { SMTPService } from "./smtp-service.js";
+
+const SEND_ITEM_TIMEOUT_MS = 30_000;
 
 // Local, persistent send queue shared by undo-send (seconds-long hold) and
 // scheduled-send (minutes/hours/days out). Mirrors DraftStoreService's
@@ -167,7 +170,16 @@ export class DeliveryQueueService {
           [...claimed.payload.to, ...(claimed.payload.cc ?? []), ...(claimed.payload.bcc ?? [])],
         );
 
-        const result = await this.smtpService.sendEmail(claimed.payload);
+        // No bound here used to mean one wedged send (e.g. a stalled SMTP
+        // socket to Bridge) silently stalled every other queued/scheduled
+        // item indefinitely: checkDue() only reschedules its next tick
+        // (scheduleNext()) after the whole pass settles, and this loop
+        // wouldn't even reach later dueIds until the current send resolved.
+        const result = await withTimeout(
+          this.smtpService.sendEmail(claimed.payload),
+          SEND_ITEM_TIMEOUT_MS,
+          `Timed out after ${SEND_ITEM_TIMEOUT_MS}ms sending queued item ${id}`,
+        );
         await this.withLock(async () => {
           const store = await this.loadUnlocked();
           const record = store.items[id];
