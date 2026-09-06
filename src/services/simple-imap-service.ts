@@ -81,6 +81,18 @@ const MAX_ATTACHMENT_TEXT_BYTES = 512_000;
 // engaged (e.g. imapflow's `idling` flag stuck true after Proton Bridge ended
 // the session server-side) and we must recover instead of busy-spinning.
 const MIN_HEALTHY_IDLE_MS = 500;
+// A fast, event-less idle() return isn't on its own proof of a stuck connection —
+// imapflow's preCheck/DONE mechanism is *designed* to interrupt an active IDLE the
+// instant any other command needs the same shared connection (a foreground tool
+// call, background sync's periodic collectEmailsForIndex, ...), and that legitimate
+// interruption looks identical from here: no events, near-instant return. Forcing a
+// full disconnect on every one of those — as a single fast return used to — turns
+// ordinary connection sharing into a reconnect storm, which is what was actually
+// producing the "Connection not available" races elsewhere in this file. Only
+// escalate to a real disconnect after several fast/event-less returns *in a row*,
+// which is what the originally-observed stuck-idle incident (a busy-spin burning a
+// full CPU core for days) actually looked like.
+const MAX_CONSECUTIVE_FAST_IDLE_RETURNS = 5;
 // Grace period past timeoutMs before waitForMailboxChanges' own hard timeout
 // fires — see the comment at its Promise.race for why a caller-side timeout
 // can't rely on imapflow's graceful preCheck break alone.
@@ -369,6 +381,7 @@ export class SimpleIMAPService {
   private _lastOpTs = 0;
   private _connectingPromise?: Promise<void>;
   private readonly _idleActive = new Map<string, boolean>();
+  private consecutiveFastIdleReturns = 0;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -615,6 +628,7 @@ export class SimpleIMAPService {
         // proved it wasn't. This is also what prevents the stuck-IDLE busy-spin
         // described above from surviving into the caller's next attempt.
         await this.disconnect().catch(() => {});
+        this.consecutiveFastIdleReturns = 0;
         const checkedAt = new Date().toISOString();
         const changed = events.length > 0;
         this.lastIdleAt = checkedAt;
@@ -630,17 +644,23 @@ export class SimpleIMAPService {
       const checkedAt = new Date().toISOString();
       const changed = events.length > 0;
 
-      // Defense in depth: a healthy IDLE blocks until a mailbox change or until
-      // ~timeoutMs elapses. If it returned near-instantly with no events, IDLE
-      // did not actually engage (stuck state, lost capability, or a half-open
-      // socket). Drop the connection so the next iteration reconnects a fresh
-      // client rather than spinning on repeated no-op idle() calls.
-      if (!changed && idleElapsedMs < MIN_HEALTHY_IDLE_MS) {
-        this.log.warn("IMAP IDLE returned without blocking; resetting connection", "IMAPService", {
-          folder,
-          idleElapsedMs,
-        });
-        await this.disconnect();
+      if (changed || idleElapsedMs >= MIN_HEALTHY_IDLE_MS) {
+        // A real mailbox change, or a full-duration idle that simply timed out
+        // with nothing to report — both are healthy outcomes.
+        this.consecutiveFastIdleReturns = 0;
+      } else {
+        // See MAX_CONSECUTIVE_FAST_IDLE_RETURNS above: a lone fast/event-less
+        // return is expected connection sharing, not evidence of a stuck idle.
+        this.consecutiveFastIdleReturns += 1;
+        if (this.consecutiveFastIdleReturns >= MAX_CONSECUTIVE_FAST_IDLE_RETURNS) {
+          this.log.warn(
+            "IMAP IDLE returned without blocking several times in a row; resetting connection",
+            "IMAPService",
+            { folder, idleElapsedMs, consecutiveFastIdleReturns: this.consecutiveFastIdleReturns },
+          );
+          await this.disconnect();
+          this.consecutiveFastIdleReturns = 0;
+        }
       }
       this.lastIdleAt = checkedAt;
       this.lastIdleError = undefined;
