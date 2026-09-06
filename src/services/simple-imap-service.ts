@@ -703,6 +703,32 @@ export class SimpleIMAPService {
     return { syncedAt, folders };
   }
 
+  // A write command sent right as imapflow cycles its socket (IDLE renewal, or
+  // Bridge dropping the connection under it) can throw "Connection not available"
+  // even though the command already reached the server — reproduced live: create/
+  // rename/delete all left the mailbox in the post-command state while still
+  // throwing NoConnection back to the caller. Blindly retrying the same mutation
+  // on the fresh connection would then fail a *second* time for the opposite
+  // reason ("already exists" / "no such mailbox"), reporting an error for a
+  // request that in fact succeeded. Reconnect and check the actual folder list
+  // first; only re-send the mutation if it demonstrably didn't happen.
+  private async mutateFolderWithReconnectCheck<T>(
+    mutate: () => Promise<T>,
+    alreadyApplied: (folders: FolderInfo[]) => T | undefined,
+  ): Promise<T> {
+    try {
+      return await mutate();
+    } catch (error) {
+      if ((error as { code?: string } | undefined)?.code !== "NoConnection") {
+        throw error;
+      }
+      await this.disconnect().catch(() => {});
+      const folders = await this.getFolders(true);
+      const applied = alreadyApplied(folders);
+      return applied !== undefined ? applied : mutate();
+    }
+  }
+
   async createFolder(path: string): Promise<{
     path: string;
     created: boolean;
@@ -713,8 +739,16 @@ export class SimpleIMAPService {
       throw new Error("Folder path is required.");
     }
 
-    const client = await this.ensureConnected();
-    const response = await client.mailboxCreate(trimmed);
+    const response = await this.mutateFolderWithReconnectCheck(
+      async () => {
+        const client = await this.ensureConnected();
+        return client.mailboxCreate(trimmed);
+      },
+      (folders) => {
+        const existing = folders.find((entry) => entry.path === trimmed);
+        return existing ? { path: existing.path, created: true } : undefined;
+      },
+    );
 
     this.folderCache = undefined;
     const folders = await this.getFolders(true);
@@ -741,8 +775,16 @@ export class SimpleIMAPService {
       throw new Error("Source and target paths are identical.");
     }
 
-    const client = await this.ensureConnected();
-    const response = await client.mailboxRename(fromPath, toPath);
+    const response = await this.mutateFolderWithReconnectCheck(
+      async () => {
+        const client = await this.ensureConnected();
+        return client.mailboxRename(fromPath, toPath);
+      },
+      (folders) => {
+        const renamed = folders.some((entry) => entry.path === toPath);
+        return renamed ? { path: fromPath, newPath: toPath } : undefined;
+      },
+    );
 
     this.folderCache = undefined;
     for (const [id, cached] of this.messageCache) {
@@ -793,8 +835,16 @@ export class SimpleIMAPService {
       throw new Error(`Refusing to delete reserved system folder ${trimmed}.`);
     }
 
-    const client = await this.ensureConnected();
-    const response = await client.mailboxDelete(trimmed);
+    const response = await this.mutateFolderWithReconnectCheck<{ path: string }>(
+      async () => {
+        const client = await this.ensureConnected();
+        return client.mailboxDelete(trimmed);
+      },
+      (folders) => {
+        const stillExists = folders.some((entry) => entry.path === trimmed);
+        return stillExists ? undefined : { path: trimmed };
+      },
+    );
 
     this.folderCache = undefined;
     for (const [id, cached] of this.messageCache) {
