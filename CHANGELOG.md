@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [1.19.2] — 2026-09-06
+
+### Fixed
+- **`get_email_by_id`/`get_emails_by_ids` could hang forever.** Resolving a message's real Proton labels (Bridge doesn't expose them via IMAP's `X-GM-LABELS`) ran up to 20 sequential, unbounded IMAP round trips — one per label folder — on every single-email read. Reproduced live, twice in a row on two different messages. Added a per-folder timeout and an overall budget for the whole lookup; labels are a best-effort enrichment, not something worth blocking the read on.
+- **`run_doctor`'s `includeIdleProbe:true` failed 100% of the time** with the default config — it passed the comma-separated `autoSyncFolder` ("INBOX,Sent") straight through to an IMAP IDLE call that can only watch one mailbox, trying to `SELECT` a literal mailbox named "INBOX,Sent". Now takes just the first folder, matching how background sync's own IDLE watcher already handles this. Its failure branch also now gets the same actionable diagnosis (auth vs. bridge-unreachable) the SMTP/IMAP checks already had.
+- **`bulk_update_labels` reported `ok:true` for an item even when every requested label silently failed to apply.** The per-label add/remove call never throws for an individual failure by design (so one bad label doesn't sink the whole item) — but the bulk loop discarded that result entirely instead of checking it. Reproduced live: adding a label reported success while `get_folders` afterward showed the label folder had never been created.
+
+## [1.19.1] — 2026-09-06
 ## [1.19.1] — 2026-09-06
 
 ### Fixed
