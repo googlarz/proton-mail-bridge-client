@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [1.19.1] — 2026-09-06
+
+### Fixed
+- **The perpetual background IDLE-watch loop was resetting the shared IMAP connection roughly once a second, even when nothing was actually wrong.** imapflow's preCheck/DONE mechanism is *designed* to interrupt an active IDLE the instant any other command needs the same connection — a foreground tool call, background sync's periodic index refresh, anything. This server runs a perpetual IDLE loop on the very same connection used for every other command, so every one of those was tripping a "did IDLE actually block?" heuristic and forcing a full reconnect. That reconnect churn was the root cause of most of the "Connection not available" failures below. Now only escalates to a real disconnect after several fast/event-less IDLE returns in a row — a lone interruption just quietly re-enters IDLE on the still-good connection.
+- **`create_folder`/`rename_folder`/`delete_folder`, `sync_folders`, and `delete_label` could report a false "Connection not available" or opaque "Command failed" for an operation that had actually succeeded (or, for delete, one whose goal state already held).** Each now reconnects and checks the real folder list before reporting failure, rather than trusting the thrown error alone.
+- **`bulk_update_labels`, `bulk_move`, `batch_email_action`/`apply_thread_action`, `move_thread`/`delete_thread`/`flag_thread`, the delivery-send queue, and snoozed-email wake-ups had no bound on a single IMAP/SMTP call.** One call wedged behind the connection churn above could hang the entire operation — or, for the delivery queue and snooze wake-up, every other queued/pending item — forever, with no timeout to degrade it to a per-item failure. All now time out a stuck call and continue.
+- **A single malformed `emailId` crashed an entire `bulk_move`/`bulk_delete`/`bulk_update_flags`/`bulk_update_labels` batch** instead of being reported as `notFound` alongside the rest of the batch succeeding.
+- **`get_folders` (and anything built on it, like `get_email_stats`/`get_inbox_digest`) could report stale message/unseen counts** after `mark_email_read`, `move_email`, `delete_email`, `empty_folder`, `update_message_labels`/`update_message_flags`, or any bulk/thread variant of these — only folder create/rename/delete invalidated the cache before. All count-affecting mutations now invalidate it.
+- **The Claude Desktop installer silently wiped a working `env` block (Proton Bridge login) on every re-run** if the shell running it didn't have `PROTONMAIL_*` exported — it now preserves an existing `env` block when the current run has nothing new to contribute.
+- **`DraftStoreService`'s temp-file cleanup matched *any* `.tmp` file in the shared data directory, not just its own**, unlike every sibling store — could delete another store's in-flight atomic save out from under it and silently lose whatever it was saving.
+- `parseEmailId` no longer rejects a cryptographically-verified id whenever its folder segment happens to be empty. `mark_email_read`/`star_email` no longer cache a flag change the server silently didn't apply.
+
 ## [1.19.0] — 2026-09-04
 
 ### Added
