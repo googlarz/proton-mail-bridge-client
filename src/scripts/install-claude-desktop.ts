@@ -308,11 +308,36 @@ export function mergeClaudeDesktopConfig(
       ? (existing.mcpServers as Record<string, unknown>)
       : {};
 
+  // collectInstallEnv() only sees PROTONMAIL_*/DEBUG vars exported in the
+  // shell that's running this installer right now — it has no way to see
+  // credentials that were hand-added straight into the config (e.g. because
+  // Claude Desktop itself, not this shell, is what had them set). A plain
+  // re-run of `npm run install:claude-desktop` from a shell without those
+  // vars exported used to silently wipe a working env block, since this
+  // function replaced the whole server entry outright. Reproduced live:
+  // install ran with none of PROTONMAIL_* exported, and the previously-
+  // working server lost its login and failed with "Missing required
+  // environment variables" until the config was hand-repaired from the
+  // installer's own pre-write backup. If this run has nothing new to
+  // contribute, keep whatever was already configured instead of dropping it.
+  const existingServerConfig = existingServers[serverName];
+  const existingEnv =
+    existingServerConfig &&
+    typeof existingServerConfig === "object" &&
+    !Array.isArray(existingServerConfig) &&
+    typeof (existingServerConfig as { env?: unknown }).env === "object"
+      ? ((existingServerConfig as { env?: Record<string, string> }).env ?? undefined)
+      : undefined;
+  const env = serverConfig.env && Object.keys(serverConfig.env).length > 0 ? serverConfig.env : existingEnv;
+
   return {
     ...existing,
     mcpServers: {
       ...existingServers,
-      [serverName]: serverConfig,
+      [serverName]: {
+        ...serverConfig,
+        ...(env && Object.keys(env).length > 0 ? { env } : {}),
+      },
     },
   };
 }

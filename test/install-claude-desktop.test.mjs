@@ -75,6 +75,64 @@ test("mergeClaudeDesktopConfig preserves existing servers", () => {
   assert.deepEqual(Object.keys(merged.mcpServers).sort(), ["existing", "proton-mail-bridge"]);
 });
 
+test("mergeClaudeDesktopConfig keeps an existing env block when the new run has none to contribute", () => {
+  // Reproduces a live incident: re-running the installer from a shell with no
+  // PROTONMAIL_* vars exported used to wipe a working, hand-added env block
+  // outright, breaking the server until the config was repaired by hand.
+  const merged = mergeClaudeDesktopConfig(
+    {
+      mcpServers: {
+        "proton-mail-bridge": {
+          command: "node",
+          args: ["/old/dist/index.js"],
+          cwd: "/old",
+          env: {
+            PROTONMAIL_USERNAME: "user@proton.me",
+            PROTONMAIL_PASSWORD: "secret",
+          },
+        },
+      },
+    },
+    "proton-mail-bridge",
+    {
+      command: "node",
+      args: ["/new/dist/index.js"],
+      cwd: "/new",
+    },
+  );
+
+  const server = merged.mcpServers["proton-mail-bridge"];
+  assert.equal(server.cwd, "/new", "new runtime path still takes effect");
+  assert.deepEqual(server.env, {
+    PROTONMAIL_USERNAME: "user@proton.me",
+    PROTONMAIL_PASSWORD: "secret",
+  });
+});
+
+test("mergeClaudeDesktopConfig lets a freshly-collected env override the old one", () => {
+  const merged = mergeClaudeDesktopConfig(
+    {
+      mcpServers: {
+        "proton-mail-bridge": {
+          command: "node",
+          args: ["/old/dist/index.js"],
+          cwd: "/old",
+          env: { PROTONMAIL_USERNAME: "stale@proton.me" },
+        },
+      },
+    },
+    "proton-mail-bridge",
+    {
+      command: "node",
+      args: ["/new/dist/index.js"],
+      cwd: "/new",
+      env: { PROTONMAIL_USERNAME: "fresh@proton.me" },
+    },
+  );
+
+  assert.deepEqual(merged.mcpServers["proton-mail-bridge"].env, { PROTONMAIL_USERNAME: "fresh@proton.me" });
+});
+
 test("resolveClaudeDesktopConfigPath honors explicit paths", () => {
   const resolved = resolveClaudeDesktopConfigPath(join("/tmp", "claude.json"));
   assert.equal(resolved, "/tmp/claude.json");
