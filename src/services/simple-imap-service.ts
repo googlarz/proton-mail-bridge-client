@@ -2037,13 +2037,33 @@ export class SimpleIMAPService {
     for (const uid of uids) {
       const emailId = createEmailId(folder, uid);
       try {
-        await this.withTimeout(
+        // updateMessageLabels never throws for a failed COPY/removal — it
+        // catches per-label and reports failures via its own return value
+        // (notFound/failedLabels) so a partial failure across several
+        // labels doesn't take the whole call down. Discarding that return
+        // value (as this used to) meant every item that didn't outright
+        // crash was reported ok:true, even one where every single requested
+        // label silently failed to apply. Found live: bulk_update_labels
+        // adding a brand-new label reported ok:true for an item whose label
+        // folder was never actually created — get_folders afterward showed
+        // no such folder at all.
+        const result = await this.withTimeout(
           this.updateMessageLabels(emailId, labelsToAdd, labelsToRemove),
           BULK_ITEM_TIMEOUT_MS,
           `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms updating labels for ${emailId}`,
         );
-        results.push({ uid, emailId, ok: true });
-        succeeded++;
+        if (result.failedLabels && result.failedLabels.length > 0) {
+          results.push({
+            uid,
+            emailId,
+            ok: false,
+            error: `Failed to apply: ${result.failedLabels.join(", ")}`,
+          });
+          failed++;
+        } else {
+          results.push({ uid, emailId, ok: true });
+          succeeded++;
+        }
       } catch (err) {
         results.push({ uid, emailId, ok: false, error: String(err) });
         failed++;
