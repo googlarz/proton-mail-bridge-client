@@ -5118,7 +5118,15 @@ export function createServer(
           const idleProbe = includeIdleProbe
             ? await Promise.allSettled([
                 imapService.waitForMailboxChanges({
-                  folder: config.runtime.autoSyncFolder,
+                  // autoSyncFolder is a comma-separated list ("INBOX,Sent") for
+                  // the periodic index sync, but IMAP IDLE can only watch one
+                  // mailbox per connection (same constraint documented on
+                  // BackgroundSyncService's primaryIdleFolder). Passing the raw
+                  // multi-folder string through made every run_doctor
+                  // includeIdleProbe:true call try to SELECT a literal mailbox
+                  // named "INBOX,Sent" and fail — reproduced live, 100% of the
+                  // time with the default config.
+                  folder: config.runtime.autoSyncFolder?.split(",")[0]?.trim() || "INBOX",
                   timeoutMs: idleTimeoutSeconds * 1000,
                 }),
               ]).then(([result]) => result)
@@ -5194,6 +5202,11 @@ export function createServer(
                           ? idleProbe.reason.message
                           : String(idleProbe.reason)
                         : "IMAP connection failed.",
+                      // smtp/imap above both attach this; idleProbe never did,
+                      // so an idle-specific failure (e.g. the wrong-folder bug
+                      // just fixed above) gave no actionable next step despite
+                      // this tool's own description promising one.
+                      diagnosis: diagnoseFailure(idleProbe.reason),
                     },
             backgroundSync: backgroundSyncService.getStatus(),
             index: indexStatus,
