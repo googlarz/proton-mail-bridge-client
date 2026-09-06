@@ -1335,7 +1335,20 @@ export class SimpleIMAPService {
       notApplied = await this.verifyFlags(client, uid, ["\\Seen"], isRead);
     });
 
-    this.updateCachedMessage(emailId, (email) => ({ ...email, isRead }));
+    // Only reflect the change locally if verifyFlags actually confirmed the
+    // server applied it — updateCachedMessage previously ran unconditionally,
+    // caching the *requested* isRead even when notApplied said the server
+    // silently no-op'd it, which would have handed a stale/wrong isRead to
+    // any future caller of a cache-backed read path.
+    if (notApplied.length === 0) {
+      // \Seen changes the folder's unseen count — createFolder/renameFolder/
+      // deleteFolder already invalidate this cache for count-affecting
+      // changes; this mutation was missing from that set, so get_folders
+      // kept reporting a stale unseen count until something else happened
+      // to force-refresh it.
+      this.folderCache = undefined;
+      this.updateCachedMessage(emailId, (email) => ({ ...email, isRead }));
+    }
     return { emailId, folder, uid, isRead, notApplied };
   }
 
@@ -1359,7 +1372,11 @@ export class SimpleIMAPService {
       notApplied = await this.verifyFlags(client, uid, ["\\Flagged"], isStarred);
     });
 
-    this.updateCachedMessage(emailId, (email) => ({ ...email, isStarred }));
+    // Same reasoning as markEmailRead above: only cache the requested state
+    // once verifyFlags has actually confirmed the server applied it.
+    if (notApplied.length === 0) {
+      this.updateCachedMessage(emailId, (email) => ({ ...email, isStarred }));
+    }
     return { emailId, folder, uid, isStarred, notApplied };
   }
 
@@ -1410,6 +1427,10 @@ export class SimpleIMAPService {
         uid: targetUid,
       });
     }
+    // A move changes the message count of both the source and target
+    // folder — see the markEmailRead comment above for the same
+    // previously-missing invalidation.
+    this.folderCache = undefined;
     this.lastSyncAt = new Date().toISOString();
 
     return {
@@ -1453,6 +1474,9 @@ export class SimpleIMAPService {
     });
 
     this.messageCache.delete(emailId);
+    // Deletion changes the folder's message count — see the markEmailRead
+    // comment above for the same previously-missing invalidation.
+    this.folderCache = undefined;
     this.lastSyncAt = new Date().toISOString();
 
     return {
@@ -1542,6 +1566,12 @@ export class SimpleIMAPService {
       }
     }
 
+    if (added.length > 0 || removed.length > 0) {
+      // A label add/remove changes that label folder's message count — see
+      // the markEmailRead comment above for the same previously-missing
+      // invalidation.
+      this.folderCache = undefined;
+    }
     return { emailId, added, removed, notFound, failedLabels: failedLabels.length > 0 ? failedLabels : undefined };
   }
 
@@ -1573,6 +1603,23 @@ export class SimpleIMAPService {
       notApplied = [...notAppliedAdds, ...notAppliedRemoves];
     });
 
+    // \Seen (this is the generic-flags sibling of markEmailRead, which
+    // already got this same fix above) changes the folder's unseen count.
+    if ([...flagsToAdd, ...flagsToRemove].some((flag) => flag.toLowerCase() === "\\seen")) {
+      this.folderCache = undefined;
+    }
+    // Unlike markEmailRead/starEmail (which know exactly which EmailSummary
+    // field a \Seen/\Flagged change maps to and update it in place), this
+    // method takes arbitrary flags — there's no generic way to merge them
+    // into a cached EmailSummary. It previously left a stale cached copy in
+    // place with no indication anything had changed; drop it instead so the
+    // next read fetches fresh data rather than serving flags that no longer
+    // match the server.
+    const appliedSomething = flagsToAdd.some((f) => !notApplied.includes(f))
+      || flagsToRemove.some((f) => !notApplied.includes(f));
+    if (appliedSomething) {
+      this.messageCache.delete(emailId);
+    }
     return { emailId, added: flagsToAdd, removed: flagsToRemove, notApplied };
   }
 
@@ -1636,6 +1683,7 @@ export class SimpleIMAPService {
     for (const uid of uids) {
       this.messageCache.delete(createEmailId(folder, uid));
     }
+    this.folderCache = undefined;
 
     return { folder, deleted: uids.length };
   }
@@ -1764,6 +1812,12 @@ export class SimpleIMAPService {
       }
     }
 
+    if (succeeded > 0) {
+      // A move changes the message count of both the source and target
+      // folder — see the markEmailRead comment (near moveEmail) for the
+      // same previously-missing invalidation on the single-email path.
+      this.folderCache = undefined;
+    }
     this.lastSyncAt = new Date().toISOString();
     return { dryRun: false, total: uids.length, succeeded, failed, notFound: 0, results };
   }
@@ -1851,6 +1905,12 @@ export class SimpleIMAPService {
       }
     }
 
+    if (succeeded > 0) {
+      // Deletion changes the folder's message count — see the
+      // markEmailRead comment (near moveEmail) for the same
+      // previously-missing invalidation on the single-email path.
+      this.folderCache = undefined;
+    }
     this.lastSyncAt = new Date().toISOString();
     return { dryRun: false, total: uids.length, succeeded, failed, notFound: 0, results };
   }
@@ -1930,6 +1990,12 @@ export class SimpleIMAPService {
       }
     }
 
+    if (succeeded > 0 && [...flagsToAdd, ...flagsToRemove].some((flag) => flag.toLowerCase() === "\\seen")) {
+      // \Seen changes the folder's unseen count — see the markEmailRead
+      // comment (near moveEmail) for the same previously-missing
+      // invalidation on the single-email path.
+      this.folderCache = undefined;
+    }
     return { dryRun: false, total: uids.length, succeeded, failed, notFound: 0, results };
   }
 
@@ -2125,6 +2191,12 @@ export class SimpleIMAPService {
       }
     }
 
+    if (moved > 0) {
+      // A move changes the message count of both the source and target
+      // folder — see the markEmailRead comment (near moveEmail) for the
+      // same previously-missing invalidation on the single-email path.
+      this.folderCache = undefined;
+    }
     this.lastSyncAt = new Date().toISOString();
     return { messageId: input.messageId, destination: input.destination, moved, notMoved, dryRun: false };
   }
@@ -2172,6 +2244,12 @@ export class SimpleIMAPService {
       } catch { /* best-effort */ }
     }
 
+    if (deleted > 0) {
+      // Deletion changes the folder's message count — see the
+      // markEmailRead comment (near moveEmail) for the same
+      // previously-missing invalidation on the single-email path.
+      this.folderCache = undefined;
+    }
     this.lastSyncAt = new Date().toISOString();
     return { messageId: input.messageId, deleted, dryRun: false };
   }
@@ -2219,6 +2297,12 @@ export class SimpleIMAPService {
       } catch { /* best-effort */ }
     }
 
+    if (affected > 0 && [...flagsToAdd, ...flagsToRemove].some((flag) => flag.toLowerCase() === "\\seen")) {
+      // \Seen changes the folder's unseen count — see the markEmailRead
+      // comment (near moveEmail) for the same previously-missing
+      // invalidation on the single-email path.
+      this.folderCache = undefined;
+    }
     return { messageId: input.messageId, affected, notApplied: [...new Set(allNotApplied)], dryRun: false };
   }
 

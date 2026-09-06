@@ -75,10 +75,13 @@ export function parseEmailId(emailId: string): { folder: string; uid: number } {
     const uidPart = payload.slice(midSep + EMAIL_ID_SEPARATOR.length);
     const uid = Number(uidPart);
     if (Number.isInteger(uid) && uid > 0 && computeEmailIdChecksum(encodedFolder, uid) === trailing) {
-      const folder = decodeURIComponent(encodedFolder);
-      if (folder) {
-        return { folder, uid };
-      }
+      // The checksum already proves encodedFolder+uid are exactly what
+      // createEmailId originally encoded — a truthy-check on the decoded
+      // folder here only rejected a cryptographically-verified id whenever
+      // that folder happened to be "" (falls through to the legacy branch
+      // below, which then parses garbage off the wrong separator and
+      // throws). Trust the checksum, not an incidental truthiness check.
+      return { folder: decodeURIComponent(encodedFolder), uid };
     }
   }
 

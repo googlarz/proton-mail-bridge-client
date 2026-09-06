@@ -358,7 +358,15 @@ export class DraftStoreService {
     const dir = dirname(this.draftPath);
     try {
       const entries = await readdir(dir);
-      const tmpFiles = entries.filter((name) => name.endsWith(".tmp"));
+      // Every sibling store (delivery-queue/snooze/template) scopes this to
+      // its own filename — this one didn't, so it deleted *any* .tmp file in
+      // the shared dataDir. cleanOrphanedTempFiles runs on nearly every draft
+      // operation (loadUnlocked), so a draft read/write racing another
+      // store's in-flight atomic save (e.g. TemplateService's
+      // templates.json.tmp mid-write-before-rename) could delete that other
+      // store's temp file out from under it, making its rename() throw ENOENT
+      // and silently lose whatever it was saving.
+      const tmpFiles = entries.filter((name) => name.startsWith("drafts.json") && name.endsWith(".tmp"));
       await Promise.all(
         tmpFiles.map((name) =>
           unlink(join(dir, name)).catch((err) => {
