@@ -97,6 +97,20 @@ const MAX_CONSECUTIVE_FAST_IDLE_RETURNS = 5;
 // fires — see the comment at its Promise.race for why a caller-side timeout
 // can't rely on imapflow's graceful preCheck break alone.
 const HARD_IDLE_TIMEOUT_GRACE_MS = 5_000;
+// bulkUpdateLabels/bulkMove have no per-item bound: a single IMAP round trip
+// wedged behind the perpetual IDLE watcher's connection churn (see
+// MAX_CONSECUTIVE_FAST_IDLE_RETURNS above) can hang the *entire* batch
+// forever — reported live as a 104-email bulk_update_labels call whose
+// tools/call response never arrived at all, not merely a slow one. Bound
+// each item so a stuck one becomes a reported per-item failure instead of an
+// unrecoverable hang, and force a reconnect so the item after it gets a
+// fresh, healthy connection rather than retrying the same wedged one.
+const BULK_ITEM_TIMEOUT_MS = 30_000;
+// Same reasoning as BULK_ITEM_TIMEOUT_MS, for the single-command bulk paths
+// (bulkMove's one messageMove over the whole uid set) — longer because one
+// legitimate call covering many messages can reasonably take longer than a
+// single-email round trip.
+const BULK_BATCH_TIMEOUT_MS = 60_000;
 const UID_VALIDITY_MISMATCH_ERROR = "UID validity mismatch - local index is stale, run sync_emails to refresh";
 
 function collectErrorText(error: unknown): string {
@@ -1695,14 +1709,18 @@ export class SimpleIMAPService {
       try {
         let uidMap: Map<number, number> | undefined;
         let hasUidPlus = false;
-        await this.withMailbox(folder, false, async (client) => {
-          const moved = await client.messageMove(uidSet, input.targetFolder, { uid: true });
-          if (moved === false) {
-            throw new Error(`Server did not move uid set ${uidSet}`);
-          }
-          uidMap = moved.uidMap;
-          hasUidPlus = client.capabilities.has("UIDPLUS");
-        });
+        await this.withTimeout(
+          this.withMailbox(folder, false, async (client) => {
+            const moved = await client.messageMove(uidSet, input.targetFolder, { uid: true });
+            if (moved === false) {
+              throw new Error(`Server did not move uid set ${uidSet}`);
+            }
+            uidMap = moved.uidMap;
+            hasUidPlus = client.capabilities.has("UIDPLUS");
+          }),
+          BULK_BATCH_TIMEOUT_MS,
+          `Timed out after ${BULK_BATCH_TIMEOUT_MS}ms moving uid set ${uidSet}`,
+        );
         for (const uid of uids) {
           const emailId = createEmailId(folder, uid);
           // `moved === false` above only catches an empty/invalid range,
@@ -1933,7 +1951,11 @@ export class SimpleIMAPService {
     for (const uid of uids) {
       const emailId = createEmailId(folder, uid);
       try {
-        await this.updateMessageLabels(emailId, labelsToAdd, labelsToRemove);
+        await this.withTimeout(
+          this.updateMessageLabels(emailId, labelsToAdd, labelsToRemove),
+          BULK_ITEM_TIMEOUT_MS,
+          `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms updating labels for ${emailId}`,
+        );
         results.push({ uid, emailId, ok: true });
         succeeded++;
       } catch (err) {
@@ -3048,6 +3070,36 @@ export class SimpleIMAPService {
       await new Promise<void>((resolve) => setTimeout(resolve, gap));
     }
     this._lastOpTs = Date.now();
+  }
+
+  // Bounds one IMAP round trip that would otherwise hang forever if it's
+  // wedged behind connection churn. Does NOT cancel the underlying command —
+  // imapflow has no way to abort an in-flight request — so on timeout we
+  // also force a disconnect, otherwise the abandoned command would still be
+  // holding the mailbox lock the *next* item's withMailbox() call needs,
+  // turning "one slow item" into "every item after it hangs too."
+  private async withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            reject(new Error(message));
+          }, ms);
+          timer.unref?.();
+        }),
+      ]);
+    } catch (error) {
+      if (timedOut) {
+        await this.disconnect().catch(() => {});
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private assertMailboxUidValidity(client: ImapFlow, expectedUidValidity?: string): void {
