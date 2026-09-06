@@ -111,6 +111,13 @@ export const BULK_ITEM_TIMEOUT_MS = 30_000;
 // legitimate call covering many messages can reasonably take longer than a
 // single-email round trip.
 const BULK_BATCH_TIMEOUT_MS = 60_000;
+// resolveMessageLabels runs on every single-email read (get_email_by_id/
+// get_emails_by_ids), not a bulk operation — a much tighter per-folder
+// timeout than BULK_ITEM_TIMEOUT_MS, plus an overall budget so a handful of
+// slow folders can't add up to an unreasonable wait on what's meant to be a
+// single-message fetch.
+const LABEL_RESOLVE_PER_FOLDER_TIMEOUT_MS = 5_000;
+const LABEL_RESOLVE_BUDGET_MS = 15_000;
 const UID_VALIDITY_MISMATCH_ERROR = "UID validity mismatch - local index is stale, run sync_emails to refresh";
 
 function collectErrorText(error: unknown): string {
@@ -2880,19 +2887,36 @@ export class SimpleIMAPService {
       // round-trips for accounts with many labels.
       .slice(0, 20);
 
+    // No bound here used to mean this ran up to 20 sequential SELECT+SEARCH
+    // round trips on every single get_email_by_id/get_emails_by_ids call,
+    // each vulnerable to hanging behind the perpetual IDLE watcher's
+    // connection churn — with no per-folder timeout, one wedged folder hung
+    // this entire (single-email!) read forever. Reproduced live: get_email_by_id
+    // on two different, unremarkable messages both hung indefinitely.
+    // A per-folder timeout plus an overall budget bounds the worst case —
+    // labels are a best-effort enrichment already (see the catch below), not
+    // something worth blocking the whole read on.
+    const loopDeadline = Date.now() + LABEL_RESOLVE_BUDGET_MS;
     const labels: string[] = [];
     for (const labelFolder of labelFolders) {
+      if (Date.now() >= loopDeadline) {
+        break;
+      }
       try {
-        const found = await this.withMailbox(labelFolder, true, async (client) => {
-          const uids = await client.search({ header: { "Message-ID": messageId } }, { uid: true });
-          return Array.isArray(uids) && uids.length > 0;
-        });
+        const found = await this.withTimeout(
+          this.withMailbox(labelFolder, true, async (client) => {
+            const uids = await client.search({ header: { "Message-ID": messageId } }, { uid: true });
+            return Array.isArray(uids) && uids.length > 0;
+          }),
+          LABEL_RESOLVE_PER_FOLDER_TIMEOUT_MS,
+          `Timed out after ${LABEL_RESOLVE_PER_FOLDER_TIMEOUT_MS}ms resolving label ${labelFolder}`,
+        );
         if (found) {
           labels.push(labelFolder);
         }
       } catch {
-        // Best-effort — a transient SELECT/SEARCH failure on one label
-        // folder shouldn't fail the whole read.
+        // Best-effort — a transient SELECT/SEARCH failure (or timeout) on
+        // one label folder shouldn't fail the whole read.
       }
     }
     return labels;
