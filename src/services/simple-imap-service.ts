@@ -684,14 +684,29 @@ export class SimpleIMAPService {
       return this.folderCache;
     }
 
-    const client = await this.ensureConnected();
-    const folders = await client.list({
-      statusQuery: {
-        messages: true,
-        unseen: true,
-        uidNext: true,
-      },
-    });
+    let client = await this.ensureConnected();
+    let folders;
+    try {
+      folders = await client.list({
+        statusQuery: { messages: true, unseen: true, uidNext: true },
+      });
+    } catch (error) {
+      // ensureConnected()'s `this.client?.usable` check is a snapshot — it can
+      // pass a beat before a concurrent disconnect (e.g. the IDLE watcher
+      // resetting a stuck connection) actually tears the socket down, handing
+      // this call a client that dies mid-request. Reproduced live: sync_folders
+      // failed with NoConnection 2ms after an unrelated "IMAP IDLE returned
+      // without blocking; resetting connection" log line. A plain read has no
+      // side effect to double up on, so just reconnect and retry once.
+      if ((error as { code?: string } | undefined)?.code !== "NoConnection") {
+        throw error;
+      }
+      await this.disconnect().catch(() => {});
+      client = await this.ensureConnected();
+      folders = await client.list({
+        statusQuery: { messages: true, unseen: true, uidNext: true },
+      });
+    }
 
     this.folderCache = folders.map(mapFolder);
     return this.folderCache;
@@ -703,15 +718,27 @@ export class SimpleIMAPService {
     return { syncedAt, folders };
   }
 
-  // A write command sent right as imapflow cycles its socket (IDLE renewal, or
-  // Bridge dropping the connection under it) can throw "Connection not available"
-  // even though the command already reached the server — reproduced live: create/
-  // rename/delete all left the mailbox in the post-command state while still
-  // throwing NoConnection back to the caller. Blindly retrying the same mutation
-  // on the fresh connection would then fail a *second* time for the opposite
-  // reason ("already exists" / "no such mailbox"), reporting an error for a
-  // request that in fact succeeded. Reconnect and check the actual folder list
-  // first; only re-send the mutation if it demonstrably didn't happen.
+  // Two distinct failure modes land here and both are resolved the same way —
+  // by checking what the folder list actually says instead of trusting the
+  // thrown error:
+  //   1. NoConnection: a write sent right as imapflow cycles its socket (IDLE
+  //      renewal, or Bridge dropping the connection under it) can throw
+  //      "Connection not available" even though the command already reached
+  //      the server. Reproduced live: create/rename/delete all left the
+  //      mailbox in the post-command state while still throwing NoConnection.
+  //   2. A genuine IMAP NO/BAD ("Command failed") for a mutation whose goal
+  //      state turns out to already hold — e.g. delete_label on a label a
+  //      prior call already removed. Bridge often returns this with no
+  //      `.responseText` at all, so there's no reason string to show the
+  //      caller; reported live as delete_label on an already-gone label
+  //      failing with a bare "Command failed" and nothing else to go on.
+  // Blindly retrying the same mutation after either would risk failing a
+  // *second* time for the opposite reason ("already exists" / "no such
+  // mailbox"), reporting an error for a request that in fact succeeded.
+  // Reconnect (only needed for case 1) and check the actual folder list
+  // first; only re-send the mutation if the goal demonstrably wasn't met —
+  // and even then, only retry when reconnecting is what plausibly caused the
+  // first attempt to fail, not for an unrelated server rejection.
   private async mutateFolderWithReconnectCheck<T>(
     mutate: () => Promise<T>,
     alreadyApplied: (folders: FolderInfo[]) => T | undefined,
@@ -719,13 +746,19 @@ export class SimpleIMAPService {
     try {
       return await mutate();
     } catch (error) {
-      if ((error as { code?: string } | undefined)?.code !== "NoConnection") {
-        throw error;
+      const isNoConnection = (error as { code?: string } | undefined)?.code === "NoConnection";
+      if (isNoConnection) {
+        await this.disconnect().catch(() => {});
       }
-      await this.disconnect().catch(() => {});
       const folders = await this.getFolders(true);
       const applied = alreadyApplied(folders);
-      return applied !== undefined ? applied : mutate();
+      if (applied !== undefined) {
+        return applied;
+      }
+      if (!isNoConnection) {
+        throw error;
+      }
+      return mutate();
     }
   }
 
