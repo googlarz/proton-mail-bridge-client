@@ -192,7 +192,18 @@ export class DeliveryQueueService {
         });
         sent += 1;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const rawMessage = error instanceof Error ? error.message : String(error);
+        // withTimeout() races the send against a timer — it can't actually
+        // cancel sendMail() (SMTP over a network socket has no cancellation
+        // hook), so the real send keeps running in the background after the
+        // race "loses" and may still complete successfully moments later.
+        // A bare timeout message here reads as a definite failure, but the
+        // true outcome is exactly as unknown as recoverInterruptedSends'
+        // restart-recovery case (see its comment) — say so explicitly
+        // instead of implying delivery didn't happen.
+        const message = rawMessage.startsWith("Timed out after")
+          ? `${rawMessage} — delivery outcome is unknown, the send may still complete in the background. Check the mailbox's Sent folder to confirm before resending.`
+          : rawMessage;
         this.log.warn("Delivery queue item failed to send", "DeliveryQueueService", { id, error });
         await this.withLock(async () => {
           const store = await this.loadUnlocked();
