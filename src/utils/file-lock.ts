@@ -30,10 +30,58 @@ function lockPathFor(storePath: string): string {
   return `${storePath}.lock`;
 }
 
+// Liveness probe for the PID encoded in a lock file's token (see acquire()).
+// process.kill(pid, 0) sends no signal — it just asks the OS whether it
+// could — so this never touches the other process, it only inspects the
+// error: ESRCH means no such process (dead), EPERM means it exists but we
+// lack permission to signal it (still alive), anything else is inconclusive.
+function isProcessAlive(pid: number): boolean | undefined {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;
+    if (code === "ESRCH") {
+      return false;
+    }
+    if (code === "EPERM") {
+      return true;
+    }
+    return undefined;
+  }
+}
+
 async function isStale(lockPath: string): Promise<boolean> {
   try {
     const info = await stat(lockPath);
-    return Date.now() - info.mtimeMs > STALE_LOCK_MS;
+    const ageMs = Date.now() - info.mtimeMs;
+
+    // Confirmed live: a lock file's own content encodes its holder's PID
+    // (the "${pid}-${uuid}" token written in acquire()) — so before falling
+    // back to pure age, ask the OS directly whether that PID still exists.
+    // This closes a found-live gap: an ungraceful holder death (kill -9,
+    // OOM kill, crash) leaves the lock file behind, and every other process
+    // sharing the store would otherwise crash-loop against
+    // LOCK_ACQUIRE_TIMEOUT_MS for up to STALE_LOCK_MS (30s) after every such
+    // death, since age alone can't tell "dead holder" apart from "slow but
+    // live holder". A dead PID means the lock is stealable immediately,
+    // regardless of age.
+    const content = await readFile(lockPath, "utf8").catch(() => undefined);
+    const pidMatch = content?.match(/^(\d+)-/);
+    if (pidMatch) {
+      const pid = Number(pidMatch[1]);
+      const alive = isProcessAlive(pid);
+      if (alive === false) {
+        return true;
+      }
+      // Alive, or the probe was inconclusive (unexpected error code) — be
+      // conservative and fall through to the existing age-based check below
+      // rather than assume anything about a PID we can't rule out.
+    }
+    // Malformed/legacy lock content (no parseable PID prefix) also falls
+    // through here rather than throwing.
+
+    return ageMs > STALE_LOCK_MS;
   } catch {
     // Already gone — not stale, just no longer contended.
     return false;

@@ -3095,7 +3095,18 @@ export function createServer(
 
   if (options.startBackgroundSync) {
     backgroundSyncService.start();
-    void deliveryQueueService.start();
+    // start()'s first real work is awaiting recoverInterruptedSends(), which
+    // can throw a lock-acquisition-timeout error (see file-lock.ts). Bare
+    // `void` here would turn that into an unhandled rejection, and the
+    // process-wide unhandledRejection handler below calls process.exit(1) —
+    // crashing the whole server before it serves a single request over
+    // nothing worse than startup lock contention. Log and degrade instead:
+    // the delivery queue just won't be running yet.
+    deliveryQueueService.start().catch((error) => {
+      logger.error("deliveryQueueService.start() failed", "MCPServer", error);
+    });
+    // snoozeService.start() is synchronous (returns void, not a Promise) —
+    // nothing to catch here.
     snoozeService.start();
   }
 
