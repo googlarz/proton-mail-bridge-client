@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rename, stat } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AuditEntry, ProtonMailConfig } from "../types/index.js";
 
@@ -9,6 +9,7 @@ export class AuditService {
   private readonly auditPath: string;
   private readonly archivePath: string;
   private _rotateLock: Promise<void> = Promise.resolve();
+  private permissionsChecked = false;
 
   constructor(private readonly config: ProtonMailConfig) {
     this.auditPath = join(this.config.dataDir, "audit.log");
@@ -21,6 +22,18 @@ export class AuditService {
 
   async record(entry: AuditEntry): Promise<void> {
     await mkdir(dirname(this.auditPath), { recursive: true, mode: 0o700 });
+    // appendFile's `mode` option only applies when the file doesn't already
+    // exist — on every real upgrade (not a fresh install), audit.log already
+    // existed at 0644 from before this fix, and every append since kept that
+    // permission forever since appending never re-chmods. Explicitly chmod
+    // once per process lifetime (not on every single append — this is a hot
+    // path) so an existing, already-populated audit.log actually gets
+    // restricted on upgrade instead of only protecting brand-new installs.
+    if (!this.permissionsChecked) {
+      this.permissionsChecked = true;
+      await chmod(this.auditPath, 0o600).catch(() => {});
+      await chmod(this.archivePath, 0o600).catch(() => {});
+    }
     const persistedEntry: AuditEntry = {
       ...entry,
       durationMs: entry.durationMs ?? 0,

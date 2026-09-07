@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { chmod, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as pathResolve, sep as pathSep } from "node:path";
@@ -6020,6 +6020,13 @@ export async function main(): Promise<void> {
   // recursive:true is a safe no-op on an already-existing directory — it
   // will not change that directory's existing mode.
   await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
+  // mkdir's `mode` only applies when the directory doesn't already exist —
+  // on every real upgrade of an existing install (the common case, not a
+  // fresh one), this directory already existed at 0755 from before this fix,
+  // and mkdir on an existing directory is a silent no-op for its mode.
+  // Explicitly chmod it too so the restriction actually takes effect on
+  // upgrade, not only on a brand-new dataDir.
+  await chmod(config.dataDir, 0o700).catch(() => {});
   const { server, smtpService, imapService, backgroundSyncService, deliveryQueueService, snoozeService } = createServer(config, {
     startBackgroundSync: true,
   });
