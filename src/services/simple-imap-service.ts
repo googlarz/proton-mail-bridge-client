@@ -25,6 +25,7 @@ import {
   dedupeEmails,
   extractAttachments,
   extractMessageIdList,
+  isSelfAddress,
   isTextLikeMimeType,
   mapEnvelopeAddresses,
   mapParsedAddresses,
@@ -2112,7 +2113,12 @@ export class SimpleIMAPService {
         if (fromAddrs.length === 0) continue;
         const addr = (fromAddrs[0].address ?? "").toLowerCase();
         if (!addr) continue;
-        if (input.excludeSelf && addr === selfAddress) continue;
+        // isSelfAddress also normalizes "+tag" plus-addressing — a bare
+        // `=== selfAddress` missed a self-sent message from
+        // "user+tag@domain" (configured account: "user@domain"), showing it
+        // as received-from-a-stranger instead of self.
+        const isSelf = isSelfAddress(addr, selfAddress);
+        if (input.excludeSelf && isSelf) continue;
         const existing = freq.get(addr);
         if (existing) {
           existing.count++;
@@ -2121,7 +2127,7 @@ export class SimpleIMAPService {
             address: addr,
             name: fromAddrs[0].name,
             count: 1,
-            direction: addr === selfAddress ? "self" : "received",
+            direction: isSelf ? "self" : "received",
           });
         }
       }

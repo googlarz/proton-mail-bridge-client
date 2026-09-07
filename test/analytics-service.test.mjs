@@ -63,6 +63,46 @@ test("getContacts counts incoming/outgoing separately and excludes the owner", (
   assert.ok(!contacts.some((contact) => contact.address === owner));
 });
 
+test("getContacts counts one email once even when a contact's address appears in multiple fields", () => {
+  const service = new AnalyticsService();
+  const owner = "owner@example.com";
+  const emails = [
+    // Reply-To equal to From (very common) plus the same contact in To and Cc —
+    // must still count as exactly one message toward this one contact.
+    email({
+      id: "INBOX::1",
+      from: [{ address: "alice@example.com", name: "Alice" }],
+      replyTo: [{ address: "alice@example.com" }],
+      to: [{ address: owner }, { address: "alice@example.com" }],
+      cc: [{ address: "alice@example.com" }],
+      internalDate: "2026-03-01T10:00:00.000Z",
+    }),
+  ];
+
+  const contacts = service.getContacts(emails, 100, owner);
+
+  assert.equal(contacts.length, 1);
+  assert.equal(contacts[0].totalMessages, 1);
+  assert.equal(contacts[0].incoming, 1);
+});
+
+test("getContacts recognizes a self-sent message from a plus-addressed alias as self, not a contact", () => {
+  const service = new AnalyticsService();
+  const owner = "owner@example.com";
+  const emails = [
+    email({
+      id: "INBOX::1",
+      from: [{ address: "owner+newsletter@example.com" }],
+      to: [{ address: owner }],
+      internalDate: "2026-03-01T10:00:00.000Z",
+    }),
+  ];
+
+  const contacts = service.getContacts(emails, 100, owner);
+
+  assert.equal(contacts.length, 0, "the plus-addressed self alias must not appear as a contact");
+});
+
 test("getContacts ranks by totalMessages, then most recent contact, and respects limit", () => {
   const service = new AnalyticsService();
   const owner = "owner@example.com";

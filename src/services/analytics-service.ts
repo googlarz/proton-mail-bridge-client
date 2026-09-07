@@ -5,7 +5,7 @@ import type {
   FolderInfo,
   VolumeTrendPoint,
 } from "../types/index.js";
-import { dedupeEmails, extractDomain, lowerCaseAddress } from "../utils/helpers.js";
+import { dedupeEmails, extractDomain, isSelfAddress, lowerCaseAddress } from "../utils/helpers.js";
 
 function extractAddresses(email: EmailSummary): EmailAddress[] {
   return [...email.from, ...email.to, ...email.cc, ...email.bcc, ...email.replyTo];
@@ -71,7 +71,10 @@ export class AnalyticsService {
 
       for (const sender of email.from) {
         const address = lowerCaseAddress(sender.address);
-        if (!address || address === lowerCaseAddress(ownerEmail)) {
+        // isSelfAddress also normalizes "+tag" plus-addressing — see its
+        // definition for why a bare equality check on the owner's address
+        // missed self-sent mail using a "+tag" alias.
+        if (!address || isSelfAddress(address, ownerEmail)) {
           continue;
         }
         senderCounts.set(address, (senderCounts.get(address) ?? 0) + 1);
@@ -126,7 +129,6 @@ export class AnalyticsService {
   }
 
   getContacts(emails: EmailSummary[], limit = 100, ownerEmail?: string): ContactStats[] {
-    const owner = lowerCaseAddress(ownerEmail);
     const contacts = new Map<string, ContactStats>();
 
     for (const email of dedupeEmails(emails)) {
@@ -138,11 +140,25 @@ export class AnalyticsService {
         .filter((value) => Boolean(value.address));
 
       const emailTimestamp = email.internalDate || email.date;
-      const emailFromOwner = fromAddresses.some((value) => value.address === owner);
+      const emailFromOwner = fromAddresses.some((value) => isSelfAddress(value.address, ownerEmail));
 
+      // extractAddresses concatenates from/to/cc/bcc/replyTo without
+      // deduping — very common for Reply-To to equal From, or for an
+      // address to appear in both To and Cc. Iterating that raw list
+      // counted the same email multiple times toward one contact's
+      // totalMessages/incoming/outgoing. Dedupe per email first (first
+      // occurrence's name wins) so one email always contributes at most
+      // once per distinct contact.
+      const seenInThisEmail = new Map<string, EmailAddress>();
       for (const address of extractAddresses(email)) {
         const normalizedAddress = lowerCaseAddress(address.address);
-        if (!normalizedAddress || normalizedAddress === owner) {
+        if (normalizedAddress && !seenInThisEmail.has(normalizedAddress)) {
+          seenInThisEmail.set(normalizedAddress, address);
+        }
+      }
+
+      for (const [normalizedAddress, address] of seenInThisEmail) {
+        if (isSelfAddress(normalizedAddress, ownerEmail)) {
           continue;
         }
 

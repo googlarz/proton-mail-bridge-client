@@ -510,6 +510,38 @@ export function lowerCaseAddress(value?: string): string | undefined {
   return value?.trim().toLowerCase();
 }
 
+// Strips a Proton "+tag" plus-addressing suffix from the local part only
+// (never touches the domain), so "user+newsletters@domain" normalizes to
+// "user@domain" for self-detection purposes. NOT used for general address
+// equality/deduplication (e.g. contact grouping) — stripping "+tag" there
+// would wrongly conflate two different real senders who happen to both use
+// "+tag" addressing, which is a real, common pattern independent of this
+// account's own use of it.
+function stripPlusTag(address: string): string {
+  const at = address.indexOf("@");
+  if (at === -1) {
+    return address;
+  }
+  const local = address.slice(0, at);
+  const plus = local.indexOf("+");
+  return plus === -1 ? address : `${local.slice(0, plus)}${address.slice(at)}`;
+}
+
+// Was previously done as a bare `===` on lowercased addresses (in both
+// top_senders' excludeSelf and the contacts/analytics owner exclusion) —
+// missed a self-sent message using "user+tag@domain" (the configured
+// account is "user@domain"), which then showed up as a "received" message
+// from a stranger, and as the account's own top contact, instead of being
+// recognized as self.
+export function isSelfAddress(candidate: string | undefined, ownerEmail: string | undefined): boolean {
+  const a = lowerCaseAddress(candidate);
+  const b = lowerCaseAddress(ownerEmail);
+  if (!a || !b) {
+    return false;
+  }
+  return stripPlusTag(a) === stripPlusTag(b);
+}
+
 export function normalizeMessageId(value?: string): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) {
