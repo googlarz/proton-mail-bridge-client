@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [1.19.5] — 2026-09-07
+
+Follow-up fixes from a final hacker/security/performance/senior-dev review pass of the v1.19.4 changes.
+
+### Fixed
+- **The v1.19.4 SQLite growth fix (`auto_vacuum = INCREMENTAL`) did nothing on any real upgrade** — SQLite silently ignores that pragma on an already-populated database, so every existing install kept growing unboundedly exactly as before. Now detects when the pragma didn't take effect and forces conversion with a one-time `VACUUM`.
+- **`pruneSentDrafts` had no fallback to `createdAt`** when `sentAt` was missing, unlike the equivalent pruning in `delivery-queue-service.ts`/`snooze-service.ts` — a future migration/import producing a "sent" draft without `sentAt` would never be pruned.
+- **TOCTOU gap in attachment/export path validation**: `guardAttachmentOutputPath` validated a path via `realpathSync` but returned `void`, so callers re-derived and wrote through the original, non-realpath'd path — a symlink swapped in after validation could redirect the write outside the allowed directory. Callers now write through the already-validated real path.
+- **Audit log rotation kept only one archive generation**, so a burst of ordinary tool calls forcing two rotations could permanently evict a specific targeted historical entry. Now keeps two generations (`.1`, `.2`), doubling that cost.
+
 ## [1.19.4] — 2026-09-07
 
 A large batch of fixes from an extensive multi-round review, spanning nearly every service. Grouped by theme rather than listed per-commit.
