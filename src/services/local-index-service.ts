@@ -1906,7 +1906,14 @@ export class LocalIndexService {
         changed: Boolean((row as { changed?: number }).changed),
         fetched: (row as { fetched?: number }).fetched,
         total: (row as { total?: number }).total,
-        backfilledToUid: (row as { backfilled_to_uid?: number }).backfilled_to_uid,
+        // SQLite returns null (not undefined) for an unset column — but
+        // planFolderSync distinguishes "no prior backfill" (undefined) from
+        // a real floor value, and null <= 1 is true in JS, so a null here
+        // was silently treated as "already backfilled to UID 1" on the very
+        // first full sync after this column was introduced. Found live:
+        // the first sync_emails(full:true) call after upgrading returned
+        // changed:false, fetched:0 instead of starting the newest window.
+        backfilledToUid: (row as { backfilled_to_uid?: number | null }).backfilled_to_uid ?? undefined,
       } satisfies MailboxSyncCheckpoint));
 
     const messageSqlParts = [`SELECT * FROM messages`];

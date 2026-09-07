@@ -540,6 +540,40 @@ test("a windowed full sync only prunes expunged messages within its own scanned 
   }
 });
 
+test("getSyncCheckpointMap returns backfilledToUid as undefined, not null, when never set", async () => {
+  // SQLite returns null (not undefined) for an unset column. planFolderSync
+  // distinguishes "no prior backfill" (undefined) from a real floor value —
+  // and `null <= 1` is true in JS — so a raw null here made the very first
+  // full sync after this column was introduced look like backfill had
+  // already reached UID 1, reporting changed:false/fetched:0 instead of
+  // starting the newest window. Found live immediately after deploying the
+  // backfill feature itself.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-backfill-null-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:00:00.000Z",
+      folders: [{ path: "Archive", name: "Archive", delimiter: "/", specialUse: "\\Archive", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+      folderStats: [{ folder: "Archive", fetched: 1, total: 1, strategy: "full", rangeStartUid: 1, rangeEndUid: 1 }],
+      emails: [{
+        id: "Archive::1", folder: "Archive", uid: 1, seq: 1,
+        messageId: "<msg-1@example.com>", subject: "Message 1",
+        from: [{ address: "sender@example.com" }], to: [{ address: "owner@example.com" }],
+        cc: [], bcc: [], replyTo: [],
+        date: "2026-01-01T00:00:00.000Z", internalDate: "2026-01-01T00:00:00.000Z",
+        isRead: false, isStarred: false, flags: [],
+        preview: "Body", hasAttachments: false, attachments: [], labels: [],
+      }],
+    });
+
+    const checkpoints = await service.getSyncCheckpointMap();
+    assert.strictEqual(checkpoints.Archive.backfilledToUid, undefined, "must be undefined, not SQLite's null, or planFolderSync misreads it as backfill-complete");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("dateFrom/dateTo set to the same day includes that day's messages instead of excluding it", async () => {
   // Found live: dateTo:"2026-09-02" did `COALESCE(internal_date, date) <=
   // "2026-09-02"` — a raw string comparison against a full ISO timestamp
