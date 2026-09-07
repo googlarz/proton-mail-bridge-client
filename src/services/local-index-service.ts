@@ -584,7 +584,34 @@ export class LocalIndexService {
 
   async getStatus(): Promise<LocalIndexStatus> {
     const snapshot = await this.loadSnapshot();
-    return this.toStatus(snapshot);
+    const counts = await this.realMessageCounts();
+    return this.toStatus(snapshot, counts);
+  }
+
+  // loadSnapshot() caps snapshot.messages at DEFAULT_SNAPSHOT_LIMIT (5000) —
+  // deliberately, so thread/status builders never materialize the whole
+  // mailbox at once. But toStatus() used to derive storedMessageCount and
+  // dedupedMessageCount from that same capped array, so both silently
+  // plateaued at 5000 forever regardless of how much was actually indexed.
+  // Found live: after syncing Archive, get_index_status still reported
+  // storedMessageCount:5000 while run_doctor's runIntegrityCheck (a real
+  // SELECT COUNT(*)) showed 34507 real rows — the exact field documented
+  // for "verify the index is fresh and complete" was lying about progress.
+  // Query the real counts directly instead; cheap indexed COUNT(*)s, no
+  // need to touch the deliberate thread/label-building cap above.
+  private async realMessageCounts(): Promise<{ storedMessageCount: number; dedupedMessageCount: number }> {
+    const db = await this.ensureDb();
+    const storedMessageCount = Number(
+      (db.prepare(`SELECT COUNT(*) AS count FROM messages`).get() as { count: number }).count,
+    );
+    const dedupedMessageCount = Number(
+      (
+        db
+          .prepare(`SELECT COUNT(DISTINCT COALESCE(message_id, email_id)) AS count FROM messages`)
+          .get() as { count: number }
+      ).count,
+    );
+    return { storedMessageCount, dedupedMessageCount };
   }
 
   async search(filters: SearchEmailsInput): Promise<{
@@ -1947,8 +1974,10 @@ export class LocalIndexService {
     };
   }
 
-  private toStatus(snapshot: SnapshotData): LocalIndexStatus {
-    const dedupedCount = dedupeEmails(snapshot.messages).length;
+  private toStatus(
+    snapshot: SnapshotData,
+    counts: { storedMessageCount: number; dedupedMessageCount: number },
+  ): LocalIndexStatus {
     const mailboxMessages = this.buildMailboxMessages(snapshot);
     const threadCount = this.buildThreads(snapshot).length;
     const labelCount = new Set(
@@ -1968,8 +1997,8 @@ export class LocalIndexService {
       folderCount: snapshot.folders.length,
       labelCount,
       threadCount,
-      storedMessageCount: snapshot.messages.length,
-      dedupedMessageCount: dedupedCount,
+      storedMessageCount: counts.storedMessageCount,
+      dedupedMessageCount: counts.dedupedMessageCount,
       syncCheckpoints: snapshot.syncCheckpoints,
       folders: snapshot.indexedFolders,
     };
