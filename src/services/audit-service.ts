@@ -20,7 +20,7 @@ export class AuditService {
   }
 
   async record(entry: AuditEntry): Promise<void> {
-    await mkdir(dirname(this.auditPath), { recursive: true });
+    await mkdir(dirname(this.auditPath), { recursive: true, mode: 0o700 });
     const persistedEntry: AuditEntry = {
       ...entry,
       durationMs: entry.durationMs ?? 0,
@@ -29,7 +29,8 @@ export class AuditService {
     await this.withRotateLock(async () => {
       await this.rotateIfNeeded();
       // WARNING: This audit log has no cryptographic integrity protection. Any process with filesystem access can tamper with or delete entries.
-      await appendFile(this.auditPath, `${JSON.stringify(persistedEntry)}\n`, "utf8");
+      // mode: 0o600 — the audit trail can contain full request/error detail, so it must not land world-readable at the default umask.
+      await appendFile(this.auditPath, `${JSON.stringify(persistedEntry)}\n`, { encoding: "utf8", mode: 0o600 });
     });
   }
 
