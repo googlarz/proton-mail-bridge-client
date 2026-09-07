@@ -137,3 +137,31 @@ test("a lock file older than the stale threshold is stolen instead of blocking f
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("a lock file whose encoded PID is confirmed dead is stolen immediately, without waiting out STALE_LOCK_MS", async () => {
+  // Closes the found-live crash-loop gap: an ungraceful holder death leaves
+  // a fresh (not yet age-stale) lock file behind. Every other process
+  // sharing the store used to have to wait out the full 30s age threshold
+  // before stealing it. With PID-liveness checked first, a lock file whose
+  // encoded PID no longer exists is stealable immediately, regardless of age.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-file-lock-dead-pid-test-"));
+  const storePath = join(dataDir, "store.json");
+  const lockPath = `${storePath}.lock`;
+  try {
+    // PID 999999 is exceedingly unlikely to be a live process; write the
+    // lock with a *fresh* mtime so only the PID-liveness check (not age)
+    // can explain a fast steal.
+    await writeFile(lockPath, "999999-dead-holder-uuid");
+
+    let ran = false;
+    const start = Date.now();
+    await withFileLock(storePath, async () => {
+      ran = true;
+    });
+    assert.equal(ran, true);
+    // Should steal near-immediately, not wait out STALE_LOCK_MS (30s).
+    assert.ok(Date.now() - start < 2000, "expected the dead-PID lock to be stolen quickly");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
