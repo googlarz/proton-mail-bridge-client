@@ -4235,6 +4235,22 @@ export function createServer(
               `Draft ${draft.id} was already sent — scheduling it again would deliver it twice. Use create_draft to compose a new message instead.`,
             );
           }
+          // Mirrors the check above but for the same-ordering case: a draft
+          // has no "scheduled" status (only "draft"/"sent" — see
+          // DraftStoreService), so calling schedule_draft twice on the same
+          // still-"draft" draft (e.g. to change sendAt, or a client retry
+          // after an ambiguous response) sailed past the status check above
+          // and enqueued a second, independent delivery-queue record. Both
+          // fire independently later, delivering the same email twice.
+          const alreadyPendingScheduled = (await deliveryQueueService.list()).find(
+            (record) => record.sourceDraftId === draft.id && record.status === "pending",
+          );
+          if (alreadyPendingScheduled) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              `This draft already has a pending scheduled send (id ${alreadyPendingScheduled.id}, sendAt ${alreadyPendingScheduled.sendAt}). Scheduling it again would deliver it twice. Cancel the existing one with cancel_send first if you want a different sendAt.`,
+            );
+          }
           const sendAt = requireString(args, "sendAt");
           const sendAtTime = new Date(sendAt).getTime();
           if (Number.isNaN(sendAtTime)) {
