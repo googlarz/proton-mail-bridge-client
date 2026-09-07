@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DraftStoreService } from "../dist/services/draft-store-service.js";
@@ -98,6 +98,39 @@ test("DraftStoreService serializes concurrent draft creation", async () => {
     const drafts = await store.listDrafts();
     assert.equal(drafts.length, 10);
     assert.equal(new Set(drafts.map((draft) => draft.id)).size, 10);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a sent draft older than the retention window is pruned on the next write, but a recent one and an active draft are kept", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-drafts-prune-"));
+  const draftPath = join(dataDir, "drafts.json");
+  try {
+    const store = new DraftStoreService(createConfig(dataDir));
+
+    const oldSent = await store.createDraft({ subject: "old-sent", body: "b", to: ["a@example.com"] });
+    await store.markSent(oldSent.id, { messageId: "<old@example.com>" });
+
+    const recentSent = await store.createDraft({ subject: "recent-sent", body: "b", to: ["a@example.com"] });
+    await store.markSent(recentSent.id, { messageId: "<recent@example.com>" });
+
+    const active = await store.createDraft({ subject: "active", body: "b", to: ["a@example.com"] });
+
+    // Backdate the old sent draft's sentAt directly in the file — markSent
+    // always stamps "now", so the only way to get a genuinely old record is
+    // to rewrite the persisted timestamp, same as it would arrive after 30
+    // real days of use.
+    const raw = JSON.parse(await readFile(draftPath, "utf8"));
+    raw.drafts[oldSent.id].sentAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    await writeFile(draftPath, JSON.stringify(raw, null, 2), "utf8");
+
+    // Any write path triggers pruning; updating the still-active draft is enough.
+    await store.updateDraft(active.id, { subject: "active-updated" });
+
+    const remaining = await store.listDrafts(true);
+    const ids = remaining.map((draft) => draft.id).sort();
+    assert.deepEqual(ids, [active.id, recentSent.id].sort());
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

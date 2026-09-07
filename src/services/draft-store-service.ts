@@ -19,6 +19,15 @@ interface DraftStoreFile {
   drafts: Record<string, DraftRecord>;
 }
 
+// A "sent" draft is a completed historical record, same as a terminal
+// delivery-queue/snooze entry — it has no more state transitions ahead of it,
+// so keeping it forever only grows drafts.json (every draft operation does a
+// full JSON.parse/JSON.stringify of the whole file, so that growth is a real
+// cost, not just disk). Active "draft" records are never pruned, regardless
+// of age — only ones already marked sent, and only once they're old enough
+// that nobody is realistically still looking them up.
+const SENT_DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
 function createEmptyStore(): DraftStoreFile {
   return {
     version: 1,
@@ -380,10 +389,28 @@ export class DraftStoreService {
   }
 
   private async save(store: DraftStoreFile): Promise<void> {
-    await mkdir(dirname(this.draftPath), { recursive: true });
+    this.pruneSentDrafts(store);
+    await mkdir(dirname(this.draftPath), { recursive: true, mode: 0o700 });
     const tempPath = `${this.draftPath}.tmp`;
-    await writeFile(tempPath, JSON.stringify(store, null, 2), "utf8");
+    await writeFile(tempPath, JSON.stringify(store, null, 2), { encoding: "utf8", mode: 0o600 });
     await rename(tempPath, this.draftPath);
+  }
+
+  // Pruning here (a write-path helper called opportunistically from save())
+  // rather than in load()/loadUnlocked() means read-only listDrafts() calls
+  // never rewrite the file — only an operation that was already going to
+  // write pays the pruning cost.
+  private pruneSentDrafts(store: DraftStoreFile): void {
+    const cutoff = Date.now() - SENT_DRAFT_RETENTION_MS;
+    for (const [id, draft] of Object.entries(store.drafts)) {
+      if (draft.status !== "sent" || !draft.sentAt) {
+        continue;
+      }
+      const sentAtMs = Date.parse(draft.sentAt);
+      if (!Number.isNaN(sentAtMs) && sentAtMs < cutoff) {
+        delete store.drafts[id];
+      }
+    }
   }
 
   private normalizeDraft(draft: DraftRecord): DraftRecord {
