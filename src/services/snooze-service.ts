@@ -22,6 +22,10 @@ const CHECK_INTERVAL_MS = 15_000;
 // every 15s forever and mark the snooze terminally "failed" instead.
 const MAX_WAKE_FAILURES = 5;
 const SNOOZE_WAKE_TIMEOUT_MS = 30_000;
+// How long a terminal (woken/canceled/failed) record is kept before
+// checkDue() prunes it — otherwise this JSON file grows without bound for
+// the lifetime of the account, since nothing else ever removes a record.
+const TERMINAL_RECORD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface SnoozeFile {
   version: number;
@@ -55,7 +59,12 @@ export class SnoozeService {
     // retrying a move is safe (worst case: "not found" if it already moved),
     // so this reverts to "pending" for a normal retry on the next
     // checkDue() pass, rather than a terminal "failed".
-    void this.recoverInterruptedWakes().then(() => this.checkDue());
+    // Fire-and-forget, but guarded: an unhandled rejection here (e.g. a
+    // file-lock acquisition timeout) would otherwise propagate to index.ts's
+    // global handler and take down the whole server over one bad tick.
+    void this.recoverInterruptedWakes()
+      .then(() => this.checkDue())
+      .catch((error) => this.log.error("Startup recovery/checkDue failed", "SnoozeService", error));
     this.scheduleNext();
   }
 
@@ -70,7 +79,12 @@ export class SnoozeService {
   private scheduleNext(): void {
     if (!this.started) return;
     this.timer = setTimeout(() => {
-      void this.checkDue().finally(() => this.scheduleNext());
+      // .catch() before .finally() so a rejection (e.g. a lock-acquire
+      // timeout) is swallowed here — logged, not left to become an unhandled
+      // rejection — while .finally() still always re-arms the next tick.
+      void this.checkDue()
+        .catch((error) => this.log.error("checkDue failed", "SnoozeService", error))
+        .finally(() => this.scheduleNext());
     }, CHECK_INTERVAL_MS);
     this.timer.unref?.();
   }
@@ -167,6 +181,17 @@ export class SnoozeService {
       if (!record) {
         throw new Error(`Snoozed email not found for id ${id}`);
       }
+      // Re-check the status fresh under this lock, mirroring
+      // DeliveryQueueService.checkDue()'s finalize (only writes if the
+      // record is still "sending"): a concurrent process's
+      // recoverInterruptedWakes() may have already reverted this record to
+      // "pending" (e.g. this process died between the claim above and here),
+      // and a second wake() could already be in flight for it. Skip the
+      // write rather than clobbering whatever that other path recorded.
+      if (record.status !== "waking") {
+        this.log.warn("Skipped duplicate snooze finalize — record no longer \"waking\"", "SnoozeService", { id, status: record.status });
+        return record;
+      }
       record.currentEmailId = moved.targetEmailId ?? record.currentEmailId;
       record.status = status;
       record.wokenAt = new Date().toISOString();
@@ -225,7 +250,36 @@ export class SnoozeService {
         failed += 1;
       }
     }
+
+    // Prune once per tick, after processing — not on every read-only list()
+    // call — and only write if something actually changed.
+    await this.withLock(async () => {
+      const store = await this.loadUnlocked();
+      if (this.pruneOldRecords(store)) await this.save(store);
+    });
+
     return { woken, failed };
+  }
+
+  // Removes terminal (woken/canceled/failed) records past
+  // TERMINAL_RECORD_RETENTION_MS so this JSON file doesn't grow without
+  // bound over the account's lifetime. Mutates store.items in place; returns
+  // whether anything was pruned.
+  private pruneOldRecords(store: SnoozeFile): boolean {
+    const cutoff = Date.now() - TERMINAL_RECORD_RETENTION_MS;
+    let changed = false;
+    for (const [id, record] of Object.entries(store.items)) {
+      if (record.status !== "woken" && record.status !== "canceled" && record.status !== "failed") continue;
+      // A terminally "failed" record (retry cap exceeded) has no dedicated
+      // completion timestamp — fall back to createdAt, an earlier (more
+      // conservative) bound anyway.
+      const timestamp = record.wokenAt ?? record.createdAt;
+      if (new Date(timestamp).getTime() < cutoff) {
+        delete store.items[id];
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   private async recoverInterruptedWakes(): Promise<void> {
@@ -320,9 +374,13 @@ export class SnoozeService {
   // ponytail: same cross-process race as DeliveryQueueService.save — see that
   // comment for why it's left unlocked and the real upgrade path (SQLite).
   private async save(store: SnoozeFile): Promise<void> {
-    await mkdir(dirname(this.storePath), { recursive: true });
+    await mkdir(dirname(this.storePath), { recursive: true, mode: 0o700 });
     const tempPath = `${this.storePath}.tmp`;
-    await writeFile(tempPath, JSON.stringify(store, null, 2), "utf8");
+    // Restrictive mode on the temp file itself, not just the final renamed
+    // path — rename() preserves the mode it's given, but a mode passed only
+    // after the fact wouldn't retroactively cover the temp file's brief
+    // window on disk.
+    await writeFile(tempPath, JSON.stringify(store, null, 2), { encoding: "utf8", mode: 0o600 });
     await rename(tempPath, this.storePath);
   }
 }

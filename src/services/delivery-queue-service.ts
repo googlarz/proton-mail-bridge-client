@@ -10,6 +10,10 @@ import { withTimeout } from "../utils/helpers.js";
 import { SMTPService } from "./smtp-service.js";
 
 const SEND_ITEM_TIMEOUT_MS = 30_000;
+// How long a terminal (sent/failed) record is kept before checkDue() prunes
+// it — otherwise this JSON file grows without bound for the lifetime of the
+// account, since nothing else ever removes a record.
+const TERMINAL_RECORD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 // Local, persistent send queue shared by undo-send (seconds-long hold) and
 // scheduled-send (minutes/hours/days out). Mirrors DraftStoreService's
@@ -57,8 +61,11 @@ export class DeliveryQueueService {
     // unknown outcome — resolve those before the catch-up pass can touch
     // anything, so we never guess and double-send.
     await this.recoverInterruptedSends();
-    // Catch-up pass immediately, then check periodically.
-    void this.checkDue();
+    // Catch-up pass immediately, then check periodically. Fire-and-forget,
+    // but guarded: an unhandled rejection here (e.g. a file-lock acquisition
+    // timeout) would otherwise propagate to index.ts's global handler and
+    // take down the whole server over one bad tick.
+    void this.checkDue().catch((error) => this.log.error("checkDue failed", "DeliveryQueueService", error));
     this.scheduleNext();
   }
 
@@ -73,7 +80,12 @@ export class DeliveryQueueService {
   private scheduleNext(): void {
     if (!this.started) return;
     this.timer = setTimeout(() => {
-      void this.checkDue().finally(() => this.scheduleNext());
+      // .catch() before .finally() so a rejection (e.g. a lock-acquire
+      // timeout) is swallowed here — logged, not left to become an unhandled
+      // rejection — while .finally() still always re-arms the next tick.
+      void this.checkDue()
+        .catch((error) => this.log.error("checkDue failed", "DeliveryQueueService", error))
+        .finally(() => this.scheduleNext());
     }, CHECK_INTERVAL_MS);
     this.timer.unref?.();
   }
@@ -217,7 +229,34 @@ export class DeliveryQueueService {
         failed += 1;
       }
     }
+
+    // Prune once per tick, after processing — not on every read-only list()
+    // call — and only write if something actually changed.
+    await this.withLock(async () => {
+      const store = await this.loadUnlocked();
+      if (this.pruneOldRecords(store)) await this.save(store);
+    });
+
     return { sent, failed };
+  }
+
+  // Removes terminal (sent/failed) records past TERMINAL_RECORD_RETENTION_MS
+  // so this JSON file doesn't grow without bound over the account's lifetime.
+  // Mutates store.items in place; returns whether anything was pruned.
+  private pruneOldRecords(store: DeliveryQueueFile): boolean {
+    const cutoff = Date.now() - TERMINAL_RECORD_RETENTION_MS;
+    let changed = false;
+    for (const [id, record] of Object.entries(store.items)) {
+      if (record.status !== "sent" && record.status !== "failed") continue;
+      // "failed" records have no dedicated completion timestamp — fall back
+      // to createdAt, which is an earlier (more conservative) bound anyway.
+      const timestamp = record.status === "sent" ? record.sentAt ?? record.createdAt : record.createdAt;
+      if (new Date(timestamp).getTime() < cutoff) {
+        delete store.items[id];
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   // Runs once at start(), before the catch-up checkDue() pass. A record
@@ -313,9 +352,13 @@ export class DeliveryQueueService {
   // move this JSON store into the SQLite index already used elsewhere
   // (better-sqlite3), which has real cross-process locking for free.
   private async save(store: DeliveryQueueFile): Promise<void> {
-    await mkdir(dirname(this.queuePath), { recursive: true });
+    await mkdir(dirname(this.queuePath), { recursive: true, mode: 0o700 });
     const tempPath = `${this.queuePath}.tmp`;
-    await writeFile(tempPath, JSON.stringify(store, null, 2), "utf8");
+    // Restrictive mode on the temp file itself, not just the final renamed
+    // path — rename() preserves the mode it's given, but a mode passed only
+    // after the fact wouldn't retroactively cover the temp file's brief
+    // window on disk.
+    await writeFile(tempPath, JSON.stringify(store, null, 2), { encoding: "utf8", mode: 0o600 });
     await rename(tempPath, this.queuePath);
   }
 }
