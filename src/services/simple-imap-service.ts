@@ -214,6 +214,32 @@ export function isLikelyAuthenticationError(error: unknown): boolean {
 
 // Distinguishes "Bridge isn't running / wrong host-port" from other failures, so the
 // caller can point the user at Bridge instead of a generic "internal error occurred".
+// A TLS handshake attempted against a plaintext/STARTTLS-only port (or the
+// reverse — plaintext against an implicit-TLS port, though that direction
+// more often just surfaces as a bare ECONNRESET, already covered by
+// isLikelyConnectionError, and can't be reliably told apart from a genuinely
+// unreachable Bridge from the error text alone) surfaces as Node/OpenSSL's
+// own EPROTO error. Neither isLikelyAuthenticationError nor
+// isLikelyConnectionError matched this, so a PROTONMAIL_*_SECURE/port
+// mismatch (Bridge assigns essentially random ports per install — confirmed
+// live) produced a bare "connection failed" with zero diagnosis, despite
+// run_doctor's own description promising a classified cause for every
+// connection failure.
+export function isLikelyTlsMismatchError(error: unknown): boolean {
+  if (!error) {
+    return false;
+  }
+
+  const haystack = collectErrorText(error);
+  if (!haystack) {
+    return false;
+  }
+
+  return ["eproto", "wrong version number", "ssl routines", "wrong_version_number"].some((needle) =>
+    haystack.includes(needle),
+  );
+}
+
 export function isLikelyConnectionError(error: unknown): boolean {
   if (!error) {
     return false;

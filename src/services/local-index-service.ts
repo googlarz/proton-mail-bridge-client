@@ -408,7 +408,14 @@ function uniqueParticipants(messages: EmailSummary[]): MailboxMessage["from"] {
 
   for (const message of messages) {
     for (const address of [...message.from, ...message.to, ...message.cc]) {
-      const key = lowerCaseAddress(address.address) || address.name?.trim().toLowerCase();
+      // An RFC 3501/5322 group marker (e.g. "Undisclosed-Recipients:;", or a
+      // named group's start entry) has a real display name but no address at
+      // all — imapflow's envelope parser keeps it as-is with address:"".
+      // Falling back to the name as the dedup key kept these fabricated,
+      // no-address "contacts" in the participant list as if they were real
+      // people. A group marker isn't a participant; skip anything with no
+      // real address instead of keying on its name.
+      const key = lowerCaseAddress(address.address);
       if (!key || seen.has(key)) {
         continue;
       }

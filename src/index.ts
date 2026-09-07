@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve as pathResolve } from "node:path";
+import { isAbsolute, join, resolve as pathResolve, sep as pathSep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -24,7 +24,7 @@ import { BackgroundSyncService } from "./services/background-sync-service.js";
 import { DeliveryQueueService } from "./services/delivery-queue-service.js";
 import { DraftStoreService } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
-import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, SimpleIMAPService } from "./services/simple-imap-service.js";
+import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService } from "./services/simple-imap-service.js";
 import { applySignature, SMTPService } from "./services/smtp-service.js";
 import { SnoozeService } from "./services/snooze-service.js";
 import { TemplateService } from "./services/template-service.js";
@@ -5197,11 +5197,21 @@ export function createServer(
                   "PROTONMAIL_PASSWORD must be the Proton Bridge password (Bridge app -> account -> Mailbox details), not your Proton account password. Confirm you're signed in inside the Bridge app.",
               };
             }
+            // Checked before the generic connection-error case: an EPROTO/
+            // "wrong version number" is unambiguous evidence of a TLS-mode
+            // mismatch, distinct from Bridge simply being unreachable.
+            if (isLikelyTlsMismatchError(reason)) {
+              return {
+                cause: "tls_mismatch",
+                suggestion:
+                  "TLS handshake failed against a plaintext/STARTTLS port. PROTONMAIL_IMAP_SECURE/PROTONMAIL_SMTP_SECURE likely doesn't match the security mode of the port in Bridge's Mailbox details (implicit TLS vs STARTTLS) — check both against Bridge's IMAP/SMTP port settings.",
+              };
+            }
             if (isLikelyConnectionError(reason)) {
               return {
                 cause: "bridge_unreachable",
                 suggestion:
-                  "Proton Bridge isn't reachable on the configured host/port. Make sure the Bridge app is running, and that PROTONMAIL_IMAP_HOST/PORT and PROTONMAIL_SMTP_HOST/PORT match Bridge's Mailbox details.",
+                  "Proton Bridge isn't reachable on the configured host/port, OR (if this is ECONNRESET) a TLS-mode mismatch in the other direction — plaintext attempted against an implicit-TLS port. Make sure the Bridge app is running, that PROTONMAIL_IMAP_HOST/PORT and PROTONMAIL_SMTP_HOST/PORT match Bridge's Mailbox details, and that PROTONMAIL_IMAP_SECURE/PROTONMAIL_SMTP_SECURE match the security mode shown there.",
               };
             }
             return undefined;
@@ -5792,7 +5802,13 @@ export function createServer(
             const { writeFile: wf, mkdir: mkd } = await import("node:fs/promises");
             const absDir = pathResolve(downloadDir);
             const absTarget = pathJoin(absDir, saveTo);
-            if (!absTarget.startsWith(absDir + "/") && absTarget !== absDir) {
+            // Hardcoded "/" here never matched on win32 (path.resolve/join
+            // produce backslash-separated paths there), so every subdirectory
+            // save failed with a false "escapes the allowed directory" —
+            // fails safe/closed, not a security bypass, but breaks a normal
+            // save on the Windows deployment this codebase explicitly
+            // supports (see install-claude-desktop.ts's win32 branches).
+            if (!absTarget.startsWith(absDir + sep) && absTarget !== absDir) {
               throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
             }
             await mkd(pathResolve(absTarget, ".."), { recursive: true });
@@ -5811,7 +5827,7 @@ export function createServer(
                 throw error;
               }
             }
-            if (!realTarget.startsWith(absDir + "/") && realTarget !== absDir) {
+            if (!realTarget.startsWith(absDir + sep) && realTarget !== absDir) {
               throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
             }
             const buf = Buffer.from(result.base64, "base64");
@@ -5839,7 +5855,9 @@ export function createServer(
             if (!allowDir) throw new McpError(ErrorCode.InvalidParams, "PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR must be set to use saveTo.");
             const absDir = pathResolve(allowDir);
             const absTarget = pathResolve(join(absDir, saveTo));
-            if (!absTarget.startsWith(absDir + "/") && absTarget !== absDir) {
+            // See the identical fix/comment in get_attachment_content above —
+            // hardcoded "/" never matched a real subdirectory path on win32.
+            if (!absTarget.startsWith(absDir + pathSep) && absTarget !== absDir) {
               throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
             }
             resolvedPath = absTarget;
