@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { chmodSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -1175,8 +1176,21 @@ export class LocalIndexService {
       return this.db;
     }
 
-    await mkdir(dirname(this.dbPath), { recursive: true });
+    await mkdir(dirname(this.dbPath), { recursive: true, mode: 0o700 });
+    const isFirstOpen = !this.db;
     const db = this.db ?? new Database(this.dbPath);
+    if (isFirstOpen) {
+      this.chmodDbFiles();
+    }
+    // auto_vacuum only takes effect on a brand-new/empty database (page_count 0) — it
+    // does NOT retroactively enable incremental vacuuming on a database that already
+    // existed before this line was added. It must also be set before the very first
+    // write to the file (journal_mode = WAL below already allocates page 1), or SQLite
+    // silently ignores it. Setting the mode here is still required so any freshly
+    // created database starts reclaiming freed pages; the periodic incremental_vacuum
+    // call (see applySnapshot's full-sync path) is what actually reclaims pages, for
+    // both new and pre-existing databases.
+    db.pragma("auto_vacuum = INCREMENTAL");
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     db.pragma("synchronous = NORMAL");
@@ -1187,6 +1201,24 @@ export class LocalIndexService {
 
     this.initialized = true;
     return db;
+  }
+
+  // The sqlite file (and its WAL/SHM sidecars, when present) can hold sensitive mail
+  // content, so restrict them to owner-only access. better-sqlite3's Database
+  // constructor has no file-mode option, so this is done with an explicit chmod right
+  // after opening. Best-effort: a filesystem that doesn't support chmod should log a
+  // warning, not crash the server.
+  private chmodDbFiles(): void {
+    for (const path of [this.dbPath, `${this.dbPath}-wal`, `${this.dbPath}-shm`]) {
+      try {
+        chmodSync(path, 0o600);
+      } catch (error) {
+        this.log.warn("Failed to set restrictive permissions on database file", "LocalIndexService", {
+          path,
+          error,
+        });
+      }
+    }
   }
 
   private applySnapshot(
@@ -1447,6 +1479,16 @@ export class LocalIndexService {
     });
 
     transaction();
+
+    if (cleanupExpunged) {
+      // auto_vacuum = INCREMENTAL (set in ensureDb) only marks freed pages as
+      // reclaimable — it doesn't return them to the OS on its own. This companion
+      // pragma actually reclaims them. Run it here (outside the transaction, after
+      // commit) rather than on every write: this full-sync path is already the
+      // heaviest/least-frequent write path, so the extra maintenance cost is
+      // proportionate.
+      db.pragma("incremental_vacuum");
+    }
   }
 
   private runMigrations(db: Database.Database): void {
@@ -1704,20 +1746,22 @@ export class LocalIndexService {
     limit: number,
   ): { ids: string[]; warning?: string } {
     const parsed = parseSearchQuery(query);
-    const FTS5_OPERATORS = new Set(["not", "and", "or", "near"]);
-    const safeTerms = parsed.residualTerms.filter(
-      (token) => !FTS5_OPERATORS.has(token.toLowerCase()) && !token.startsWith("-"),
-    );
-    const match = safeTerms
+    // Every term is quoted as a literal FTS5 string, including tokens that collide
+    // with FTS5 keywords (AND/OR/NOT/NEAR) or start with a leading hyphen. A quoted
+    // term is always treated as literal text by FTS5, never as an operator or a
+    // NOT-prefix, so this searches for the term itself instead of silently dropping
+    // it (e.g. `AND gate schematics` now matches "AND", "gate" and "schematics" all
+    // required, rather than dropping "AND" and searching only the other two).
+    const match = parsed.residualTerms
       .map((token) => `"${token.replace(/"/g, '""')}"`)
       .join(" AND ");
 
     if (!match) {
-      // Every token was filtered out (bare FTS5 operators or a leading "-"), so the
-      // query never actually ran — this is "search couldn't run", not "no results".
+      // No terms survived parsing at all (e.g. an empty/whitespace-only query), so
+      // the query never actually ran — this is "search couldn't run", not "no results".
       return {
         ids: [],
-        warning: `Search query "${query}" contained no searchable terms after removing FTS5 operator tokens (NOT/AND/OR/NEAR) and leading hyphens — the search did not run. Rephrase without those tokens.`,
+        warning: `Search query "${query}" contained no searchable terms — the search did not run.`,
       };
     }
 

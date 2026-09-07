@@ -605,7 +605,7 @@ test("recordSnapshot preserves preview/attachmentText across a flags-only re-syn
   }
 });
 
-test("search surfaces a warning instead of silently returning empty when the query has no searchable terms", async () => {
+test("search treats a query of only FTS5-keyword/hyphen tokens as a real (zero-match) search, not a dropped query", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "protonmail-search-warning-test-"));
   const service = new LocalIndexService(createConfig(dataDir));
 
@@ -652,13 +652,94 @@ test("search surfaces a warning instead of silently returning empty when the que
       ],
     });
 
-    // Every token is either a bare FTS5 operator or a leading-hyphen negation, so
-    // no safe search term survives — this must warn, not silently return empty.
+    // Tokens that collide with FTS5 keywords (NOT/AND) or start with a leading
+    // hyphen are quoted as literal search terms rather than silently dropped, so
+    // this runs as a real (all-required) search for those literal words/phrase and
+    // simply finds no match among the indexed messages — no warning expected.
     const result = await service.search({ query: "NOT AND -foo", limit: 10 });
 
     assert.equal(result.total, 0);
-    assert.ok(Array.isArray(result.warnings) && result.warnings.length === 1);
-    assert.match(result.warnings[0], /no searchable terms/i);
+    assert.equal(result.warnings, undefined);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("search treats FTS5-keyword and leading-hyphen terms as literal words instead of dropping them", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-search-fts5-keyword-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-03-25T10:00:00.000Z",
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: 2,
+          unseen: 0,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: 2, total: 2, strategy: "recent" }],
+      emails: [
+        {
+          id: "INBOX::31",
+          folder: "INBOX",
+          uid: 31,
+          seq: 31,
+          messageId: "<b@example.com>",
+          subject: "AND gate schematics",
+          from: [{ address: "person@example.com" }],
+          to: [{ address: "owner@example.com" }],
+          cc: [],
+          bcc: [],
+          replyTo: [],
+          date: "2026-03-25T09:00:00.000Z",
+          internalDate: "2026-03-25T09:00:00.000Z",
+          isRead: false,
+          isStarred: false,
+          flags: [],
+          preview: "Diagram attached",
+          hasAttachments: false,
+          attachments: [],
+          labels: [],
+        },
+        {
+          id: "INBOX::32",
+          folder: "INBOX",
+          uid: 32,
+          seq: 32,
+          messageId: "<c@example.com>",
+          subject: "Unrelated gate schematics",
+          from: [{ address: "person@example.com" }],
+          to: [{ address: "owner@example.com" }],
+          cc: [],
+          bcc: [],
+          replyTo: [],
+          date: "2026-03-25T08:00:00.000Z",
+          internalDate: "2026-03-25T08:00:00.000Z",
+          isRead: false,
+          isStarred: false,
+          flags: [],
+          preview: "Nothing relevant here",
+          hasAttachments: false,
+          attachments: [],
+          labels: [],
+        },
+      ],
+    });
+
+    // Before the fix, the literal token "AND" was silently dropped, so this query
+    // degraded to `"gate" AND "schematics"` and matched both messages. Quoting it
+    // as a literal term now correctly requires "AND" too, matching only INBOX::31.
+    const result = await service.search({ query: "AND gate schematics", limit: 10 });
+    assert.equal(result.total, 1);
+    assert.equal(result.emails[0].id, "INBOX::31");
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
