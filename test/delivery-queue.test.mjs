@@ -311,6 +311,68 @@ test("enqueue omits sourceDraftId when not given (undo_send has no source draft)
   });
 });
 
+test("checkDue prunes sent/failed records past the 30-day retention window, but keeps recent ones", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    await mkdir(dataDir, { recursive: true });
+    const oldSentId = "old-sent-1";
+    const oldFailedId = "old-failed-1";
+    const recentSentId = "recent-sent-1";
+    const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    await writeFile(
+      join(dataDir, "delivery-queue.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          items: {
+            [oldSentId]: {
+              id: oldSentId,
+              kind: "undo_send",
+              createdAt: thirtyOneDaysAgo,
+              sendAt: thirtyOneDaysAgo,
+              status: "sent",
+              payload,
+              sentAt: thirtyOneDaysAgo,
+              sentMessageId: "<old@example.com>",
+            },
+            [oldFailedId]: {
+              id: oldFailedId,
+              kind: "undo_send",
+              createdAt: thirtyOneDaysAgo,
+              sendAt: thirtyOneDaysAgo,
+              status: "failed",
+              payload,
+              failureReason: "old failure",
+            },
+            [recentSentId]: {
+              id: recentSentId,
+              kind: "undo_send",
+              createdAt: new Date().toISOString(),
+              sendAt: new Date().toISOString(),
+              status: "sent",
+              payload,
+              sentAt: new Date().toISOString(),
+              sentMessageId: "<recent@example.com>",
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const queue = new DeliveryQueueService(config, fakeSmtp());
+    await queue.checkDue();
+
+    const items = await queue.list();
+    const ids = items.map((item) => item.id);
+    assert.ok(!ids.includes(oldSentId), "old sent record must be pruned");
+    assert.ok(!ids.includes(oldFailedId), "old failed record must be pruned");
+    assert.ok(ids.includes(recentSentId), "recent sent record must be kept");
+  });
+});
+
 test("a second process writing the same dataDir is visible without restarting this instance (no forever-cache)", async () => {
   await withTempDir(async (dataDir) => {
     const config = createConfig(dataDir);

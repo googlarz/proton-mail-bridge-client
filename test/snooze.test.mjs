@@ -155,6 +155,110 @@ test("a snooze service reopened against the same dataDir sees items persisted by
   });
 });
 
+test("checkDue prunes woken/canceled/failed records past the 30-day retention window, but keeps recent ones", async () => {
+  await withTempDir(async (dataDir) => {
+    const imap = fakeImap();
+    const service = new SnoozeService(createConfig(dataDir), imap);
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, "snoozed.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          items: {
+            "old-woken-1": {
+              id: "old-woken-1",
+              createdAt: thirtyOneDaysAgo,
+              wakeAt: thirtyOneDaysAgo,
+              status: "woken",
+              originalFolder: "INBOX",
+              currentEmailId: "INBOX::1",
+              wokenAt: thirtyOneDaysAgo,
+            },
+            "old-failed-1": {
+              id: "old-failed-1",
+              createdAt: thirtyOneDaysAgo,
+              wakeAt: thirtyOneDaysAgo,
+              status: "failed",
+              originalFolder: "INBOX",
+              currentEmailId: "Folders/MCP-Snoozed::2",
+              failureCount: 5,
+            },
+            "recent-woken-1": {
+              id: "recent-woken-1",
+              createdAt: new Date().toISOString(),
+              wakeAt: new Date().toISOString(),
+              status: "woken",
+              originalFolder: "INBOX",
+              currentEmailId: "INBOX::3",
+              wokenAt: new Date().toISOString(),
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    await service.checkDue();
+
+    const items = await service.list();
+    const ids = items.map((item) => item.id);
+    assert.ok(!ids.includes("old-woken-1"), "old woken record must be pruned");
+    assert.ok(!ids.includes("old-failed-1"), "old failed record must be pruned");
+    assert.ok(ids.includes("recent-woken-1"), "recent woken record must be kept");
+  });
+});
+
+// Regression: if a record was already resolved (e.g. by a concurrent
+// process's recoverInterruptedWakes() reverting "waking" back to "pending"),
+// wake()'s finalize must not blindly overwrite it.
+test("wake() finalize skips writing when the record is no longer 'waking' (concurrent resolution)", async () => {
+  await withTempDir(async (dataDir) => {
+    const imap = fakeImap();
+    const service = new SnoozeService(createConfig(dataDir), imap);
+    const { mkdir, writeFile, readFile } = await import("node:fs/promises");
+
+    const record = {
+      id: "concurrent-1",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      wakeAt: new Date(Date.now() - 1_000).toISOString(),
+      status: "pending",
+      originalFolder: "INBOX",
+      currentEmailId: "Folders/MCP-Snoozed::42",
+    };
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, "snoozed.json"),
+      JSON.stringify({ version: 1, items: { [record.id]: record } }, null, 2),
+      "utf8",
+    );
+
+    // Race: call cancel() (which drives wake()) but rewrite the on-disk
+    // record back to "pending" behind its back before it finalizes, as if a
+    // concurrent process's recoverInterruptedWakes() had reverted it after a
+    // crash mid-move. Simulated by monkey-patching moveEmail to mutate the
+    // store before returning.
+    const originalMoveEmail = imap.moveEmail.bind(imap);
+    imap.moveEmail = async (emailId, targetFolder) => {
+      const result = await originalMoveEmail(emailId, targetFolder);
+      const raw = JSON.parse(await readFile(join(dataDir, "snoozed.json"), "utf8"));
+      raw.items[record.id].status = "pending";
+      await writeFile(join(dataDir, "snoozed.json"), JSON.stringify(raw, null, 2), "utf8");
+      return result;
+    };
+
+    await service.cancel(record.id);
+
+    const after = await service.get(record.id);
+    assert.equal(after.status, "pending", "finalize must not clobber the concurrently-reverted status");
+  });
+});
+
 test("checkDue stops retrying a permanently-failing wake and marks it terminally failed", async () => {
   await withTempDir(async (dataDir) => {
     // moveEmail always throws — simulates the snoozed email having been
