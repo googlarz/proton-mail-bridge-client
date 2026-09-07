@@ -1,4 +1,5 @@
 import type { EmailAction, ProtonRuntimeConfig } from "../types/index.js";
+import { isSelfAddress } from "./helpers.js";
 
 export function sanitizeRuntimeConfig(runtime: ProtonRuntimeConfig): Record<string, unknown> {
   return {
@@ -90,8 +91,9 @@ export function ensureOutboundRecipientsAllowed(
   recipients: string[],
 ): void {
   if (!runtime.restrictOutboundToSelf) return;
-  const self = selfAddress.toLowerCase();
-  const external = recipients.filter((r) => r.toLowerCase() !== self);
+  // isSelfAddress normalizes Proton's "+tag" plus-addressing, so a send to
+  // the user's own "you+tag@..." alias isn't wrongly treated as external.
+  const external = recipients.filter((r) => !isSelfAddress(r, selfAddress));
   if (external.length > 0) {
     throw new Error(`RESTRICT_OUTBOUND_TO_SELF is enabled. Cannot send to: ${external.join(", ")}`);
   }

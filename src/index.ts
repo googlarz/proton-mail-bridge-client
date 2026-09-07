@@ -2,6 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as pathResolve } from "node:path";
@@ -561,12 +562,13 @@ const TOOLS = [
   },
   {
     name: "delete_draft",
-    description: "Permanently delete a locally saved draft from SQLite. Use to discard a draft you no longer need. Does NOT remove a matching draft from the Proton Drafts IMAP folder — that requires a separate mailbox action. Irreversible.",
+    description: "Permanently delete a locally saved draft from SQLite. Use to discard a draft you no longer need. Does NOT remove a matching draft from the Proton Drafts IMAP folder — that requires a separate mailbox action. Irreversible; requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       properties: {
         draftId: { type: "string", description: "Draft id returned by create_draft, list_drafts, or a create_*_draft call." },
+        confirmed: { type: "boolean", description: "Pass true to confirm permanent deletion of the draft. Required when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
       required: ["draftId"],
     },
@@ -855,11 +857,14 @@ const TOOLS = [
   },
   {
     name: "delete_template",
-    description: "Delete a saved email template.",
+    description: "Delete a saved email template. Irreversible; requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
-      properties: { id: { type: "string", description: "The template id." } },
+      properties: {
+        id: { type: "string", description: "The template id." },
+        confirmed: { type: "boolean", description: "Pass true to confirm permanent deletion of the template. Required when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
+      },
       required: ["id"],
     },
   },
@@ -2946,6 +2951,21 @@ function parseIntegerEnv(
   return Math.min(max, Math.max(min, parsed));
 }
 
+// Ports need a hard failure, not the silent clamping parseIntegerEnv applies
+// for its other (non-port) callers — a typo like PROTONMAIL_IMAP_PORT=99999
+// should abort startup with a clear message instead of quietly becoming 65535
+// and failing later with a confusing connection error.
+function validatePortEnv(name: string): void {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) {
+    throw new Error(`${name} must be an integer between 1 and 65535, got: ${raw}`);
+  }
+}
+
 function parseAllowedActionsEnv(name: string): EmailAction[] {
   const configured = parseListValues(process.env[name]);
   if (configured.length === 0) {
@@ -2983,11 +3003,13 @@ export function buildConfigFromEnv(): ProtonMailConfig {
     );
   }
 
+  validatePortEnv("PROTONMAIL_SMTP_PORT");
   const smtpPort = parseIntegerEnv("PROTONMAIL_SMTP_PORT", 1025, 1, 65_535);
   // Bridge's local SMTP port requires implicit TLS from the first byte (no
   // plaintext greeting, no STARTTLS) — confirmed against a live Bridge
   // instance. Overridable for non-Bridge SMTP setups.
   const smtpSecure = parseBooleanEnv("PROTONMAIL_SMTP_SECURE", true);
+  validatePortEnv("PROTONMAIL_IMAP_PORT");
   const imapPort = parseIntegerEnv("PROTONMAIL_IMAP_PORT", 1143, 1, 65_535);
   const debug = parseBooleanEnv("DEBUG", false);
   const readOnly = parseBooleanEnv("PROTONMAIL_READ_ONLY", false);
@@ -4308,6 +4330,7 @@ export function createServer(
 
         case "delete_draft": {
           const draft = await draftStore.getDraft(requireString(args, "draftId"));
+          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args?.confirmed, false), "Permanently delete draft: " + draft.id);
           const deleted = await withAudit(auditService, name, args, async () => {
             const remoteCleanup = resolveRemoteDraftSync(config.runtime, true).enabled
               ? await clearRemoteDraft(draftStore, imapService, draft)
@@ -4978,8 +5001,10 @@ export function createServer(
         }
 
         case "delete_template": {
+          const templateId = requireString(args, "id");
+          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args?.confirmed, false), "Permanently delete template: " + templateId);
           const result = await withAudit(auditService, name, args, async () =>
-            templateService.delete(requireString(args, "id")),
+            templateService.delete(templateId),
           );
           return createTextResult(result);
         }
@@ -5959,6 +5984,13 @@ export function createServer(
 
 export async function main(): Promise<void> {
   const config = buildConfigFromEnv();
+  // Create the data directory explicitly with a restrictive mode as its very
+  // first creation, before any service (draft store, template store, audit
+  // log, local index, ...) does its own mkdir(dirname(...)) as a side effect
+  // and inherits whatever the process umask happens to be. mkdir with
+  // recursive:true is a safe no-op on an already-existing directory — it
+  // will not change that directory's existing mode.
+  await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   const { server, smtpService, imapService, backgroundSyncService, deliveryQueueService, snoozeService } = createServer(config, {
     startBackgroundSync: true,
   });
