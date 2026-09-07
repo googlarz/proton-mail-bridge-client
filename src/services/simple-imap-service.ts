@@ -848,7 +848,16 @@ export class SimpleIMAPService {
         return applied;
       }
       if (!isNoConnection) {
-        throw error;
+        // describeImapError surfaces imapflow's non-standard `.responseText`
+        // (Bridge's actual rejection reason) alongside the generic "Command
+        // failed" message — written for exactly this rethrow but never
+        // wired in, so every genuine label/folder failure (e.g. the repeated
+        // delete_label failures on Labels/gmail-import-temp seen live in the
+        // audit log) surfaced with no explanation at all.
+        const described = describeImapError(error);
+        throw described && error instanceof Error && described !== error.message
+          ? new Error(described)
+          : error;
       }
       return mutate();
     }
@@ -1836,10 +1845,29 @@ export class SimpleIMAPService {
       sizeSmaller: match!.sizeSmaller,
     };
     const query = this.buildSearchQuery(searchInput);
-    return this.withMailbox(folder, true, async (client) => {
-      const found = await client.search(query, { uid: true });
-      return Array.isArray(found) ? found : [];
-    });
+    const search = () =>
+      this.withMailbox(folder, true, async (client) => {
+        const found = await client.search(query, { uid: true });
+        return Array.isArray(found) ? found : [];
+      });
+    // Every bulk_* method (update_labels/update_flags/move/delete) resolves
+    // its UIDs through here *before* its own try/catch starts — unlike every
+    // other mutation in this file, a transient NoConnection (IDLE/connection-
+    // sharing churn, see the MAX_CONSECUTIVE_FAST_IDLE_RETURNS comment above)
+    // here took down the entire call, even dryRun, with no retry at all.
+    // Found live via the audit log: bulk_update_labels failing outright with
+    // "Connection not available" while an unrelated bulk_delete right before
+    // it succeeded — same shared connection, just unlucky timing. Retry once
+    // after reconnecting, mirroring mutateFolderWithReconnectCheck's idiom.
+    try {
+      return await search();
+    } catch (error) {
+      if ((error as { code?: string } | undefined)?.code !== "NoConnection") {
+        throw error;
+      }
+      await this.disconnect().catch(() => {});
+      return search();
+    }
   }
 
   async bulkMove(input: {
