@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [1.19.3] — 2026-09-07
+
+### Fixed
+- **`schedule_draft` had no guard against being called twice on the same draft.** `send_draft` already refused a second send when a pending scheduled-send existed, but `schedule_draft` only checked for `status === "sent"` — a draft has no "scheduled" status, so scheduling it again (e.g. to change `sendAt`) enqueued a second, independent delivery. Both would fire and deliver the same email twice. Now mirrors `send_draft`'s guard.
+- **The Docker image's native SQLite binding was never built**, likely crashing the container on first index access. `npm ci --ignore-scripts` also skipped `better-sqlite3`'s own install script; added an explicit rebuild step, the same fix already used for the identical Claude Desktop installer problem. (Not verified against a real `docker build` — no Docker daemon available while fixing this — but it's the same proven pattern.)
+- **`get_contacts`/`get_email_analytics` double-counted a message** whenever an address appeared in more than one header field on the same email (Reply-To equal to From is very common), inflating contact and analytics figures.
+- **Self-address detection missed Proton's "+tag" plus-addressing.** A self-sent message from `user+tag@domain` (account: `user@domain`) showed up as received-from-a-stranger in `top_senders`, and as the account's own top contact in `get_contacts`, instead of being recognized as self.
+- **A delivery-queue send that merely timed out was recorded as a definite failure.** The 30s per-item timeout can't actually cancel the underlying SMTP send, so a slow-but-successful send could still complete after the record was already marked `"failed"` — risking a manual resend that duplicates delivery. The failure reason now says the outcome is unknown and to check the Sent folder first, matching how a server-restart interruption was already worded.
+
+### Known limitation (tracked, not yet fixed)
+- The UIDVALIDITY safety check (`assertMailboxUidValidity`) exists but is never actually wired up — no caller currently supplies the expected value, so a mutation against a stale id from before a folder's UIDVALIDITY changed (e.g. full mailbox recreation) has no protection against silently acting on the wrong message. Needs a proper design for threading the expected value through, not a quick patch.
+
 ## [1.19.2] — 2026-09-06
 
 ### Fixed
