@@ -2,6 +2,49 @@
 
 All notable changes to this project are documented here.
 
+## [1.19.4] — 2026-09-07
+
+A large batch of fixes from an extensive multi-round review, spanning nearly every service. Grouped by theme rather than listed per-commit.
+
+### Fixed — Reliability / crash safety
+- **A file-lock acquisition timeout during cross-process contention (two server instances sharing the same account/dataDir — a real, documented occurrence) could crash the entire server**, not just the operation that hit it: several periodic background timers (`DeliveryQueueService`, `SnoozeService`) and one startup call fired their async work fire-and-forget with no `.catch()`, so the resulting unhandled rejection hit the process-wide handler and terminated the server mid-operation. All now log and continue instead of crashing.
+- **A dead lock-holder (crashed/killed process) could cause every other instance to wait up to 30 seconds — repeatedly, in a crash-loop, if auto-restarted — before recovering**, because stale-lock detection only checked file age, never whether the PID that created it was still alive. Now checks liveness first and steals a confirmed-dead lock immediately.
+- **`SnoozeService.wake()` had no status guard on its result**, unlike the equivalent `DeliveryQueueService` code — a cross-process interruption-recovery could cause the same email to be moved twice.
+- **`get_email_by_id`/`get_emails_by_ids` and other single-item mailbox operations (mark read/unread, star, move, trash, delete, flag/label changes) had no timeout**, unlike bulk operations — one wedged IMAP call could hang a single-message request for minutes instead of failing cleanly.
+
+### Fixed — Data integrity
+- **`bulk_update_labels` could report success on an item where every requested label silently failed to apply.**
+- **A brand-new remote draft could be silently duplicated** if the cleanup step (deleting the superseded old draft) failed right after the new one was successfully created — the old and new both survived on the server with no reconciliation.
+- **`schedule_draft` had no guard against being called twice on the same draft**, unlike `send_draft` — scheduling it a second time (e.g. to change the time) queued a second, independent delivery.
+- **`get_contacts`/`get_email_analytics` double-counted a message** whenever an address appeared in more than one header field on the same email.
+- **Self-address detection (including the security-relevant `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF` check) missed Proton's "+tag" plus-addressing** in one enforcement path — this direction only over-blocks a legitimate self-alias, it does not allow anything through that should have been blocked.
+- **`import_email` now recognizes an already-imported message by Message-ID** instead of always creating a duplicate.
+- **A message using RFC 5322 group-address syntax (`Undisclosed-Recipients:;`, a named group) leaked a fabricated, address-less "contact" into thread participant lists.**
+
+### Fixed — Security
+- **No file or directory this server writes ever got a restrictive permission mode — the full local mailbox archive, drafts, scheduled sends, and audit trail landed at the OS default (typically world-readable) on every install.** All data files/directories now get owner-only permissions, including retroactively on an existing installation upgrading to this version (a `mode` option on file creation has no effect on a file that already existed from before this fix — an explicit one-time permission correction was needed and has been added for the data directory and the audit log specifically).
+- **A `saveTo`/`outputPath` subdirectory save always failed on Windows** with a false "escapes the allowed directory" error — the containment check used a hardcoded `/` instead of the platform path separator. Fails safe, not a bypass, but breaks normal use on Windows.
+- **`search_indexed_emails` silently dropped search terms that collided with FTS5 keywords (`AND`/`OR`/`NOT`/`NEAR`) or started with a hyphen**, instead of quoting them like other terms — a search for a literal product name like "AND gate schematics" ran a broader query than intended with no indication a term was dropped.
+
+### Fixed — Diagnostics
+- **`run_doctor`'s `includeIdleProbe:true` failed 100% of the time** with the default multi-folder auto-sync config — it tried to watch a literal mailbox named "INBOX,Sent" instead of just the first folder.
+- **A TLS/plaintext port mismatch produced zero diagnosis** despite `run_doctor`'s own description promising a classified cause for every connection failure; the reverse mismatch could even be actively mislabeled as "Bridge unreachable."
+- **`delete_draft`/`delete_template` never required `confirmed:true`**, unlike comparably-destructive siblings (`delete_label`, `delete_folder`, `delete_email`).
+- **`PROTONMAIL_IMAP_PORT`/`PROTONMAIL_SMTP_PORT` silently clamped an out-of-range value** (e.g. `-1`) instead of failing with a clear startup error.
+- 2 README inaccuracies (tool-tier count, `PROTONMAIL_ALLOWED_ACTIONS` default) corrected; one orphaned, never-wired-up Docker script removed.
+
+### Fixed — Growth / resource usage over long-running sessions
+- **`messageCache` had no size cap**, growing indefinitely over a long, read-heavy session.
+- **`folderCache` never refreshed for a folder/label change made outside this server** (another client, another instance) — now expires after 5 minutes.
+- **The delivery-queue, snooze, and draft JSON stores never pruned old completed records**, so every operation re-read and rewrote an ever-growing file for the lifetime of the account. Records now prune after 30 days.
+- **The local SQLite index never reclaimed space from deleted rows.** Now runs incremental vacuuming.
+- **The Docker image's native SQLite binding was never built** (an install-script-skipping flag also skipped `better-sqlite3`'s own build step), likely crashing the container on first index access.
+- **A delivery-queue send that merely timed out was recorded as a definite failure**, when the underlying send might still complete moments later — risking a duplicate manual resend.
+
+### Known limitation (tracked, not fixed this release — needs dedicated design work)
+- The UIDVALIDITY safety check (`assertMailboxUidValidity`) exists but nothing currently supplies the expected value, so a mutation against a stale id from before a folder's UIDVALIDITY changed has no protection.
+- There is no MCP client-cancellation (`notifications/cancelled`)/`AbortSignal` handling anywhere — a canceled long-running tool call keeps running to completion server-side regardless.
+
 ## [1.19.3] — 2026-09-07
 
 ### Fixed
