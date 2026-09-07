@@ -5338,6 +5338,50 @@ export function createServer(
 
         case "sync_emails":
         {
+          const folder = optionalString(args, "folder");
+          const full = typeof args.full === "boolean" ? args.full : undefined;
+          const limitPerFolder = typeof args.limitPerFolder === "number" ? args.limitPerFolder : undefined;
+          const includeAttachmentText =
+            typeof args.includeAttachmentText === "boolean" ? args.includeAttachmentText : undefined;
+
+          // backgroundSyncService.runNow() always runs the *fixed* background-
+          // sync config (autoSyncFolder/autoSyncFull/autoSyncLimitPerFolder —
+          // typically just "INBOX,Sent", incremental, 100/folder) and ignores
+          // any argument entirely. This tool's own schema advertises folder/
+          // full/limitPerFolder/includeAttachmentText as per-call overrides,
+          // but every one of them was silently discarded — a caller asking to
+          // sync "Archive" with full:true got back a status snapshot of the
+          // last INBOX/Sent background run, with Archive never touched at
+          // all. Found live: sync_emails({folder:"Archive", full:true}) did
+          // not add an Archive entry to get_index_status's syncCheckpoints.
+          // When the caller supplies any of these, run a one-off sync with
+          // their actual parameters instead.
+          if (folder !== undefined || full !== undefined || limitPerFolder !== undefined || includeAttachmentText !== undefined) {
+            const snapshot = await imapService.collectEmailsForIndex({
+              folder,
+              full,
+              limitPerFolder,
+              includeAttachmentText,
+              checkpoints: await localIndexService.getSyncCheckpointMap(),
+            });
+            const indexStatus = await localIndexService.recordSnapshot({
+              folders: snapshot.folders,
+              emails: snapshot.emails,
+              syncedAt: snapshot.syncedAt,
+              folderStats: snapshot.folderStats,
+            });
+            return createTextResult({
+              checkedAt: new Date().toISOString(),
+              synced: { folder: folder ?? "all", full: Boolean(full), folderStats: snapshot.folderStats },
+              index: {
+                updatedAt: indexStatus.updatedAt,
+                storedMessageCount: indexStatus.storedMessageCount,
+                dedupedMessageCount: indexStatus.dedupedMessageCount,
+                path: indexStatus.path,
+              },
+            });
+          }
+
           const syncStatus = await backgroundSyncService.runNow("sync_emails");
           const indexStatus = await localIndexService.getStatus();
           return createTextResult({
