@@ -122,6 +122,86 @@ test("planFolderSync treats mailbox count drift as a changed incremental window"
   assert.equal(plan.endUid, 150);
 });
 
+test("planFolderSync full:true with no prior backfill starts at the newest window", () => {
+  const plan = planFolderSync({
+    folder: "Archive",
+    exists: 22871,
+    uidNext: 45750,
+    uidValidity: "999",
+    full: true,
+    limit: 500,
+  });
+
+  assert.equal(plan.strategy, "full");
+  assert.equal(plan.startUid, 45250);
+  assert.equal(plan.endUid, 45749);
+  assert.equal(plan.backfilledToUid, 45250);
+});
+
+test("planFolderSync full:true continues backfilling older than the last window instead of refetching it", () => {
+  const plan = planFolderSync({
+    folder: "Archive",
+    exists: 22871,
+    uidNext: 45750,
+    uidValidity: "999",
+    full: true,
+    limit: 500,
+    checkpoint: {
+      folder: "Archive",
+      uidValidity: "999",
+      backfilledToUid: 45250,
+    },
+  });
+
+  assert.equal(plan.strategy, "full");
+  assert.equal(plan.startUid, 44750);
+  assert.equal(plan.endUid, 45249);
+  assert.equal(plan.backfilledToUid, 44750);
+});
+
+test("planFolderSync full:true reports no more work once backfilled to UID 1", () => {
+  const plan = planFolderSync({
+    folder: "Archive",
+    exists: 22871,
+    uidNext: 45750,
+    uidValidity: "999",
+    full: true,
+    limit: 500,
+    checkpoint: {
+      folder: "Archive",
+      uidValidity: "999",
+      backfilledToUid: 1,
+    },
+  });
+
+  assert.equal(plan.strategy, "full");
+  assert.equal(plan.changed, false);
+  assert.equal(plan.startUid, undefined);
+  assert.equal(plan.backfilledToUid, 1);
+});
+
+test("planFolderSync full:true restarts backfill from the newest window when uidValidity changed", () => {
+  const plan = planFolderSync({
+    folder: "Archive",
+    exists: 22871,
+    uidNext: 45750,
+    uidValidity: "new-uidvalidity",
+    full: true,
+    limit: 500,
+    checkpoint: {
+      folder: "Archive",
+      uidValidity: "old-uidvalidity",
+      backfilledToUid: 1,
+    },
+  });
+
+  assert.equal(plan.strategy, "full");
+  assert.equal(plan.changed, true);
+  assert.equal(plan.startUid, 45250);
+  assert.equal(plan.endUid, 45749);
+  assert.equal(plan.backfilledToUid, 45250);
+});
+
 test("emptyFolder rejects INBOX before making IMAP calls", async () => {
   const service = new SimpleIMAPService(createConfig());
   let connectCalls = 0;

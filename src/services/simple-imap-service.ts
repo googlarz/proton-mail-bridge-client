@@ -280,6 +280,7 @@ export interface FolderSyncPlan {
   startUid?: number;
   endUid?: number;
   highestKnownUid: number;
+  backfilledToUid?: number;
 }
 
 export function planFolderSync(input: {
@@ -304,13 +305,39 @@ export function planFolderSync(input: {
   }
 
   if (input.full) {
+    // Without backfill, every full:true call recomputed the same "newest N
+    // UIDs" window from scratch, so repeated calls could never reach
+    // anything older — found live: two consecutive full syncs of a
+    // 22k-message folder both fetched the identical top 500 UIDs, and the
+    // other ~22k older messages were permanently unreachable. Continue from
+    // where the last full/backfill call left off instead, walking the
+    // window backward through history one call at a time.
+    const uidValidityMatches =
+      !input.checkpoint?.uidValidity || !input.uidValidity || input.checkpoint.uidValidity === input.uidValidity;
+    const priorFloor = uidValidityMatches ? input.checkpoint?.backfilledToUid : undefined;
+
+    if (priorFloor !== undefined && priorFloor <= 1) {
+      // Already backfilled all the way back to UID 1 in a previous call —
+      // nothing older left to fetch.
+      return {
+        folder: input.folder,
+        strategy: "full",
+        changed: false,
+        highestKnownUid,
+        backfilledToUid: priorFloor,
+      };
+    }
+
+    const endUid = priorFloor !== undefined ? priorFloor - 1 : highestKnownUid;
+    const startUid = Math.max(1, endUid - input.limit + 1);
     return {
       folder: input.folder,
       strategy: "full",
       changed: true,
-      startUid: Math.max(1, highestKnownUid - input.limit + 1),
-      endUid: highestKnownUid,
+      startUid,
+      endUid,
       highestKnownUid,
+      backfilledToUid: startUid,
     };
   }
 
@@ -2557,6 +2584,7 @@ export class SimpleIMAPService {
             changed: plan.changed,
             fetched: 0,
             total: exists,
+            backfilledToUid: plan.backfilledToUid,
           },
           emails: [],
         };
@@ -2581,7 +2609,18 @@ export class SimpleIMAPService {
         this.capMessageCache();
       }
 
-      const highestUid = emails.reduce((max, email) => Math.max(max, email.uid), 0) || plan.highestKnownUid;
+      // A backfill-continuation window's endUid is an older UID than the
+      // mailbox's true current top (highestKnownUid) — only derive
+      // highestUid from what was actually fetched when this window reaches
+      // that top; otherwise keep the existing checkpoint's highestUid
+      // unchanged; using this batch's (much lower) fetched UIDs here would
+      // silently roll the incremental-sync high-water-mark backward and
+      // make every subsequent incremental sync think a huge amount of
+      // "new" mail exists again.
+      const reachesTop = plan.endUid === plan.highestKnownUid;
+      const highestUid = reachesTop
+        ? emails.reduce((max, email) => Math.max(max, email.uid), 0) || plan.highestKnownUid
+        : (input.checkpoint?.highestUid ?? plan.highestKnownUid);
       return {
         checkpoint: {
           folder,
@@ -2597,6 +2636,9 @@ export class SimpleIMAPService {
           changed: plan.changed,
           fetched: emails.length,
           total: exists,
+          rangeStartUid: plan.startUid,
+          rangeEndUid: plan.endUid,
+          backfilledToUid: plan.backfilledToUid,
         },
         emails,
       };

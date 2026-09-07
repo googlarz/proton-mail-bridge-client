@@ -478,6 +478,68 @@ test("search_indexed_emails' from filter finds matches older than the SQL candid
   }
 });
 
+test("a windowed full sync only prunes expunged messages within its own scanned UID range", async () => {
+  // Before this fix, cleanupExpunged compared a "full" sync's fetched batch
+  // against every stored message in that folder, not just the UID range it
+  // actually re-scanned. A full sync only ever fetches one bounded window
+  // (e.g. the newest 500 of a 22,000-message folder), so every previously
+  // indexed message outside that window looked "expunged" and was deleted —
+  // this is what made repeated full:true backfill calls actively
+  // self-destructive: each new (older) window's sync wiped out every
+  // message the previous window had just added.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-windowed-prune-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const makeEmail = (uid) => ({
+    id: `Archive::${uid}`, folder: "Archive", uid, seq: uid,
+    messageId: `<msg-${uid}@example.com>`, subject: `Message ${uid}`,
+    from: [{ address: "sender@example.com" }], to: [{ address: "owner@example.com" }],
+    cc: [], bcc: [], replyTo: [],
+    date: "2026-01-01T00:00:00.000Z", internalDate: "2026-01-01T00:00:00.000Z",
+    isRead: false, isStarred: false, flags: [],
+    preview: "Body", hasAttachments: false, attachments: [], labels: [],
+  });
+
+  try {
+    // First full-sync window: the newest batch, UIDs 501-1000.
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:00:00.000Z",
+      folders: [{ path: "Archive", name: "Archive", delimiter: "/", specialUse: "\\Archive", listed: true, subscribed: true, flags: [], messages: 1000, unseen: 0 }],
+      folderStats: [{ folder: "Archive", fetched: 500, total: 1000, strategy: "full", rangeStartUid: 501, rangeEndUid: 1000 }],
+      emails: Array.from({ length: 500 }, (_, i) => makeEmail(501 + i)),
+    });
+
+    let status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 500, "first window should have indexed 500 messages");
+
+    // Second, older backfill window: UIDs 1-500 — must NOT delete the first
+    // window's messages (501-1000), which are outside this call's range.
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:01:00.000Z",
+      folders: [{ path: "Archive", name: "Archive", delimiter: "/", specialUse: "\\Archive", listed: true, subscribed: true, flags: [], messages: 1000, unseen: 0 }],
+      folderStats: [{ folder: "Archive", fetched: 500, total: 1000, strategy: "full", rangeStartUid: 1, rangeEndUid: 500 }],
+      emails: Array.from({ length: 500 }, (_, i) => makeEmail(1 + i)),
+    });
+
+    status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 1000, "backfilling an older window must not delete the previously-synced newer window");
+
+    // A genuine expunge WITHIN a re-scanned range must still be detected:
+    // re-sync the 1-500 window with uid 250 now missing from the server.
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:02:00.000Z",
+      folders: [{ path: "Archive", name: "Archive", delimiter: "/", specialUse: "\\Archive", listed: true, subscribed: true, flags: [], messages: 999, unseen: 0 }],
+      folderStats: [{ folder: "Archive", fetched: 499, total: 999, strategy: "full", rangeStartUid: 1, rangeEndUid: 500 }],
+      emails: Array.from({ length: 500 }, (_, i) => 1 + i).filter((uid) => uid !== 250).map(makeEmail),
+    });
+
+    status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 999, "a message genuinely missing from a re-scanned range must still be pruned");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("dateFrom/dateTo set to the same day includes that day's messages instead of excluding it", async () => {
   // Found live: dateTo:"2026-09-02" did `COALESCE(internal_date, date) <=
   // "2026-09-02"` — a raw string comparison against a full ISO timestamp

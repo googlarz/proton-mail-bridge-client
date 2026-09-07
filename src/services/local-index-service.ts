@@ -1346,9 +1346,9 @@ export class LocalIndexService {
     `);
     const upsertSyncState = db.prepare(`
       INSERT INTO sync_state (
-        folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total
+        folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total, backfilled_to_uid
       ) VALUES (
-        @folder, @uid_validity, @uid_next, @highest_uid, @last_sync_at, @last_full_sync_at, @strategy, @changed, @fetched, @total
+        @folder, @uid_validity, @uid_next, @highest_uid, @last_sync_at, @last_full_sync_at, @strategy, @changed, @fetched, @total, @backfilled_to_uid
       )
       ON CONFLICT(folder) DO UPDATE SET
         uid_validity = excluded.uid_validity,
@@ -1359,7 +1359,8 @@ export class LocalIndexService {
         strategy = excluded.strategy,
         changed = excluded.changed,
         fetched = excluded.fetched,
-        total = excluded.total
+        total = excluded.total,
+        backfilled_to_uid = excluded.backfilled_to_uid
     `);
 
     const deleteFts = db.prepare(`DELETE FROM messages_fts WHERE email_id = ?`);
@@ -1444,6 +1445,7 @@ export class LocalIndexService {
           changed: folderStat.changed ? 1 : 0,
           fetched: folderStat.fetched ?? null,
           total: folderStat.total ?? null,
+          backfilled_to_uid: resetCheckpoint ? null : folderStat.backfilledToUid ?? null,
         });
       }
 
@@ -1493,36 +1495,52 @@ export class LocalIndexService {
         createSnapshotUidTable.run();
         const clearSnapshotUidTable = db.prepare(`DELETE FROM temp_snapshot_uids`);
         const insertSnapshotUid = db.prepare(`INSERT OR IGNORE INTO temp_snapshot_uids(uid) VALUES (?)`);
+        // Scoped to [rangeStartUid, rangeEndUid] — the UID range this call
+        // actually re-scanned — not the whole folder. A "full" sync only
+        // ever fetches one bounded window (at most a few hundred UIDs out
+        // of a folder that can hold tens of thousands), so treating every
+        // stored UID outside that window as "expunged" would wipe out every
+        // previously-indexed message the moment a later window was synced.
+        // This is what made backfill (repeated full:true calls walking the
+        // window backward through history) actively destructive before this
+        // fix: each new window's sync would delete every message the
+        // previous window had just added.
         const deleteExpungedFts = db.prepare(`
           DELETE FROM messages_fts
           WHERE email_id IN (
             SELECT email_id
             FROM messages
             WHERE folder = ?
+              AND uid BETWEEN ? AND ?
               AND uid NOT IN (SELECT uid FROM temp_snapshot_uids)
           )
         `);
         const deleteExpungedMessages = db.prepare(`
           DELETE FROM messages
           WHERE folder = ?
+            AND uid BETWEEN ? AND ?
             AND uid NOT IN (SELECT uid FROM temp_snapshot_uids)
         `);
-        const uidsByFullSyncFolder = new Map<string, Set<number>>();
+        const rangesByFullSyncFolder = new Map<string, { uids: Set<number>; rangeStartUid: number; rangeEndUid: number }>();
         for (const folderStat of input.folderStats) {
-          if (folderStat.strategy === "full") {
-            uidsByFullSyncFolder.set(folderStat.folder, new Set<number>());
+          if (folderStat.strategy === "full" && folderStat.rangeStartUid !== undefined && folderStat.rangeEndUid !== undefined) {
+            rangesByFullSyncFolder.set(folderStat.folder, {
+              uids: new Set<number>(),
+              rangeStartUid: folderStat.rangeStartUid,
+              rangeEndUid: folderStat.rangeEndUid,
+            });
           }
         }
         for (const email of input.emails) {
-          uidsByFullSyncFolder.get(email.folder)?.add(email.uid);
+          rangesByFullSyncFolder.get(email.folder)?.uids.add(email.uid);
         }
-        for (const [folder, uids] of uidsByFullSyncFolder) {
+        for (const [folder, range] of rangesByFullSyncFolder) {
           clearSnapshotUidTable.run();
-          for (const uid of uids) {
+          for (const uid of range.uids) {
             insertSnapshotUid.run(uid);
           }
-          deleteExpungedFts.run(folder);
-          deleteExpungedMessages.run(folder);
+          deleteExpungedFts.run(folder, range.rangeStartUid, range.rangeEndUid);
+          deleteExpungedMessages.run(folder, range.rangeStartUid, range.rangeEndUid);
         }
         clearSnapshotUidTable.run();
       }
@@ -1601,7 +1619,8 @@ export class LocalIndexService {
         strategy TEXT,
         changed INTEGER NOT NULL DEFAULT 0,
         fetched INTEGER,
-        total INTEGER
+        total INTEGER,
+        backfilled_to_uid INTEGER
       );
 
       CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
@@ -1635,6 +1654,13 @@ export class LocalIndexService {
     }
     if (!columns.has("attachment_text")) {
       db.exec(`ALTER TABLE messages ADD COLUMN attachment_text TEXT`);
+    }
+
+    const syncStateColumns = new Set(
+      (db.prepare(`PRAGMA table_info(sync_state)`).all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    if (!syncStateColumns.has("backfilled_to_uid")) {
+      db.exec(`ALTER TABLE sync_state ADD COLUMN backfilled_to_uid INTEGER`);
     }
   }
 
@@ -1864,7 +1890,7 @@ export class LocalIndexService {
 
     const syncCheckpoints = db
       .prepare(`
-        SELECT folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total
+        SELECT folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total, backfilled_to_uid
         FROM sync_state
         ORDER BY folder ASC
       `)
@@ -1880,6 +1906,7 @@ export class LocalIndexService {
         changed: Boolean((row as { changed?: number }).changed),
         fetched: (row as { fetched?: number }).fetched,
         total: (row as { total?: number }).total,
+        backfilledToUid: (row as { backfilled_to_uid?: number }).backfilled_to_uid,
       } satisfies MailboxSyncCheckpoint));
 
     const messageSqlParts = [`SELECT * FROM messages`];

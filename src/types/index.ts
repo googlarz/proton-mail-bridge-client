@@ -418,6 +418,17 @@ export interface MailboxSyncCheckpoint {
   changed?: boolean;
   fetched?: number;
   total?: number;
+  // The UID range actually re-scanned by this call — used to scope
+  // expunge-detection to that range instead of the whole folder (a "full"
+  // sync only ever fetches a bounded window, never the whole folder in one
+  // call, so it must never treat UIDs outside its own window as expunged).
+  rangeStartUid?: number;
+  rangeEndUid?: number;
+  // Lowest UID reached so far by repeated full:true backfill calls on this
+  // folder. Persisted so each subsequent full sync continues one window
+  // further back in history instead of re-fetching the same newest window
+  // forever.
+  backfilledToUid?: number;
 }
 
 export interface LocalIndexStatus {
