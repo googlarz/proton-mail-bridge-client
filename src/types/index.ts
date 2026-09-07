@@ -180,6 +180,11 @@ export interface RemoteDraftRef {
   emailId?: string;
   messageId?: string;
   syncedAt: string;
+  // Set when upsertRemoteDraft's append of the new draft succeeded but
+  // deleting the superseded old draft afterward failed — the new draft
+  // above is still valid and should be recorded, but the old one may now
+  // be an orphaned duplicate on the server that needs manual cleanup.
+  staleDraftCleanupError?: string;
 }
 
 export interface DraftRecord {

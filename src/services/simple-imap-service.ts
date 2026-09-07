@@ -107,6 +107,24 @@ const HARD_IDLE_TIMEOUT_GRACE_MS = 5_000;
 // unrecoverable hang, and force a reconnect so the item after it gets a
 // fresh, healthy connection rather than retrying the same wedged one.
 export const BULK_ITEM_TIMEOUT_MS = 30_000;
+// Single-item IMAP operations (get/mark/star/move/delete/flag/label a single
+// email) previously had no bound at all, unlike their bulk counterparts —
+// the same wedged-connection hang described above applies just as much to a
+// lone get_email_by_id or move_email call, just with no batch around it to
+// report a per-item failure for. Reuse BULK_ITEM_TIMEOUT_MS directly for
+// these rather than introducing a second near-identical constant.
+// Cheap, simple bound on messageCache growth: a long-lived server process
+// paging through years of mail (getEmails/searchEmails/collectFolderForIndex
+// all insert into this cache) would otherwise grow it without limit. FIFO
+// eviction (Map preserves insertion order) approximates LRU well enough for
+// a bound, without the complexity of tracking last-read time.
+const MAX_MESSAGE_CACHE_SIZE = 5000;
+// getFolders() previously only ever refreshed via another mutation
+// invalidating this.folderCache — a folder/label created or renamed from
+// outside this process (webmail, another client) never surfaced until
+// something here happened to clear the cache. A short TTL bounds that
+// staleness without turning every call into a network round trip.
+const FOLDER_CACHE_TTL_MS = 5 * 60_000;
 // Same reasoning as BULK_ITEM_TIMEOUT_MS, for the single-command bulk paths
 // (bulkMove's one messageMove over the whole uid set) — longer because one
 // legitimate call covering many messages can reasonably take longer than a
@@ -394,6 +412,7 @@ export function mapHeaderValue(value: unknown): unknown {
 export class SimpleIMAPService {
   private client?: ImapFlow;
   private folderCache?: FolderInfo[];
+  private folderCacheAt?: number;
   private readonly messageCache = new Map<string, EmailSummary>();
   private lastSyncAt?: string;
   private lastIdleAt?: string;
@@ -722,7 +741,11 @@ export class SimpleIMAPService {
   }
 
   async getFolders(forceRefresh = false): Promise<FolderInfo[]> {
-    if (this.folderCache && !forceRefresh) {
+    // See FOLDER_CACHE_TTL_MS above — treat the cache as stale once it's old
+    // enough that an external change plausibly happened, even if nothing in
+    // this process asked for forceRefresh.
+    const isStale = !this.folderCacheAt || Date.now() - this.folderCacheAt > FOLDER_CACHE_TTL_MS;
+    if (this.folderCache && !forceRefresh && !isStale) {
       return this.folderCache;
     }
 
@@ -751,6 +774,7 @@ export class SimpleIMAPService {
     }
 
     this.folderCache = folders.map(mapFolder);
+    this.folderCacheAt = Date.now();
     return this.folderCache;
   }
 
@@ -979,6 +1003,7 @@ export class SimpleIMAPService {
               : summary;
           emails.push(enriched);
           this.messageCache.set(enriched.id, enriched);
+          this.capMessageCache();
         }
       } else {
         const endSeq = total - offset;
@@ -992,6 +1017,7 @@ export class SimpleIMAPService {
               : summary;
           emails.push(enriched);
           this.messageCache.set(enriched.id, enriched);
+          this.capMessageCache();
         }
       }
 
@@ -1063,6 +1089,7 @@ export class SimpleIMAPService {
               : summary;
           results.push(enriched);
           this.messageCache.set(enriched.id, enriched);
+          this.capMessageCache();
         }
 
         // FIX #3: verified — hasAttachment, attachmentName, label, threadId handled above
@@ -1333,15 +1360,19 @@ export class SimpleIMAPService {
     const { folder, uid } = parseEmailId(emailId);
     let notApplied: string[] = [];
 
-    await this.withMailbox(folder, false, async (client) => {
-      this.assertMailboxUidValidity(client, uidValidity);
-      if (isRead) {
-        await client.messageFlagsAdd(String(uid), ["\\Seen"], { uid: true });
-      } else {
-        await client.messageFlagsRemove(String(uid), ["\\Seen"], { uid: true });
-      }
-      notApplied = await this.verifyFlags(client, uid, ["\\Seen"], isRead);
-    });
+    await this.withTimeout(
+      this.withMailbox(folder, false, async (client) => {
+        this.assertMailboxUidValidity(client, uidValidity);
+        if (isRead) {
+          await client.messageFlagsAdd(String(uid), ["\\Seen"], { uid: true });
+        } else {
+          await client.messageFlagsRemove(String(uid), ["\\Seen"], { uid: true });
+        }
+        notApplied = await this.verifyFlags(client, uid, ["\\Seen"], isRead);
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms marking email read for ${emailId}`,
+    );
 
     // Only reflect the change locally if verifyFlags actually confirmed the
     // server applied it — updateCachedMessage previously ran unconditionally,
@@ -1370,15 +1401,19 @@ export class SimpleIMAPService {
     const { folder, uid } = parseEmailId(emailId);
     let notApplied: string[] = [];
 
-    await this.withMailbox(folder, false, async (client) => {
-      this.assertMailboxUidValidity(client, uidValidity);
-      if (isStarred) {
-        await client.messageFlagsAdd(String(uid), ["\\Flagged"], { uid: true });
-      } else {
-        await client.messageFlagsRemove(String(uid), ["\\Flagged"], { uid: true });
-      }
-      notApplied = await this.verifyFlags(client, uid, ["\\Flagged"], isStarred);
-    });
+    await this.withTimeout(
+      this.withMailbox(folder, false, async (client) => {
+        this.assertMailboxUidValidity(client, uidValidity);
+        if (isStarred) {
+          await client.messageFlagsAdd(String(uid), ["\\Flagged"], { uid: true });
+        } else {
+          await client.messageFlagsRemove(String(uid), ["\\Flagged"], { uid: true });
+        }
+        notApplied = await this.verifyFlags(client, uid, ["\\Flagged"], isStarred);
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms starring email ${emailId}`,
+    );
 
     // Same reasoning as markEmailRead above: only cache the requested state
     // once verifyFlags has actually confirmed the server applied it.
@@ -1400,29 +1435,33 @@ export class SimpleIMAPService {
     const { folder, uid } = parseEmailId(emailId);
     let targetUid: number | undefined;
 
-    await this.withMailbox(folder, false, async (client) => {
-      this.assertMailboxUidValidity(client, uidValidity);
-      const moved = await client.messageMove(String(uid), targetFolder, { uid: true });
-      if (moved === false) {
-        throw new Error(`Server did not move email ${emailId} to ${targetFolder}`);
-      }
-      targetUid = moved.uidMap?.get(uid);
-      // `moved === false` above only catches an empty/invalid range given to
-      // the client, not a UID that's syntactically valid but doesn't match
-      // any message on the server — IMAP's MOVE command silently succeeds
-      // with nothing moved in that case (same class of bug just fixed in
-      // verifyFlags). Without this check the caller got a success-shaped
-      // response with no `error` field, just a silently-missing targetUid,
-      // making move_email on a stale/wrong/nonexistent id look like it
-      // worked. Found live via move_email on a deliberately-fake UID.
-      // `uidMap` is only populated when the server has UIDPLUS (Proton
-      // Bridge does, confirmed live) — gate on that capability so a server
-      // without it doesn't get a false failure here for a move that
-      // actually succeeded.
-      if (targetUid === undefined && client.capabilities.has("UIDPLUS")) {
-        throw new Error(`Email not found for id ${emailId}`);
-      }
-    });
+    await this.withTimeout(
+      this.withMailbox(folder, false, async (client) => {
+        this.assertMailboxUidValidity(client, uidValidity);
+        const moved = await client.messageMove(String(uid), targetFolder, { uid: true });
+        if (moved === false) {
+          throw new Error(`Server did not move email ${emailId} to ${targetFolder}`);
+        }
+        targetUid = moved.uidMap?.get(uid);
+        // `moved === false` above only catches an empty/invalid range given to
+        // the client, not a UID that's syntactically valid but doesn't match
+        // any message on the server — IMAP's MOVE command silently succeeds
+        // with nothing moved in that case (same class of bug just fixed in
+        // verifyFlags). Without this check the caller got a success-shaped
+        // response with no `error` field, just a silently-missing targetUid,
+        // making move_email on a stale/wrong/nonexistent id look like it
+        // worked. Found live via move_email on a deliberately-fake UID.
+        // `uidMap` is only populated when the server has UIDPLUS (Proton
+        // Bridge does, confirmed live) — gate on that capability so a server
+        // without it doesn't get a false failure here for a move that
+        // actually succeeded.
+        if (targetUid === undefined && client.capabilities.has("UIDPLUS")) {
+          throw new Error(`Email not found for id ${emailId}`);
+        }
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms moving email ${emailId} to ${targetFolder}`,
+    );
 
     const cached = this.messageCache.get(emailId);
     this.messageCache.delete(emailId);
@@ -1434,6 +1473,7 @@ export class SimpleIMAPService {
         folder: targetFolder,
         uid: targetUid,
       });
+      this.capMessageCache();
     }
     // A move changes the message count of both the source and target
     // folder — see the markEmailRead comment above for the same
@@ -1460,26 +1500,30 @@ export class SimpleIMAPService {
   }> {
     const { folder, uid } = parseEmailId(emailId);
 
-    await this.withMailbox(folder, false, async (client) => {
-      this.assertMailboxUidValidity(client, uidValidity);
-      // messageDelete's own truthy/falsy result only reflects whether the
-      // server accepted the EXPUNGE command, not whether any message
-      // actually matched — a nonexistent UID's preceding \Deleted flag add
-      // is itself a silent no-op (same class of bug fixed elsewhere in
-      // this file), so EXPUNGE legitimately "succeeds" having deleted
-      // nothing. This is the most severe instance of that bug class since
-      // deletion is irreversible: found live, delete_email on a
-      // deliberately-fake UID reported deleted:true. Confirm the message
-      // actually exists before issuing a permanent delete against it.
-      const exists = await client.fetchOne(String(uid), { uid: true }, { uid: true });
-      if (exists === false) {
-        throw new Error(`Email not found for id ${emailId}`);
-      }
-      const deleted = await client.messageDelete(String(uid), { uid: true });
-      if (!deleted) {
-        throw new Error(`Server did not delete email ${emailId}`);
-      }
-    });
+    await this.withTimeout(
+      this.withMailbox(folder, false, async (client) => {
+        this.assertMailboxUidValidity(client, uidValidity);
+        // messageDelete's own truthy/falsy result only reflects whether the
+        // server accepted the EXPUNGE command, not whether any message
+        // actually matched — a nonexistent UID's preceding \Deleted flag add
+        // is itself a silent no-op (same class of bug fixed elsewhere in
+        // this file), so EXPUNGE legitimately "succeeds" having deleted
+        // nothing. This is the most severe instance of that bug class since
+        // deletion is irreversible: found live, delete_email on a
+        // deliberately-fake UID reported deleted:true. Confirm the message
+        // actually exists before issuing a permanent delete against it.
+        const exists = await client.fetchOne(String(uid), { uid: true }, { uid: true });
+        if (exists === false) {
+          throw new Error(`Email not found for id ${emailId}`);
+        }
+        const deleted = await client.messageDelete(String(uid), { uid: true });
+        if (!deleted) {
+          throw new Error(`Server did not delete email ${emailId}`);
+        }
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms deleting email ${emailId}`,
+    );
 
     this.messageCache.delete(emailId);
     // Deletion changes the folder's message count — see the markEmailRead
@@ -1519,13 +1563,17 @@ export class SimpleIMAPService {
     // existing message could still legitimately lack a Message-ID header.
     let messageId: string | undefined;
     let sourceExists = false;
-    await this.withMailbox(folder, true, async (client) => {
-      const msg = await client.fetchOne(String(uid), { uid: true, envelope: true }, { uid: true });
-      if (msg !== false) {
-        sourceExists = true;
-        messageId = msg.envelope?.messageId;
-      }
-    });
+    await this.withTimeout(
+      this.withMailbox(folder, true, async (client) => {
+        const msg = await client.fetchOne(String(uid), { uid: true, envelope: true }, { uid: true });
+        if (msg !== false) {
+          sourceExists = true;
+          messageId = msg.envelope?.messageId;
+        }
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms checking existence of ${emailId}`,
+    );
     if (!sourceExists) {
       throw new Error(`Email not found for id ${emailId}`);
     }
@@ -1534,12 +1582,16 @@ export class SimpleIMAPService {
     for (const label of labelsToAdd) {
       const labelFolder = label.startsWith("Labels/") ? label : `Labels/${label}`;
       try {
-        await this.withMailbox(folder, false, async (client) => {
-          const result = await client.messageCopy(String(uid), labelFolder, { uid: true });
-          if (result === false) {
-            throw new Error(`Server did not copy message to ${labelFolder}`);
-          }
-        });
+        await this.withTimeout(
+          this.withMailbox(folder, false, async (client) => {
+            const result = await client.messageCopy(String(uid), labelFolder, { uid: true });
+            if (result === false) {
+              throw new Error(`Server did not copy message to ${labelFolder}`);
+            }
+          }),
+          BULK_ITEM_TIMEOUT_MS,
+          `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms copying ${emailId} to ${labelFolder}`,
+        );
         added.push(labelFolder);
       } catch {
         notFound.push(labelFolder);
@@ -1552,15 +1604,19 @@ export class SimpleIMAPService {
       const labelFolder = label.startsWith("Labels/") ? label : `Labels/${label}`;
       try {
         if (messageId) {
-          const deleted = await this.withMailbox(labelFolder, false, async (client) => {
-            const uids = await client.search({ header: { "Message-ID": messageId! } }, { uid: true });
-            const labelUid = Array.isArray(uids) ? uids[0] : undefined;
-            if (!labelUid) {
-              return false;
-            }
-            await client.messageDelete(String(labelUid), { uid: true });
-            return true;
-          });
+          const deleted = await this.withTimeout(
+            this.withMailbox(labelFolder, false, async (client) => {
+              const uids = await client.search({ header: { "Message-ID": messageId! } }, { uid: true });
+              const labelUid = Array.isArray(uids) ? uids[0] : undefined;
+              if (!labelUid) {
+                return false;
+              }
+              await client.messageDelete(String(labelUid), { uid: true });
+              return true;
+            }),
+            BULK_ITEM_TIMEOUT_MS,
+            `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms removing ${emailId} from ${labelFolder}`,
+          );
           if (deleted) {
             removed.push(labelFolder);
           } else {
@@ -1592,24 +1648,28 @@ export class SimpleIMAPService {
     const { folder, uid } = parseEmailId(emailId);
     let notApplied: string[] = [];
 
-    await this.withMailbox(folder, false, async (client) => {
-      this.assertMailboxUidValidity(client, uidValidity);
-      if (flagsToAdd.length > 0) {
-        await client.messageFlagsAdd(String(uid), flagsToAdd, { uid: true });
-      }
-      if (flagsToRemove.length > 0) {
-        await client.messageFlagsRemove(String(uid), flagsToRemove, { uid: true });
-      }
-      // Verify adds
-      const notAppliedAdds = flagsToAdd.length > 0
-        ? await this.verifyFlags(client, uid, flagsToAdd, true)
-        : [];
-      // Verify removes
-      const notAppliedRemoves = flagsToRemove.length > 0
-        ? await this.verifyFlags(client, uid, flagsToRemove, false)
-        : [];
-      notApplied = [...notAppliedAdds, ...notAppliedRemoves];
-    });
+    await this.withTimeout(
+      this.withMailbox(folder, false, async (client) => {
+        this.assertMailboxUidValidity(client, uidValidity);
+        if (flagsToAdd.length > 0) {
+          await client.messageFlagsAdd(String(uid), flagsToAdd, { uid: true });
+        }
+        if (flagsToRemove.length > 0) {
+          await client.messageFlagsRemove(String(uid), flagsToRemove, { uid: true });
+        }
+        // Verify adds
+        const notAppliedAdds = flagsToAdd.length > 0
+          ? await this.verifyFlags(client, uid, flagsToAdd, true)
+          : [];
+        // Verify removes
+        const notAppliedRemoves = flagsToRemove.length > 0
+          ? await this.verifyFlags(client, uid, flagsToRemove, false)
+          : [];
+        notApplied = [...notAppliedAdds, ...notAppliedRemoves];
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms updating flags for ${emailId}`,
+    );
 
     // \Seen (this is the generic-flags sibling of markEmailRead, which
     // already got this same fix above) changes the folder's unseen count.
@@ -1673,19 +1733,27 @@ export class SimpleIMAPService {
       throw new Error("emptyFolder cannot be used on INBOX. Move messages to Trash first.");
     }
 
-    const uids: number[] = await this.withMailbox(folder, true, async (client) => {
-      const found = await client.search({ all: true }, { uid: true });
-      return Array.isArray(found) ? found : [];
-    });
+    const uids: number[] = await this.withTimeout(
+      this.withMailbox(folder, true, async (client) => {
+        const found = await client.search({ all: true }, { uid: true });
+        return Array.isArray(found) ? found : [];
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms listing messages to empty in ${folder}`,
+    );
 
     if (uids.length === 0) {
       return { folder, deleted: 0 };
     }
 
     const uidSet = uids.join(",");
-    await this.withMailbox(folder, false, async (client) => {
-      await client.messageDelete(uidSet, { uid: true });
-    });
+    await this.withTimeout(
+      this.withMailbox(folder, false, async (client) => {
+        await client.messageDelete(uidSet, { uid: true });
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms emptying folder ${folder}`,
+    );
 
     // Purge from cache
     for (const uid of uids) {
@@ -2456,6 +2524,7 @@ export class SimpleIMAPService {
           : summary;
         emails.push(enriched);
         this.messageCache.set(enriched.id, enriched);
+        this.capMessageCache();
       }
 
       const highestUid = emails.reduce((max, email) => Math.max(max, email.uid), 0) || plan.highestKnownUid;
@@ -2579,20 +2648,42 @@ export class SimpleIMAPService {
       uid = await this.findUidByHeader(folder, "message-id", input.messageId);
     }
 
-    if (input.existingEmailId) {
-      await this.deleteEmail(input.existingEmailId);
-    }
-
     this.folderCache = undefined;
     this.lastSyncAt = new Date().toISOString();
 
-    return {
+    // Build the result BEFORE attempting to clean up the superseded old
+    // draft below. Previously the delete ran first and, if it threw, this
+    // whole method threw with it — losing the new draft's id even though
+    // the append had already succeeded. Found live: a delete on the old
+    // draft failing right after a successful append meant
+    // syncDraftToRemote's catch block recorded a sync *error* with no
+    // emailId at all, leaving the local draft record pointed at the old
+    // (soon-to-be-orphaned) draft while a second, untracked draft now also
+    // existed on the server with no way to reconcile them. Returning the
+    // new draft's identity regardless of whether cleanup succeeded lets the
+    // caller update its record to point at the new draft either way.
+    const result: RemoteDraftRef = {
       folder,
       uid,
       emailId: uid ? createEmailId(folder, uid) : undefined,
       messageId: input.messageId,
       syncedAt: this.lastSyncAt,
     };
+
+    if (input.existingEmailId) {
+      try {
+        await this.deleteEmail(input.existingEmailId);
+      } catch (error) {
+        this.log.warn(
+          "Failed to delete superseded remote draft after upsert; new draft was still appended and is reported",
+          "IMAPService",
+          { existingEmailId: input.existingEmailId, newEmailId: result.emailId, error },
+        );
+        result.staleDraftCleanupError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    return result;
   }
 
   async deleteRemoteDraft(emailId: string): Promise<{
@@ -2846,21 +2937,25 @@ export class SimpleIMAPService {
   }> {
     const { folder, uid } = parseEmailId(emailId);
 
-    const { enriched, parsed } = await this.withMailbox(folder, true, async (client) => {
-      // NOTE: UIDs can be reused after mailbox recreation (UIDVALIDITY change).
-      // assertMailboxUidValidity handles this at the withMailbox level for mutating
-      // ops. For read-only fetches, callers should re-sync after a UIDVALIDITY
-      // change to avoid fetching the wrong message with a recycled UID.
-      const message = await client.fetchOne(String(uid), FETCH_DETAIL_QUERY, { uid: true });
-      if (!message || !message.source) {
-        throw new Error(`Email not found for id ${emailId}`);
-      }
+    const { enriched, parsed } = await this.withTimeout(
+      this.withMailbox(folder, true, async (client) => {
+        // NOTE: UIDs can be reused after mailbox recreation (UIDVALIDITY change).
+        // assertMailboxUidValidity handles this at the withMailbox level for mutating
+        // ops. For read-only fetches, callers should re-sync after a UIDVALIDITY
+        // change to avoid fetching the wrong message with a recycled UID.
+        const message = await client.fetchOne(String(uid), FETCH_DETAIL_QUERY, { uid: true });
+        if (!message || !message.source) {
+          throw new Error(`Email not found for id ${emailId}`);
+        }
 
-      const summary = this.toSummary(folder, message);
-      const parsed = await this.parseSource(message.source);
-      const enriched = this.enrichSummaryFromParsed(summary, parsed, true);
-      return { enriched, parsed };
-    });
+        const summary = this.toSummary(folder, message);
+        const parsed = await this.parseSource(message.source);
+        const enriched = this.enrichSummaryFromParsed(summary, parsed, true);
+        return { enriched, parsed };
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms fetching email ${emailId}`,
+    );
 
     // toSummary's `labels` comes from imapflow's `labels` fetch field, which
     // maps to Gmail's X-GM-LABELS extension — Proton Bridge doesn't
@@ -2897,6 +2992,7 @@ export class SimpleIMAPService {
     };
 
     this.messageCache.set(detail.id, detail);
+    this.capMessageCache();
     return { detail, parsed };
   }
 
@@ -3079,6 +3175,19 @@ export class SimpleIMAPService {
     }
 
     this.messageCache.set(emailId, updater(cached));
+    this.capMessageCache();
+  }
+
+  // See MAX_MESSAGE_CACHE_SIZE above. Map preserves insertion order, so
+  // `.keys().next().value` is the oldest entry — evicting it approximates
+  // LRU well enough for a bound, not a strict LRU (there's no read-time
+  // promotion elsewhere in this cache).
+  private capMessageCache(): void {
+    while (this.messageCache.size > MAX_MESSAGE_CACHE_SIZE) {
+      const oldestKey = this.messageCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.messageCache.delete(oldestKey);
+    }
   }
 
   private async getParsedAttachment(
@@ -3280,8 +3389,10 @@ export class SimpleIMAPService {
     outputPath?: string,
   ): Promise<AttachmentContentResult> {
     const outputFilePath = await this.resolveAttachmentOutputPath(emailId, attachment, outputPath);
-    await mkdir(dirname(outputFilePath), { recursive: true });
-    await writeFile(outputFilePath, attachment.content);
+    // 0o700/0o600: this writes the user's own private email content — restrict
+    // it to the owner regardless of the destination directory's own permissions.
+    await mkdir(dirname(outputFilePath), { recursive: true, mode: 0o700 });
+    await writeFile(outputFilePath, attachment.content, { mode: 0o600 });
 
     return {
       emailId,
@@ -3396,8 +3507,11 @@ export class SimpleIMAPService {
       return message.source;
     });
 
-    await mkdir(dirname(resolvedPath), { recursive: true });
-    await writeFile(resolvedPath, source);
+    // 0o700/0o600: same reasoning as writeAttachmentToPath above — this is
+    // the user's own private email content, regardless of where they chose
+    // to save it.
+    await mkdir(dirname(resolvedPath), { recursive: true, mode: 0o700 });
+    await writeFile(resolvedPath, source, { mode: 0o600 });
 
     return { emailId, outputPath: basename(resolvedPath) };
   }
@@ -3411,8 +3525,40 @@ export class SimpleIMAPService {
     targetFolder?: string;
     flags?: string[];
     internalDate?: Date;
-  }): Promise<{ folder: string; uid?: number; emailId?: string }> {
+  }): Promise<{ folder: string; uid?: number; emailId?: string; alreadyExists?: boolean; existingEmailId?: string }> {
     const folder = input.targetFolder?.trim() || (await this.resolveSpecialFolder("\\Inbox", ["INBOX"]));
+
+    // Parse the Message-ID up front (before APPEND, not after) so it can
+    // also be used to dedup against a prior import of the exact same raw
+    // message — e.g. a migration script re-run, or the same .eml handed to
+    // import_email twice. IMAP APPEND has no concept of "already exists",
+    // so without this check every re-run silently created another
+    // duplicate copy. If the message doesn't carry a parseable Message-ID,
+    // there's nothing to dedup against — fall through to a normal import,
+    // same as before this fix (not a regression).
+    let messageId: string | undefined;
+    try {
+      messageId = (await this.parseSource(input.raw)).messageId;
+    } catch {
+      // Best-effort — an unparseable message still gets imported below.
+    }
+
+    if (messageId) {
+      const existingUid = await this.withTimeout(
+        this.withMailbox(folder, true, async (client) => {
+          const uids = await client.search({ header: { "Message-ID": messageId! } }, { uid: true });
+          return Array.isArray(uids) && uids.length > 0 ? uids[uids.length - 1] : undefined;
+        }),
+        BULK_ITEM_TIMEOUT_MS,
+        `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms checking for an existing import of ${messageId} in ${folder}`,
+      ).catch(() => undefined);
+
+      if (existingUid !== undefined) {
+        const existingEmailId = createEmailId(folder, existingUid);
+        return { folder, uid: existingUid, emailId: existingEmailId, alreadyExists: true, existingEmailId };
+      }
+    }
+
     const client = await this.ensureConnected();
     const appended = await client.append(folder, input.raw, input.flags ?? [], input.internalDate ?? new Date());
     if (!appended) {
@@ -3420,12 +3566,8 @@ export class SimpleIMAPService {
     }
 
     let uid = appended.uid;
-    if (!uid) {
-      const parsed = await this.parseSource(input.raw);
-      const messageId = parsed.messageId;
-      if (messageId) {
-        uid = await this.findUidByHeader(folder, "message-id", messageId);
-      }
+    if (!uid && messageId) {
+      uid = await this.findUidByHeader(folder, "message-id", messageId);
     }
 
     this.folderCache = undefined;
