@@ -8,12 +8,14 @@ const MAX_AUDIT_LINES = 10000;
 export class AuditService {
   private readonly auditPath: string;
   private readonly archivePath: string;
+  private readonly archivePath2: string;
   private _rotateLock: Promise<void> = Promise.resolve();
   private permissionsChecked = false;
 
   constructor(private readonly config: ProtonMailConfig) {
     this.auditPath = join(this.config.dataDir, "audit.log");
     this.archivePath = `${this.auditPath}.1`;
+    this.archivePath2 = `${this.auditPath}.2`;
   }
 
   getPath(): string {
@@ -33,6 +35,7 @@ export class AuditService {
       this.permissionsChecked = true;
       await chmod(this.auditPath, 0o600).catch(() => {});
       await chmod(this.archivePath, 0o600).catch(() => {});
+      await chmod(this.archivePath2, 0o600).catch(() => {});
     }
     const persistedEntry: AuditEntry = {
       ...entry,
@@ -49,7 +52,11 @@ export class AuditService {
 
   async list(limit = 100): Promise<AuditEntry[]> {
     const cap = Math.min(limit, MAX_AUDIT_LINES);
-    const entries = [...(await this.readEntries(this.archivePath, cap)), ...(await this.readEntries(this.auditPath, cap))];
+    const entries = [
+      ...(await this.readEntries(this.archivePath2, cap)),
+      ...(await this.readEntries(this.archivePath, cap)),
+      ...(await this.readEntries(this.auditPath, cap)),
+    ];
     return entries.slice(-cap);
   }
 
@@ -59,6 +66,16 @@ export class AuditService {
       if (info.size < MAX_AUDIT_BYTES) {
         return;
       }
+      // Keep two rotated generations (.1, .2) instead of one — a single
+      // archive meant a burst of ordinary tool calls forcing two rotations
+      // would permanently evict a targeted historical entry after just one
+      // extra MAX_AUDIT_BYTES of writes. Two generations doubles that cost;
+      // it doesn't remove the inherent tradeoff of a size-bounded log.
+      await rename(this.archivePath, this.archivePath2).catch((error) => {
+        if (!(error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT")) {
+          throw error;
+        }
+      });
       await rename(this.auditPath, this.archivePath);
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {

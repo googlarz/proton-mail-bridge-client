@@ -403,11 +403,19 @@ export class DraftStoreService {
   private pruneSentDrafts(store: DraftStoreFile): void {
     const cutoff = Date.now() - SENT_DRAFT_RETENTION_MS;
     for (const [id, draft] of Object.entries(store.drafts)) {
-      if (draft.status !== "sent" || !draft.sentAt) {
+      if (draft.status !== "sent") {
         continue;
       }
-      const sentAtMs = Date.parse(draft.sentAt);
-      if (!Number.isNaN(sentAtMs) && sentAtMs < cutoff) {
+      // Falls back to createdAt when sentAt is missing, mirroring
+      // delivery-queue-service.ts/snooze-service.ts's own pruning — every
+      // current "sent" draft always has sentAt (set in the same object
+      // literal as the status change), so this path isn't reachable today,
+      // but a future migration/import producing a "sent" draft without it
+      // would otherwise never be pruned, silently reintroducing the
+      // unbounded growth this method exists to prevent.
+      const referenceTime = draft.sentAt ?? draft.createdAt;
+      const referenceMs = Date.parse(referenceTime);
+      if (!Number.isNaN(referenceMs) && referenceMs < cutoff) {
         delete store.drafts[id];
       }
     }

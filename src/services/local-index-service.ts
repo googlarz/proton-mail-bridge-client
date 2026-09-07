@@ -1189,18 +1189,34 @@ export class LocalIndexService {
     if (isFirstOpen) {
       this.chmodDbFiles();
     }
-    // auto_vacuum only takes effect on a brand-new/empty database (page_count 0) — it
-    // does NOT retroactively enable incremental vacuuming on a database that already
-    // existed before this line was added. It must also be set before the very first
-    // write to the file (journal_mode = WAL below already allocates page 1), or SQLite
-    // silently ignores it. Setting the mode here is still required so any freshly
-    // created database starts reclaiming freed pages; the periodic incremental_vacuum
-    // call (see applySnapshot's full-sync path) is what actually reclaims pages, for
-    // both new and pre-existing databases.
+    // auto_vacuum only takes effect on a brand-new/empty database (page_count 0) —
+    // setting the pragma alone does NOT retroactively enable incremental vacuuming
+    // on a database that already existed before this line was added, and the
+    // periodic incremental_vacuum call (see applySnapshot's full-sync path) is
+    // itself a silent no-op until the mode has actually taken effect. Caught on
+    // review: every real upgrading install (not a fresh one) has an existing,
+    // already-populated database, so this "fix" reclaimed nothing for anyone
+    // already hitting the growth problem it was meant to solve — confirmed
+    // empirically (insert+delete rows without the pragma, reopen exactly like
+    // this method does, incremental_vacuum is a proven no-op: page count doesn't
+    // move). SQLite's own documented way to change an existing database's
+    // auto_vacuum mode is to set the pragma then VACUUM — the VACUUM rewrites the
+    // whole file and applies the pending mode during that rewrite. Do that once,
+    // only when needed (mode isn't already INCREMENTAL), so a pre-existing
+    // database gets converted exactly once on the first open after this fix,
+    // and every open after that is a no-op check.
     db.pragma("auto_vacuum = INCREMENTAL");
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     db.pragma("synchronous = NORMAL");
+    const autoVacuumMode = db.pragma("auto_vacuum", { simple: true }) as number;
+    if (autoVacuumMode !== 2) {
+      this.log.warn(
+        "Converting existing index database to incremental auto_vacuum (one-time)",
+        "LocalIndexService",
+      );
+      db.exec("VACUUM");
+    }
 
     this.runMigrations(db);
     this.db = db;

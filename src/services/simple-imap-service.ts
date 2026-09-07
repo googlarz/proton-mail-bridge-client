@@ -3439,7 +3439,13 @@ export class SimpleIMAPService {
     };
   }
 
-  private guardAttachmentOutputPath(outputPath: string): void {
+  // Returns the validated real path so callers write through the same
+  // resolved path they just checked, instead of re-deriving it — re-deriving
+  // left a TOCTOU window where a symlink swapped in between validation and
+  // write could redirect the write outside allowDir even though the check
+  // passed. Returning the already-realpath'd path collapses that into the
+  // single unavoidable race between this check and the actual write.
+  private guardAttachmentOutputPath(outputPath: string): string {
     const allowDir = process.env.PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR?.trim();
     if (!allowDir) {
       throw new Error("outputPath requires PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR to be configured.");
@@ -3470,6 +3476,8 @@ export class SimpleIMAPService {
     if (!targetRealPath.startsWith(`${allowedRealPath}/`) && targetRealPath !== allowedRealPath) {
       throw new Error("outputPath path escapes the allowed directory.");
     }
+
+    return targetRealPath;
   }
 
   private async resolveAttachmentOutputPath(
@@ -3487,8 +3495,7 @@ export class SimpleIMAPService {
       const existing = await stat(resolved);
       if (existing.isDirectory()) {
         const directoryTarget = join(resolved, filename);
-        this.guardAttachmentOutputPath(directoryTarget);
-        return directoryTarget;
+        return this.guardAttachmentOutputPath(directoryTarget);
       }
     } catch (error) {
       if (
@@ -3503,12 +3510,10 @@ export class SimpleIMAPService {
 
     if (resolved.endsWith("/") || resolved.endsWith("\\")) {
       const directoryTarget = join(resolved, filename);
-      this.guardAttachmentOutputPath(directoryTarget);
-      return directoryTarget;
+      return this.guardAttachmentOutputPath(directoryTarget);
     }
 
-    this.guardAttachmentOutputPath(resolved);
-    return resolved;
+    return this.guardAttachmentOutputPath(resolved);
   }
 
   // Saves a message's raw RFC822 source to disk as a .eml file — the migration/
