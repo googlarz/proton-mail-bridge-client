@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.3] — 2026-09-08
+
+Six findings (3 P1, 3 P2) from a third independent external review, fixed and verified with new regression tests (215 → 241). Also closes the UIDVALIDITY-unsafe email ID limitation deferred in [2.0.2] — see below.
+
+### Fixed
+- **The email ID scheme now protects against a UIDVALIDITY (mailbox generation) change.** A stale id issued before a full mailbox recreation could previously act on whatever different message now occupies that UID. The id format optionally embeds the mailbox's UIDVALIDITY as a fourth field; an id without one (every id issued before this release) still parses and works exactly as before — unverifiable, not blocked. Wired into every single-message mutation (delete, move, archive, trash, restore, mark read, star, update flags/labels) and into bulk operations, which now exclude a stale-generation id from a batch instead of failing the whole batch.
+- **Scheduled send and manual `send_draft` could still both deliver the same draft.** The delivery queue claimed its own record before calling SMTP, but only claimed the source draft *after* SMTP had already succeeded — a concurrent manual `send_draft` call could claim and send during that window. The draft is now claimed before SMTP in both paths, sharing one claim mechanism.
+- **An audit-log write failure after a successful send caused a duplicate resend.** `send_draft` ran SMTP through the same wrapper that also writes the success audit record — if that write failed (e.g. disk full) after SMTP had already succeeded, the surrounding error handler reverted the draft's claim, making an already-delivered draft resendable. SMTP's outcome is now tracked independently of the audit write; a post-success audit failure is logged but never reverts a successful send.
+- **`get_audit_logs` bypassed the account-isolation guard added in 2.0.2.** `AuditService` was the one store missed when that system was added — two accounts sharing a data directory let one read the other's full audit history, including tool inputs/outputs. Now wired in like every other store.
+- **Concurrent first-time `account.json` initialization had a race.** A fixed temp filename let concurrent callers' renames interfere with each other, and the read-check-write sequence had no lock — two different accounts racing to initialize the same fresh data directory had no serialization point, defeating the very mismatch detection this system exists for. Now uses a unique temp filename per call and the existing cross-process file lock, re-reading the marker after acquiring it.
+- **Filtering `getThreads` by query/folder/label could change a thread's identity and drop messages**, and a References/In-Reply-To-grouped ("fallback") thread entirely outside the newest 5,000 indexed messages remained unreachable via `getThreadById` even after the 2.0.2 fix (which only covered natively-threaded messages). Both now resolve against the same uncapped source of truth as native threads.
+- **Live IMAP search applied local-only filters (`hasAttachment`, `attachmentName`, `label`, `threadId`, `senderDomain`, `mailboxRole`) after limiting to the newest N candidates**, silently dropping a genuinely matching older message that wasn't among the newest N by date. Local filters now apply during a bounded, newest-first batch walk instead of after a fixed cutoff; the common case with no local-only filter is unaffected.
+
 ## [2.0.2] — 2026-09-08
 
 Ten findings (6 P1, 4 P2) plus a performance issue and two static-analysis notes from a second, independent external review, fixed and verified with new regression tests (197 → 215). One P1 (a UIDVALIDITY-unsafe email ID scheme) is deliberately deferred — see "Known limitation" below.
