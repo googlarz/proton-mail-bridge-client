@@ -259,6 +259,87 @@ test("wake() finalize skips writing when the record is no longer 'waking' (concu
   });
 });
 
+// Regression: a timer-driven wake (checkDue) racing a user-initiated cancel
+// (or two concurrent cancels) for the same record must not both call
+// moveEmail — only the caller that actually claims pending -> waking may
+// move the email; the other must wait for that outcome instead.
+test("concurrent wake() calls for the same record issue only one moveEmail", async () => {
+  await withTempDir(async (dataDir) => {
+    let moveCallCount = 0;
+    let resolveMove;
+    const movePromise = new Promise((resolve) => {
+      resolveMove = resolve;
+    });
+    let signalMoveEmailCalled;
+    const moveEmailCalledPromise = new Promise((resolve) => {
+      signalMoveEmailCalled = resolve;
+    });
+
+    const imap = {
+      async createFolder() {
+        return { path: "Folders/MCP-Snoozed", created: true };
+      },
+      async withTimeout(promise) {
+        return promise;
+      },
+      // Blocks on movePromise so the first wake()'s move can be held "in
+      // flight" while a second concurrent wake() call races it.
+      async moveEmail(emailId, targetFolder) {
+        moveCallCount += 1;
+        signalMoveEmailCalled();
+        await movePromise;
+        return {
+          emailId,
+          sourceEmailId: emailId,
+          fromFolder: emailId.split("::")[0],
+          targetFolder,
+          uid: 500,
+          targetUid: 500,
+          targetEmailId: `${targetFolder}::500`,
+        };
+      },
+    };
+    const service = new SnoozeService(createConfig(dataDir), imap);
+
+    const record = {
+      id: "race-1",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      wakeAt: new Date(Date.now() - 1_000).toISOString(),
+      status: "pending",
+      originalFolder: "INBOX",
+      currentEmailId: "Folders/MCP-Snoozed::42",
+    };
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, "snoozed.json"),
+      JSON.stringify({ version: 1, items: { [record.id]: record } }, null, 2),
+      "utf8",
+    );
+
+    // First caller claims pending -> waking and blocks inside moveEmail.
+    const first = service.cancel(record.id);
+    await moveEmailCalledPromise;
+
+    // Second caller races in while the first's move is still in flight — it
+    // must see "waking" (someone else's claim) and back off rather than
+    // issuing its own moveEmail.
+    const second = service.cancel(record.id);
+
+    resolveMove();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    assert.equal(moveCallCount, 1, "only the claiming caller may call moveEmail");
+    assert.equal(firstResult.status, "canceled");
+    assert.equal(secondResult.status, "canceled", "the non-claiming caller must return the winner's outcome, not stay stuck");
+    assert.equal(firstResult.currentEmailId, secondResult.currentEmailId);
+
+    const after = await service.get(record.id);
+    assert.equal(after.status, "canceled", "final record state must not be corrupted or left stuck");
+  });
+});
+
 test("checkDue stops retrying a permanently-failing wake and marks it terminally failed", async () => {
   await withTempDir(async (dataDir) => {
     // moveEmail always throws — simulates the snoozed email having been
