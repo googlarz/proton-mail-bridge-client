@@ -128,6 +128,151 @@ test("send_draft: a failed SMTP send reverts the draft back to draft (retryable)
   });
 });
 
+// SMTP mock whose sendEmail() call blocks on a controllable barrier — lets a
+// test hold a send "in flight" for as long as it wants, so a concurrent
+// caller can be attempted while it's still pending.
+function barrierSmtp() {
+  let calls = 0;
+  let release;
+  const barrier = new Promise((resolve) => {
+    release = resolve;
+  });
+  return {
+    get calls() {
+      return calls;
+    },
+    release,
+    async sendEmail(payload) {
+      calls += 1;
+      await barrier;
+      return { messageId: `<sent-${calls}@example.com>`, accepted: payload.to, rejected: [] };
+    },
+  };
+}
+
+// Mirrors index.ts's `case "send_draft"` handler after the P1 audit-coupling
+// fix: SMTP is called directly (not through withAudit), and the success-path
+// audit write is attempted separately, AFTER SMTP has already succeeded — a
+// failure there is swallowed (logged) rather than reverting the draft.
+async function sendDraftWithAudit(draftStore, auditService, smtp, draftId) {
+  const draft = await draftStore.getDraft(draftId);
+  if (draft.status === "sent") {
+    throw new Error(`Draft ${draft.id} was already sent`);
+  }
+  await draftStore.claimForSending(draft.id);
+  let result;
+  try {
+    result = await smtp.sendEmail({ to: draft.to, subject: draft.subject, body: draft.body });
+  } catch (error) {
+    await draftStore.revertSending(draft.id);
+    throw error;
+  }
+  try {
+    await auditService.record({
+      timestamp: new Date().toISOString(),
+      tool: "send_draft",
+      status: "success",
+      durationMs: 0,
+      input: {},
+      result,
+    });
+  } catch {
+    // Audit-write failure after a successful send must not revert the draft
+    // or be reported as a send failure — see the fix comment in index.ts.
+  }
+  return draftStore.markSent(draft.id, {
+    messageId: result.messageId,
+    accepted: result.accepted,
+    rejected: result.rejected,
+    response: "OK",
+  });
+}
+
+test("Finding 1: a scheduled send holding SMTP mid-flight blocks a concurrent manual send_draft, not the other way round", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    const draftStore = new DraftStoreService(config);
+    const scheduledSmtp = barrierSmtp();
+    const manualSmtp = barrierSmtp();
+    manualSmtp.release(); // manual path's own SMTP is never expected to be reached
+
+    const queue = new DeliveryQueueService(config, scheduledSmtp);
+    queue.setDraftStore(draftStore);
+
+    const draft = await draftStore.createDraft({ to: ["someone@example.com"], subject: "Hi", body: "body" });
+    await queue.enqueue(
+      { to: draft.to, subject: draft.subject, body: draft.body },
+      new Date(Date.now() - 1000).toISOString(),
+      "scheduled_send",
+      draft.id,
+    );
+
+    // Start the scheduled send; it claims the queue item AND (post-fix) the
+    // draft itself before ever reaching the barriered SMTP call below.
+    const checkDuePromise = queue.checkDue();
+
+    // Give checkDue's claim step a moment to run before the manual attempt,
+    // without depending on exact timing beyond "the claim happens first".
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Concurrent manual send_draft while the scheduled send's SMTP call is
+    // still held on the barrier — this is the exact race from the report.
+    const manualAttempt = sendDraftWithAudit(draftStore, { record: async () => {} }, manualSmtp, draft.id).catch(
+      (error) => ({ rejected: true, error }),
+    );
+
+    const manualResult = await manualAttempt;
+    assert.ok(manualResult && manualResult.rejected, "the manual send_draft must be rejected, not silently queued or duplicated");
+    assert.match(manualResult.error.message, /not sendable|already sent/i);
+
+    scheduledSmtp.release();
+    const outcome = await checkDuePromise;
+
+    assert.equal(outcome.sent, 1);
+    assert.equal(scheduledSmtp.calls, 1, "the scheduled send's SMTP must be called exactly once");
+    assert.equal(manualSmtp.calls, 0, "the losing manual attempt must never reach SMTP");
+
+    const finalDraft = await draftStore.getDraft(draft.id);
+    assert.equal(finalDraft.status, "sent", "the draft must end up sent exactly once, via the winning path");
+  });
+});
+
+test("Finding 2: an audit-log write failure after a successful send does not revert the draft or enable a duplicate resend", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    const draftStore = new DraftStoreService(config);
+    const smtp = slowSmtp(5);
+
+    let recordCalls = 0;
+    const flakyAuditService = {
+      async record() {
+        recordCalls += 1;
+        if (recordCalls === 1) {
+          throw new Error("ENOSPC: no space left on device");
+        }
+      },
+    };
+
+    const draft = await draftStore.createDraft({ to: ["someone@example.com"], subject: "Hi", body: "body" });
+
+    // First call: SMTP succeeds, but the success-path audit write throws.
+    const sent = await sendDraftWithAudit(draftStore, flakyAuditService, smtp, draft.id);
+    assert.equal(sent.status, "sent", "the draft must be marked sent — the email was actually delivered");
+
+    const afterFirstCall = await draftStore.getDraft(draft.id);
+    assert.equal(afterFirstCall.status, "sent", "the draft must not be reverted to draft by the audit-write failure");
+
+    // Second call on the same draft must be rejected as already sent, not
+    // silently deliver a duplicate.
+    await assert.rejects(
+      () => sendDraftWithAudit(draftStore, flakyAuditService, smtp, draft.id),
+      /already sent/i,
+    );
+
+    assert.equal(smtp.calls, 1, "SMTP must have been called exactly once across both attempts");
+  });
+});
+
 test("scheduled send that fires marks the source draft sent, and a later manual send_draft on it then throws", async () => {
   await withTempDir(async (dataDir) => {
     const config = createConfig(dataDir);

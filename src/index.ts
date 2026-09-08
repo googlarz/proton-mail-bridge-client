@@ -4197,34 +4197,75 @@ export function createServer(
           // section — only the call that wins the claim proceeds to SMTP.
           await draftStore.claimForSending(draft.id);
 
+          // Found live: withAudit wrapped the SMTP call, so an audit-log
+          // write failure AFTER a successful send (e.g. disk full) was
+          // indistinguishable from a send failure — it threw out of
+          // withAudit, and the catch below reverted an already-sent draft
+          // back to "draft", making it resendable and enabling a genuine
+          // duplicate delivery. SMTP is called directly here so its outcome
+          // (and the revert-on-failure below) can't be corrupted by a
+          // separate audit-write failure — the audit record for the success
+          // case is written afterward, on its own, with a failure there only
+          // logged, never reverting a send that already happened.
+          const sendStartedAt = Date.now();
           let result: Awaited<ReturnType<typeof smtpService.sendEmail>>;
           try {
-            result = await withAudit(auditService, name, args, async () =>
-              smtpService.sendEmail({
-                to: draft.to,
-                cc: draft.cc,
-                bcc: draft.bcc,
-                subject: draft.subject,
-                body: draft.body,
-                isHtml: draft.isHtml,
-                priority: draft.priority,
-                replyTo: draft.replyTo,
-                inReplyTo: draft.inReplyTo,
-                references: draft.references,
-                attachments: draft.attachments,
-                // Draft content is already finalized and reviewed — appending a
-                // signature invisibly at send time would change what the user
-                // saw and approved. If a signature is wanted, it belongs in the
-                // draft body itself.
-                appendSignature: false,
-              }),
-            );
+            result = await smtpService.sendEmail({
+              to: draft.to,
+              cc: draft.cc,
+              bcc: draft.bcc,
+              subject: draft.subject,
+              body: draft.body,
+              isHtml: draft.isHtml,
+              priority: draft.priority,
+              replyTo: draft.replyTo,
+              inReplyTo: draft.inReplyTo,
+              references: draft.references,
+              attachments: draft.attachments,
+              // Draft content is already finalized and reviewed — appending a
+              // signature invisibly at send time would change what the user
+              // saw and approved. If a signature is wanted, it belongs in the
+              // draft body itself.
+              appendSignature: false,
+            });
           } catch (error) {
             // Mirrors SnoozeService.wake()'s catch handler: revert the claim
             // so the draft is retryable instead of stuck in "sending"
             // forever because SMTP failed.
             await draftStore.revertSending(draft.id);
+            await auditService
+              .record({
+                timestamp: new Date().toISOString(),
+                tool: name,
+                status: "error",
+                durationMs: Date.now() - sendStartedAt,
+                input: sanitizeAuditValue(args),
+                error: error instanceof Error ? error.message : String(error),
+              })
+              .catch((auditError) =>
+                logger.error("Failed to record audit log for a failed send_draft", "MCPServer", {
+                  draftId: draft.id,
+                  error: auditError,
+                }),
+              );
             throw error;
+          }
+
+          try {
+            await auditService.record({
+              timestamp: new Date().toISOString(),
+              tool: name,
+              status: "success",
+              durationMs: Date.now() - sendStartedAt,
+              input: sanitizeAuditValue(args),
+              result: sanitizeAuditValue(result),
+            });
+          } catch (auditError) {
+            logger.error(
+              "Failed to record audit log for a successful send_draft — the email was already sent, so the draft is not being reverted",
+              "MCPServer",
+              { draftId: draft.id, error: auditError },
+            );
           }
 
           let sentDraft = await draftStore.markSent(draft.id, {
