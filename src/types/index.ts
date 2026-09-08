@@ -434,6 +434,13 @@ export interface MailboxSyncCheckpoint {
   // uidNext) — tells the local index it's safe to purge every previously-
   // indexed message for this folder, since the mailbox is confirmed empty.
   folderObservedEmpty?: boolean;
+  // Highest UID reached so far by an in-progress incremental catch-up, i.e.
+  // when the gap between the checkpoint and the mailbox's current top UID
+  // exceeds the configured limit (e.g. after a long time offline or a large
+  // mail import). Persisted so each subsequent incremental sync continues
+  // forward from here instead of re-planning a UID range spanning the whole
+  // gap in one call. Cleared (undefined) once the gap has been fully closed.
+  incrementalResumeUid?: number;
 }
 
 export interface LocalIndexStatus {
