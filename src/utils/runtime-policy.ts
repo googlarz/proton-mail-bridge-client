@@ -1,5 +1,5 @@
 import type { EmailAction, ProtonRuntimeConfig } from "../types/index.js";
-import { isSelfAddress } from "./helpers.js";
+import { isSelfAddress, normalizeBoolean } from "./helpers.js";
 
 export function sanitizeRuntimeConfig(runtime: ProtonRuntimeConfig): Record<string, unknown> {
   return {
@@ -109,4 +109,54 @@ export function ensureDestructiveConfirmed(
   throw new Error(
     `Confirmation required: ${description}\n\nThis action is irreversible. Call this tool again with confirmed: true after asking the user to confirm.`,
   );
+}
+
+// All alternate tool routes pass through this boundary before doing any I/O.
+// Individual handlers may impose additional restrictions (send, remote drafts).
+const TOOL_ACTIONS: Partial<Record<string, EmailAction>> = {
+  move_email: "move", bulk_move: "move", move_thread: "move",
+  archive_email: "archive", trash_email: "trash", restore_email: "restore",
+  snooze_email: "archive", cancel_snooze: "archive",
+  delete_email: "delete", empty_folder: "delete",
+  delete_folder: "delete", delete_label: "delete",
+};
+
+export function ensureToolActionAllowed(
+  runtime: ProtonRuntimeConfig,
+  tool: string,
+  args: Record<string, unknown>,
+): void {
+  const actions = new Set<EmailAction>();
+  const fixed = TOOL_ACTIONS[tool];
+  if (fixed) actions.add(fixed);
+  if (tool === "batch_email_action" || tool === "apply_thread_action") {
+    const action = String(args.action) as EmailAction;
+    if (!["mark_read", "mark_unread", "star", "unstar", "archive", "trash", "restore", "move", "delete"].includes(action)) {
+      throw new Error("Unsupported email action.");
+    }
+    actions.add(action);
+  }
+  if (tool === "bulk_delete" || tool === "delete_thread") {
+    actions.add(normalizeBoolean(args.permanent, false) ? "delete" : "trash");
+  }
+  if (tool === "mark_email_read") actions.add(!normalizeBoolean(args.isRead, true) ? "mark_unread" : "mark_read");
+  if (tool === "star_email") actions.add(!normalizeBoolean(args.isStarred, true) ? "unstar" : "star");
+  if (["update_message_flags", "bulk_update_flags", "flag_thread", "import_email"].includes(tool)) {
+    ensureMailboxWriteAllowed(runtime);
+    const mapping: Record<string, [EmailAction, EmailAction]> = {
+      "\\seen": ["mark_read", "mark_unread"],
+      "\\flagged": ["star", "unstar"],
+      "\\deleted": ["delete", "restore"],
+    };
+    for (const [key, removing] of [[tool === "import_email" ? "flags" : "flagsToAdd", false], ["flagsToRemove", true]] as const) {
+      for (const flag of Array.isArray(args[key]) ? args[key] as unknown[] : []) {
+        const pair = mapping[String(flag).toLowerCase()];
+        if (pair) actions.add(pair[removing ? 1 : 0]);
+      }
+    }
+  }
+  for (const action of actions) ensureEmailActionAllowed(runtime, action);
+  if (actions.has("delete") && !normalizeBoolean(args.dryRun, false)) {
+    ensureDestructiveConfirmed(runtime, normalizeBoolean(args.confirmed, false), `Permanently delete via ${tool}`);
+  }
 }

@@ -10,7 +10,7 @@ import { buildConfigFromEnv, createServer, withAudit } from "./index.js";
 import { isMainModule } from "./is-main.js";
 import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import type { EmailAddress, EmailDetail, EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
-import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, ensureSendAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
+import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, ensureSendAllowed, ensureToolActionAllowed, ensureOutboundRecipientsAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
 import { isValidEmail, lowerCaseAddress, parseEmails, ensureValidEmails } from "./utils/helpers.js";
 import { getClaudeDesktopInstallStatus } from "./scripts/check-claude-desktop.js";
 import { installClaudeDesktopConfig } from "./scripts/install-claude-desktop.js";
@@ -896,7 +896,7 @@ async function runMove(parsed: ParsedCliArgs): Promise<void> {
   if (!targetFolder) throw new Error("move requires a target folder as a second argument or --folder");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, imapService, auditService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
+    ensureToolActionAllowed(config.runtime, "move_email", { confirmed: isTruthyFlag(parsed.flags.confirmed) });
     // Found live: every write command in this file called the service
     // directly, so none of them ever produced an audit.log entry — unlike
     // the identical action through an MCP tool call, which withAudit always
@@ -984,7 +984,7 @@ async function runDelete(parsed: ParsedCliArgs): Promise<void> {
   if (!emailId) throw new Error("delete requires an emailId");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, imapService, auditService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
+    ensureToolActionAllowed(config.runtime, "delete_email", { confirmed: isTruthyFlag(parsed.flags.confirmed) });
     // Found live: this called the service directly, bypassing the MCP
     // tool layer's ensureDestructiveConfirmed entirely — with
     // PROTONMAIL_CONFIRM_DESTRUCTIVE=true, `tool delete_email` correctly
@@ -1104,8 +1104,10 @@ async function runReply(parsed: ParsedCliArgs): Promise<void> {
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, smtpService, imapService, auditService }) => {
     ensureSendAllowed(config.runtime);
+    ensureDestructiveConfirmed(config.runtime, isTruthyFlag(parsed.flags.confirmed), "Send email");
     const detail = await imapService.getEmailById(emailId);
     const recipients = getReplyRecipients(detail, config.smtp.username, replyAll);
+    ensureOutboundRecipientsAllowed(config.runtime, config.smtp.username, [...recipients.to, ...recipients.cc]);
     if (recipients.to.length === 0) throw new Error("Unable to infer reply recipient.");
     const result = await withAudit(auditService, "reply_to_email", { emailId, replyAll }, () =>
       smtpService.sendEmail({
@@ -1138,7 +1140,9 @@ async function runForward(parsed: ParsedCliArgs): Promise<void> {
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, smtpService, imapService, auditService }) => {
     ensureSendAllowed(config.runtime);
+    ensureDestructiveConfirmed(config.runtime, isTruthyFlag(parsed.flags.confirmed), "Send email");
     ensureValidEmails(to, "to");
+    ensureOutboundRecipientsAllowed(config.runtime, config.smtp.username, to);
     const detail = await imapService.getEmailById(emailId);
     const result = await withAudit(auditService, "forward_email", { emailId, to }, () =>
       smtpService.sendEmail({
@@ -1180,7 +1184,7 @@ async function runDeleteFolder(parsed: ParsedCliArgs): Promise<void> {
   if (!path) throw new Error("delete-folder requires a path argument");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, imapService, auditService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
+    ensureToolActionAllowed(config.runtime, "delete_folder", { confirmed: isTruthyFlag(parsed.flags.confirmed) });
     // Same bypass as runDelete's identical gap — see its comment.
     ensureDestructiveConfirmed(config.runtime, isTruthyFlag(parsed.flags.confirmed), `Permanently delete folder and all messages in it: ${path}`);
     const result = await withAudit(auditService, "delete_folder", { path }, () => imapService.deleteFolder(path));
@@ -1387,6 +1391,7 @@ async function runThreadAction(parsed: ParsedCliArgs): Promise<void> {
       arguments: {
         threadId,
         action,
+        confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined,
         targetFolder: getStringFlag(parsed.flags, "folder"),
         unreadOnly: isTruthyFlag(parsed.flags["unread-only"]) || undefined,
         dryRun: isTruthyFlag(parsed.flags["dry-run"]) || undefined,
@@ -1408,6 +1413,7 @@ async function runBatch(parsed: ParsedCliArgs): Promise<void> {
       arguments: {
         emailIds,
         action,
+        confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined,
         targetFolder: getStringFlag(parsed.flags, "folder"),
         dryRun: isTruthyFlag(parsed.flags["dry-run"]) || undefined,
       },

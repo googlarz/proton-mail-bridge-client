@@ -62,6 +62,7 @@ import { logger } from "./utils/logger.js";
 import {
   ensureDestructiveConfirmed,
   ensureEmailActionAllowed,
+  ensureToolActionAllowed,
   ensureMailboxWriteAllowed,
   ensureOutboundRecipientsAllowed,
   ensureRemoteDraftSyncAllowed,
@@ -1167,6 +1168,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        confirmed: { type: "boolean", description: "Confirm permanent deletion when destructive confirmation is enabled." },
         emailIds: {
           oneOf: [
             {
@@ -1204,11 +1206,12 @@ const TOOLS = [
   {
     name: "apply_thread_action",
     description:
-      "Apply a reversible mailbox action to every message in a normalized thread at once. Use when you want to act on a full thread identified by threadId (e.g. archive or mark-read an entire conversation). Supports dryRun, unreadOnly to scope impact, and syncBefore to refresh the index first. Prefer batch_email_action when you have explicit emailIds rather than a threadId.",
+      "Apply a mailbox action (including permanent delete) to every message in a normalized thread at once. Use when you want to act on a full thread identified by threadId (e.g. archive or mark-read an entire conversation). Supports dryRun, unreadOnly to scope impact, and syncBefore to refresh the index first. Prefer batch_email_action when you have explicit emailIds rather than a threadId.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       properties: {
+        confirmed: { type: "boolean", description: "Confirm permanent deletion when destructive confirmation is enabled." },
         threadId: { type: "string", description: "Thread id from get_threads or get_actionable_threads." },
         action: {
           type: "string",
@@ -3283,6 +3286,7 @@ export function createServer(
     logger.debug("Handling tool call", "MCPServer", { name, argKeys: Object.keys(args || {}) });
 
     try {
+      ensureToolActionAllowed(config.runtime, name, args);
       switch (name) {
         case "send_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Send email to ${String(args.to ?? "?")} — "${String(args.subject ?? "?")}"`);
