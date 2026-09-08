@@ -202,6 +202,115 @@ test("planFolderSync full:true restarts backfill from the newest window when uid
   assert.equal(plan.backfilledToUid, 45250);
 });
 
+test("planFolderSync bounds a large incremental gap to the configured limit instead of fetching the whole backlog", () => {
+  // P2 review: checkpoint at UID 1000, server now at UID 100000 (e.g. after a long
+  // time offline or a large mail import), limit 50. Previously endUid was always the
+  // mailbox's true top, so this planned a 976:100000 fetch — ~99k messages parsed and
+  // held in memory in a single call, with `limit` only ever shrinking the overlap.
+  const plan = planFolderSync({
+    folder: "INBOX",
+    exists: 100000,
+    uidNext: 100001,
+    uidValidity: "999",
+    full: false,
+    limit: 50,
+    checkpoint: {
+      folder: "INBOX",
+      uidValidity: "999",
+      uidNext: 1001,
+      highestUid: 1000,
+    },
+  });
+
+  assert.equal(plan.strategy, "incremental");
+  assert.equal(plan.changed, true);
+  // Bounded to ~limit-sized (startUid includes the usual small overlap), not the
+  // entire 99000-UID gap.
+  assert.equal(plan.startUid, 976);
+  assert.equal(plan.endUid, 1025);
+  assert.ok(plan.endUid - plan.startUid + 1 <= 50, "planned range must not exceed the configured limit");
+  // A resume cursor is persisted so the next call continues forward from here.
+  assert.equal(plan.incrementalResumeUid, 1025);
+});
+
+test("planFolderSync continues a large incremental gap forward from the persisted resume cursor without re-fetching or skipping", () => {
+  const firstBatchEndUid = 1025;
+  const plan = planFolderSync({
+    folder: "INBOX",
+    exists: 100000,
+    uidNext: 100001,
+    uidValidity: "999",
+    full: false,
+    limit: 50,
+    checkpoint: {
+      folder: "INBOX",
+      uidValidity: "999",
+      uidNext: 1001,
+      // highestUid stays at the pre-catch-up value: collectFolderForIndex only
+      // advances it once a window actually reaches the mailbox's true top.
+      highestUid: 1000,
+      incrementalResumeUid: firstBatchEndUid,
+    },
+  });
+
+  assert.equal(plan.strategy, "incremental");
+  assert.equal(plan.startUid, firstBatchEndUid + 1, "must continue right after the last resume cursor, not skip or re-fetch");
+  assert.equal(plan.endUid, firstBatchEndUid + 50);
+  assert.equal(plan.incrementalResumeUid, firstBatchEndUid + 50);
+});
+
+test("planFolderSync eventually catches up a large incremental gap after enough sequential bounded calls", () => {
+  const uidValidity = "999";
+  const highestUid = 100000;
+  let checkpoint = {
+    folder: "INBOX",
+    uidValidity,
+    uidNext: 1001,
+    highestUid: 1000,
+  };
+  const limit = 50;
+  const seenRanges = [];
+  let iterations = 0;
+
+  while (true) {
+    iterations += 1;
+    assert.ok(iterations < 10000, "must converge without an unbounded/infinite loop");
+
+    const plan = planFolderSync({
+      folder: "INBOX",
+      exists: highestUid,
+      uidNext: highestUid + 1,
+      uidValidity,
+      full: false,
+      limit,
+      checkpoint,
+    });
+
+    assert.ok(plan.endUid - plan.startUid + 1 <= limit, "every intermediate call must stay bounded by limit");
+    seenRanges.push([plan.startUid, plan.endUid]);
+
+    const reachesTop = plan.endUid === highestUid;
+    checkpoint = {
+      ...checkpoint,
+      // Mirrors collectFolderForIndex: only advance highestUid once a window
+      // actually reaches the mailbox's true current top.
+      highestUid: reachesTop ? highestUid : checkpoint.highestUid,
+      incrementalResumeUid: plan.incrementalResumeUid,
+    };
+
+    if (reachesTop) break;
+  }
+
+  // Full coverage: every UID from just after the original checkpoint through the
+  // mailbox's top was covered by exactly one contiguous, non-overlapping sequence
+  // of bounded calls (aside from the deliberate first-batch overlap window).
+  assert.equal(seenRanges[0][0], 976);
+  for (let i = 1; i < seenRanges.length; i++) {
+    assert.equal(seenRanges[i][0], seenRanges[i - 1][1] + 1, "no gap or overlap between successive catch-up batches");
+  }
+  assert.equal(seenRanges[seenRanges.length - 1][1], highestUid);
+});
+
 test("emptyFolder rejects INBOX before making IMAP calls", async () => {
   const service = new SimpleIMAPService(createConfig());
   let connectCalls = 0;

@@ -281,6 +281,7 @@ export interface FolderSyncPlan {
   endUid?: number;
   highestKnownUid: number;
   backfilledToUid?: number;
+  incrementalResumeUid?: number;
 }
 
 export function planFolderSync(input: {
@@ -368,17 +369,49 @@ export function planFolderSync(input: {
   }
 
   const overlap = Math.min(input.limit, Math.max(25, Math.min(100, Math.ceil(input.limit / 2))));
-  const changed =
-    highestKnownUid > (input.checkpoint.highestUid ?? 0) ||
-    uidNext !== (input.checkpoint.uidNext ?? uidNext) ||
-    input.exists !== (input.checkpoint.total ?? input.exists);
+  const knownHighUid = input.checkpoint.highestUid ?? 0;
+  // Undefined (not stored as null-ish 0) means "no catch-up in progress" — see the
+  // backfilledToUid comment above for why this codebase maps SQLite NULL to
+  // undefined rather than null for exactly this kind of cursor field.
+  const resumeUid = input.checkpoint.incrementalResumeUid;
+
+  if (resumeUid === undefined && highestKnownUid - knownHighUid <= input.limit) {
+    // Fully caught up (or the gap is small enough to close in one call): the
+    // established incremental behavior — re-fetch a small overlap window to catch
+    // flag changes on already-seen messages, then fetch forward to the true top.
+    const changed =
+      highestKnownUid > knownHighUid ||
+      uidNext !== (input.checkpoint.uidNext ?? uidNext) ||
+      input.exists !== (input.checkpoint.total ?? input.exists);
+    return {
+      folder: input.folder,
+      strategy: changed ? "incremental" : "incremental_window",
+      changed,
+      startUid: Math.max(1, Math.min(highestKnownUid, knownHighUid) - overlap + 1),
+      endUid: highestKnownUid,
+      highestKnownUid,
+    };
+  }
+
+  // The gap between the checkpoint and the mailbox's current top UID is larger than
+  // `limit` — e.g. after a long time offline or a large mail import. Previously this
+  // branch fetched startUid:highestKnownUid unconditionally, so `limit` only ever
+  // shrank the overlap, never bounded the actual range: a checkpoint at UID 1000 with
+  // the server at UID 100000 could plan a 976:100000 fetch — ~99k messages parsed and
+  // held in memory in one call regardless of `limit`. Fetch one limit-sized bounded
+  // slice instead, and persist how far it reached as incrementalResumeUid so the next
+  // call continues forward from there rather than re-planning the whole remaining gap.
+  const startUid = resumeUid !== undefined ? resumeUid + 1 : Math.max(1, knownHighUid - overlap + 1);
+  const endUid = Math.min(highestKnownUid, startUid + input.limit - 1);
+  const reachesTop = endUid === highestKnownUid;
   return {
     folder: input.folder,
-    strategy: changed ? "incremental" : "incremental_window",
-    changed,
-    startUid: Math.max(1, Math.min(highestKnownUid, input.checkpoint.highestUid) - overlap + 1),
-    endUid: highestKnownUid,
+    strategy: "incremental",
+    changed: true,
+    startUid,
+    endUid,
     highestKnownUid,
+    incrementalResumeUid: reachesTop ? undefined : endUid,
   };
 }
 
@@ -2585,6 +2618,7 @@ export class SimpleIMAPService {
             fetched: 0,
             total: exists,
             backfilledToUid: plan.backfilledToUid,
+            incrementalResumeUid: plan.incrementalResumeUid,
           },
           emails: [],
         };
@@ -2616,7 +2650,10 @@ export class SimpleIMAPService {
       // unchanged; using this batch's (much lower) fetched UIDs here would
       // silently roll the incremental-sync high-water-mark backward and
       // make every subsequent incremental sync think a huge amount of
-      // "new" mail exists again.
+      // "new" mail exists again. The same reasoning applies to a bounded
+      // incremental catch-up window (large gap since the last checkpoint):
+      // its endUid is also below highestKnownUid until the last batch closes
+      // the gap.
       const reachesTop = plan.endUid === plan.highestKnownUid;
       const highestUid = reachesTop
         ? emails.reduce((max, email) => Math.max(max, email.uid), 0) || plan.highestKnownUid
@@ -2639,6 +2676,7 @@ export class SimpleIMAPService {
           rangeStartUid: plan.startUid,
           rangeEndUid: plan.endUid,
           backfilledToUid: plan.backfilledToUid,
+          incrementalResumeUid: plan.incrementalResumeUid,
         },
         emails,
       };

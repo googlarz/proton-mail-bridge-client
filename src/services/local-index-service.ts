@@ -1346,9 +1346,9 @@ export class LocalIndexService {
     `);
     const upsertSyncState = db.prepare(`
       INSERT INTO sync_state (
-        folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total, backfilled_to_uid
+        folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total, backfilled_to_uid, incremental_resume_uid
       ) VALUES (
-        @folder, @uid_validity, @uid_next, @highest_uid, @last_sync_at, @last_full_sync_at, @strategy, @changed, @fetched, @total, @backfilled_to_uid
+        @folder, @uid_validity, @uid_next, @highest_uid, @last_sync_at, @last_full_sync_at, @strategy, @changed, @fetched, @total, @backfilled_to_uid, @incremental_resume_uid
       )
       ON CONFLICT(folder) DO UPDATE SET
         uid_validity = excluded.uid_validity,
@@ -1360,7 +1360,8 @@ export class LocalIndexService {
         changed = excluded.changed,
         fetched = excluded.fetched,
         total = excluded.total,
-        backfilled_to_uid = excluded.backfilled_to_uid
+        backfilled_to_uid = excluded.backfilled_to_uid,
+        incremental_resume_uid = excluded.incremental_resume_uid
     `);
 
     const deleteFts = db.prepare(`DELETE FROM messages_fts WHERE email_id = ?`);
@@ -1446,6 +1447,7 @@ export class LocalIndexService {
           fetched: folderStat.fetched ?? null,
           total: folderStat.total ?? null,
           backfilled_to_uid: resetCheckpoint ? null : folderStat.backfilledToUid ?? null,
+          incremental_resume_uid: resetCheckpoint ? null : folderStat.incrementalResumeUid ?? null,
         });
       }
 
@@ -1620,7 +1622,8 @@ export class LocalIndexService {
         changed INTEGER NOT NULL DEFAULT 0,
         fetched INTEGER,
         total INTEGER,
-        backfilled_to_uid INTEGER
+        backfilled_to_uid INTEGER,
+        incremental_resume_uid INTEGER
       );
 
       CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
@@ -1661,6 +1664,9 @@ export class LocalIndexService {
     );
     if (!syncStateColumns.has("backfilled_to_uid")) {
       db.exec(`ALTER TABLE sync_state ADD COLUMN backfilled_to_uid INTEGER`);
+    }
+    if (!syncStateColumns.has("incremental_resume_uid")) {
+      db.exec(`ALTER TABLE sync_state ADD COLUMN incremental_resume_uid INTEGER`);
     }
   }
 
@@ -1890,7 +1896,7 @@ export class LocalIndexService {
 
     const syncCheckpoints = db
       .prepare(`
-        SELECT folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total, backfilled_to_uid
+        SELECT folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total, backfilled_to_uid, incremental_resume_uid
         FROM sync_state
         ORDER BY folder ASC
       `)
@@ -1914,6 +1920,12 @@ export class LocalIndexService {
         // the first sync_emails(full:true) call after upgrading returned
         // changed:false, fetched:0 instead of starting the newest window.
         backfilledToUid: (row as { backfilled_to_uid?: number | null }).backfilled_to_uid ?? undefined,
+        // Same NULL-vs-undefined pitfall as backfilledToUid above: planFolderSync
+        // treats undefined as "no incremental catch-up in progress" and a real
+        // number as "resume from here" — a null read back as null (not undefined)
+        // would be indistinguishable from a legitimate resume-at-0 edge case in
+        // some comparisons, so map it away explicitly here too.
+        incrementalResumeUid: (row as { incremental_resume_uid?: number | null }).incremental_resume_uid ?? undefined,
       } satisfies MailboxSyncCheckpoint));
 
     const messageSqlParts = [`SELECT * FROM messages`];

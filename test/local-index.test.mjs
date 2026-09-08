@@ -574,6 +574,78 @@ test("getSyncCheckpointMap returns backfilledToUid as undefined, not null, when 
   }
 });
 
+test("getSyncCheckpointMap returns incrementalResumeUid as undefined, not null, when never set", async () => {
+  // Same NULL-vs-undefined pitfall as backfilledToUid above (see the test right
+  // above this one): planFolderSync uses undefined to mean "no incremental
+  // catch-up in progress" for a large-gap folder. A raw SQLite null read back
+  // here must map to undefined too, or a stale/mismatched comparison downstream
+  // could misinterpret it.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-incremental-resume-null-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:00:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "incremental", rangeStartUid: 1, rangeEndUid: 1, highestUid: 1 }],
+      emails: [{
+        id: "INBOX::1", folder: "INBOX", uid: 1, seq: 1,
+        messageId: "<msg-1@example.com>", subject: "Message 1",
+        from: [{ address: "sender@example.com" }], to: [{ address: "owner@example.com" }],
+        cc: [], bcc: [], replyTo: [],
+        date: "2026-01-01T00:00:00.000Z", internalDate: "2026-01-01T00:00:00.000Z",
+        isRead: false, isStarred: false, flags: [],
+        preview: "Body", hasAttachments: false, attachments: [], labels: [],
+      }],
+    });
+
+    const checkpoints = await service.getSyncCheckpointMap();
+    assert.strictEqual(
+      checkpoints.INBOX.incrementalResumeUid,
+      undefined,
+      "must be undefined, not SQLite's null, or planFolderSync could misread it as a real resume cursor",
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("recordSnapshot round-trips a set incrementalResumeUid through getSyncCheckpointMap", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-incremental-resume-roundtrip-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:00:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+      folderStats: [{
+        folder: "INBOX",
+        fetched: 1,
+        total: 1,
+        strategy: "incremental",
+        rangeStartUid: 976,
+        rangeEndUid: 1025,
+        highestUid: 1000,
+        incrementalResumeUid: 1025,
+      }],
+      emails: [{
+        id: "INBOX::1025", folder: "INBOX", uid: 1025, seq: 1,
+        messageId: "<msg-1025@example.com>", subject: "Message 1025",
+        from: [{ address: "sender@example.com" }], to: [{ address: "owner@example.com" }],
+        cc: [], bcc: [], replyTo: [],
+        date: "2026-01-01T00:00:00.000Z", internalDate: "2026-01-01T00:00:00.000Z",
+        isRead: false, isStarred: false, flags: [],
+        preview: "Body", hasAttachments: false, attachments: [], labels: [],
+      }],
+    });
+
+    const checkpoints = await service.getSyncCheckpointMap();
+    assert.strictEqual(checkpoints.INBOX.incrementalResumeUid, 1025);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("dateFrom/dateTo set to the same day includes that day's messages instead of excluding it", async () => {
   // Found live: dateTo:"2026-09-02" did `COALESCE(internal_date, date) <=
   // "2026-09-02"` — a raw string comparison against a full ISO timestamp
