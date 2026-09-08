@@ -282,14 +282,46 @@ export class DeliveryQueueService {
         // The draft was already claimed above, before SMTP — mark it sent
         // now that delivery has actually completed, so both this path and
         // send_draft share one source of truth for "has this draft already
-        // been sent".
+        // been sent". This is deliberately its own try/catch, not part of
+        // the one above: SMTP already succeeded and the queue record above
+        // already got written "sent", so a markSent() failure here (e.g. a
+        // draft-store disk write error, unrelated to whether the email was
+        // delivered) must never fall into the catch below — that catch's
+        // revertSending() would put the draft back to "draft" and let a
+        // later send_draft duplicate an email that already went out, and
+        // its failure accounting would double-count this same item as both
+        // sent and failed. Retry a bounded number of times first, since
+        // nothing about the delivery itself is in doubt here — only the
+        // draft-store write is failing. If every attempt still fails, the
+        // draft is deliberately left stuck in "sending" rather than
+        // reverted: "sending" already blocks a fresh claimForSending() (see
+        // its status check), so no duplicate can go out, at the cost of the
+        // draft needing manual reconciliation — this queue record's "sent"
+        // status is the source of truth for what actually happened.
         if (claimedDraft) {
-          await this.draftStore!.markSent(claimedDraft.id, {
-            messageId: result.messageId,
-            accepted: result.accepted,
-            rejected: result.rejected,
-            response: result.response,
-          });
+          const MARK_SENT_ATTEMPTS = 3;
+          let markSentError: unknown;
+          for (let attempt = 1; attempt <= MARK_SENT_ATTEMPTS; attempt += 1) {
+            try {
+              await this.draftStore!.markSent(claimedDraft.id, {
+                messageId: result.messageId,
+                accepted: result.accepted,
+                rejected: result.rejected,
+                response: result.response,
+              });
+              markSentError = undefined;
+              break;
+            } catch (error) {
+              markSentError = error;
+            }
+          }
+          if (markSentError) {
+            this.log.error(
+              'Delivery succeeded and the queue record is marked "sent", but finalizing the source draft (markSent) failed after retries — leaving the draft in "sending" rather than reverting it, since reverting would make it resendable and risk a duplicate delivery. Needs manual reconciliation: flip the draft to "sent" using this queue record as the source of truth.',
+              "DeliveryQueueService",
+              { id, draftId: claimedDraft.id, error: markSentError },
+            );
+          }
         }
       } catch (error) {
         // SMTP failed (or timed out) after the draft claim succeeded above —
