@@ -159,7 +159,7 @@ test("planFolderSync full:true continues backfilling older than the last window 
   assert.equal(plan.backfilledToUid, 44750);
 });
 
-test("planFolderSync full:true reports no more work once backfilled to UID 1", () => {
+test("planFolderSync full:true reports no more work once backfilled to UID 1 and no new mail arrived", () => {
   const plan = planFolderSync({
     folder: "Archive",
     exists: 22871,
@@ -171,6 +171,7 @@ test("planFolderSync full:true reports no more work once backfilled to UID 1", (
       folder: "Archive",
       uidValidity: "999",
       backfilledToUid: 1,
+      highestUid: 45749, // already at the current top — nothing new to fetch
     },
   });
 
@@ -178,6 +179,33 @@ test("planFolderSync full:true reports no more work once backfilled to UID 1", (
   assert.equal(plan.changed, false);
   assert.equal(plan.startUid, undefined);
   assert.equal(plan.backfilledToUid, 1);
+});
+
+test("planFolderSync full:true tops up new mail after backfill has completed", () => {
+  // Reproduces the "full:true stops discovering new mail forever once
+  // backfill finishes" bug: backfilledToUid <= 1 used to short-circuit to
+  // changed:false unconditionally, even when uidNext grew past the last
+  // known top. A completed backfill must still surface newly-arrived mail.
+  const plan = planFolderSync({
+    folder: "Archive",
+    exists: 22873,
+    uidNext: 45752, // 2 new messages arrived since highestUid was last recorded
+    uidValidity: "999",
+    full: true,
+    limit: 500,
+    checkpoint: {
+      folder: "Archive",
+      uidValidity: "999",
+      backfilledToUid: 1,
+      highestUid: 45749,
+    },
+  });
+
+  assert.equal(plan.strategy, "full");
+  assert.equal(plan.changed, true);
+  assert.equal(plan.startUid, 45750);
+  assert.equal(plan.endUid, 45751);
+  assert.equal(plan.backfilledToUid, 1, "backfill floor must stay at 1 — this is a top-up, not further backfill");
 });
 
 test("planFolderSync full:true restarts backfill from the newest window when uidValidity changed", () => {

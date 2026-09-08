@@ -6,6 +6,7 @@ import type { ProtonMailConfig, SnoozeRecord } from "../types/index.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { parseEmailId } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { SimpleIMAPService } from "./simple-imap-service.js";
 
 // Same persistence pattern as DeliveryQueueService/DraftStoreService: atomic
@@ -149,6 +150,12 @@ export class SnoozeService {
 
     let moved: Awaited<ReturnType<SimpleIMAPService["moveEmail"]>>;
     try {
+      // Re-check runtime policy at wake time, not just at snooze-creation
+      // time: the item may have been snoozed while writes were allowed, then
+      // the server restarted into read-only mode (or a config change
+      // disabled mailbox writes) before it came due. Mirrors
+      // DeliveryQueueService's ensureSendAllowed() fire-time re-check.
+      ensureMailboxWriteAllowed(this.config.runtime);
       // No bound here used to mean one wedged move (same shared IMAP
       // connection, same churn from the perpetual IDLE watcher) silently
       // stalled every other pending snooze indefinitely — checkDue() only

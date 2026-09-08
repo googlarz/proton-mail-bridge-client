@@ -4575,7 +4575,7 @@ export function createServer(
         }
 
         case "bulk_move": {
-          ensureMailboxWriteAllowed(config.runtime);
+          ensureEmailActionAllowed(config.runtime, "move");
           const emailIds = Array.isArray(args.emailIds)
             ? (args.emailIds as unknown[]).map(String) : undefined;
           const match = args.match && typeof args.match === "object"
@@ -4856,7 +4856,7 @@ export function createServer(
 
         case "move_email":
         {
-          ensureMailboxWriteAllowed(config.runtime);
+          ensureEmailActionAllowed(config.runtime, "move");
           const emailId = requireString(args, "emailId");
           const targetFolder = requireString(args, "targetFolder");
           const result = await withAudit(auditService, name, args, async () => {
@@ -5045,6 +5045,9 @@ export function createServer(
           }
           const action = requireEmailAction(args);
           ensureEmailActionAllowed(config.runtime, action);
+          if (action === "delete") {
+            ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${emailIds.length} email(s) (cannot be recovered)`);
+          }
           const result = await withAudit(auditService, name, args, async () =>
             applyBatchEmailAction(imapService, [], {
               emailIds,
@@ -5755,6 +5758,9 @@ export function createServer(
               .filter((message) => !unreadOnly || !message.isRead)
               .map((message) => message.primaryEmailId),
           )];
+          if (action === "delete") {
+            ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${emailIds.length} email(s) in thread (cannot be recovered)`);
+          }
 
           const result = await withAudit(auditService, name, args, async () =>
             applyBatchEmailAction(imapService, [], {

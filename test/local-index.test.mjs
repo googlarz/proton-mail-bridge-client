@@ -696,6 +696,17 @@ test("recordSnapshot preserves preview/attachmentText across a flags-only re-syn
     assert.ok(stored);
     assert.equal(stored.isRead, true, "flags-only sync should still update isRead");
     assert.equal(stored.preview, "Attached is the quarterly report", "preview must survive a flags-only re-sync");
+
+    // The messages-table COALESCE preserving `preview` above is not enough on
+    // its own: the FTS index is deleted and reinserted on every sync using
+    // whatever the *incoming* row said, not the merged/persisted value — so
+    // a full-text search for a body term can go from matching to zero
+    // results even though the stored preview above proves the row is intact.
+    const ftsResult = await service.search({ query: "quarterly report", folder: "INBOX", limit: 10 });
+    assert.ok(
+      ftsResult.emails.some((email) => email.id === "INBOX::40"),
+      "full-text search must still find the message by body term after a flags-only re-sync",
+    );
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

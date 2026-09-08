@@ -1343,6 +1343,7 @@ export class LocalIndexService {
         attachments_json = excluded.attachments_json,
         attachment_text = COALESCE(excluded.attachment_text, messages.attachment_text),
         labels_json = excluded.labels_json
+      RETURNING preview, attachment_text
     `);
     const upsertSyncState = db.prepare(`
       INSERT INTO sync_state (
@@ -1450,7 +1451,14 @@ export class LocalIndexService {
       }
 
       for (const email of input.emails) {
-        upsertMessage.run({
+        // RETURNING gives back the post-COALESCE stored values, not the raw
+        // incoming ones — a flags-only sync omits source/preview, and the
+        // messages table upsert already preserves the prior indexed preview/
+        // attachment_text in that case (IMAP content for a fixed UID is
+        // immutable). Without this, the FTS row below would be rebuilt from
+        // the incoming (empty) values and lose body-text searchability on
+        // every metadata-only refresh, even though the stored row is intact.
+        const persisted = upsertMessage.get({
           email_id: email.id,
           folder: email.folder,
           uid: email.uid,
@@ -1476,14 +1484,15 @@ export class LocalIndexService {
           attachments_json: JSON.stringify(email.attachments),
           attachment_text: email.attachmentText ?? null,
           labels_json: JSON.stringify(email.labels),
-        });
+        }) as { preview: string | null; attachment_text: string | null };
 
-        const search = emailToSearchParts(email);
+        const mergedPreview = persisted.preview ?? "";
+        const search = emailToSearchParts({ ...email, attachmentText: persisted.attachment_text ?? undefined });
         deleteFts.run(email.id);
         insertFts.run(
           email.id,
           email.subject,
-          email.preview ?? "",
+          mergedPreview,
           email.folder,
           search.labels,
           search.participants,

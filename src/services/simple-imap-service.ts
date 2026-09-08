@@ -317,12 +317,30 @@ export function planFolderSync(input: {
     const priorFloor = uidValidityMatches ? input.checkpoint?.backfilledToUid : undefined;
 
     if (priorFloor !== undefined && priorFloor <= 1) {
-      // Already backfilled all the way back to UID 1 in a previous call —
-      // nothing older left to fetch.
+      // Already backfilled all the way back to UID 1 in a previous call.
+      // History is fully covered, but full:true must still surface mail
+      // that arrived *after* backfill completed — otherwise, once a folder
+      // finishes backfilling, full:true silently stops discovering any new
+      // mail forever, even as highestKnownUid keeps growing. Top up with a
+      // bounded fetch of just the newly-arrived range.
+      const priorHighest = input.checkpoint?.highestUid ?? 0;
+      if (highestKnownUid <= priorHighest) {
+        return {
+          folder: input.folder,
+          strategy: "full",
+          changed: false,
+          highestKnownUid,
+          backfilledToUid: priorFloor,
+        };
+      }
+
+      const topUpStart = Math.max(1, priorHighest + 1, highestKnownUid - input.limit + 1);
       return {
         folder: input.folder,
         strategy: "full",
-        changed: false,
+        changed: true,
+        startUid: topUpStart,
+        endUid: highestKnownUid,
         highestKnownUid,
         backfilledToUid: priorFloor,
       };
