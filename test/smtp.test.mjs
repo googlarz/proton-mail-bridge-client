@@ -85,6 +85,67 @@ test("buildRawMessage sanitizes script tags out of HTML bodies by default", asyn
   assert.ok(message.includes("hello"));
 });
 
+// Regression test for the "buildMailOptions can silently send a completely
+// empty-body email" bug: when isHtml is true and sanitization strips the body
+// down to nothing, the send must fail loudly rather than deliver a blank email
+// (html: "" and text: undefined) with no signal to the caller.
+test("buildRawMessage throws when HTML body sanitizes down to nothing", async () => {
+  const service = new SMTPService(createConfig());
+  await assert.rejects(
+    () =>
+      service.buildRawMessage({
+        to: ["victim@example.com"],
+        subject: "Empty after sanitization",
+        body: "<script>alert(1)</script>",
+        isHtml: true,
+      }),
+    /empty after removing disallowed HTML content/,
+  );
+});
+
+test("buildRawMessage throws when a separately-provided htmlBody sanitizes down to nothing", async () => {
+  const service = new SMTPService(createConfig());
+  await assert.rejects(
+    () =>
+      service.buildRawMessage({
+        to: ["victim@example.com"],
+        subject: "Empty after sanitization",
+        body: "fallback text",
+        isHtml: true,
+        htmlBody: "<script>alert(1)</script>",
+      }),
+    /empty after removing disallowed HTML content/,
+  );
+});
+
+test("buildRawMessage does not throw for a normal HTML body that survives sanitization", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "Normal HTML",
+    body: "fallback text",
+    isHtml: true,
+    htmlBody: "<p>hello</p><script>alert(1)</script>",
+  });
+  const message = raw.toString("utf8");
+  assert.ok(!message.includes("<script>"));
+  assert.ok(message.includes("hello"));
+});
+
+test("buildRawMessage does not throw for a plain-text (isHtml:false) empty-looking body", async () => {
+  const service = new SMTPService(createConfig());
+  // isHtml:false never goes through sanitization at all, so this bug's fix must
+  // not affect plain-text sends, even ones a caller might consider near-empty.
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "Plain text",
+    body: "<script>alert(1)</script>",
+    isHtml: false,
+  });
+  const message = raw.toString("utf8");
+  assert.ok(message.includes("alert(1)"));
+});
+
 test("buildRawMessage respects PROTONMAIL_ALLOW_UNSAFE_HTML=true plus explicit sanitizeHtml:false", async () => {
   const previous = process.env.PROTONMAIL_ALLOW_UNSAFE_HTML;
   process.env.PROTONMAIL_ALLOW_UNSAFE_HTML = "true";
