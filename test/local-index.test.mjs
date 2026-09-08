@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { LocalIndexService } from "../dist/services/local-index-service.js";
+import { createEmailId } from "../dist/utils/helpers.js";
 
 function createConfig(dataDir) {
   return {
@@ -1700,6 +1701,159 @@ test("getThreads() and getThreadById() agree on thread identity for a mix of nat
         );
       }
     }
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+function uidMigrationFolderInfo() {
+  return {
+    path: "INBOX",
+    name: "INBOX",
+    delimiter: "/",
+    specialUse: "\\Inbox",
+    listed: true,
+    subscribed: true,
+    flags: [],
+    messages: 1,
+    unseen: 1,
+  };
+}
+
+function uidMigrationBaseEmail(id) {
+  return {
+    id,
+    folder: "INBOX",
+    uid: 42,
+    seq: 42,
+    messageId: "<uid42@example.com>",
+    subject: "Migration test",
+    from: [{ address: "person@example.com" }],
+    to: [{ address: "owner@example.com" }],
+    cc: [],
+    bcc: [],
+    replyTo: [],
+    date: "2026-04-05T09:00:00.000Z",
+    internalDate: "2026-04-05T09:00:00.000Z",
+    isStarred: false,
+    flags: [],
+    hasAttachments: false,
+    attachments: [],
+    labels: [],
+  };
+}
+
+test("recordSnapshot reconciles an old-format id row into the new UIDVALIDITY-embedding id for the same physical message", async () => {
+  // Reproduces the exact bug: UID 42 was indexed under the pre-UIDVALIDITY-fix
+  // 3-field id (folder::uid::checksum). A later sync — same folder, same uid,
+  // same generation — now mints the 4-field id (folder::uidValidity::uid::
+  // checksum) via the current createEmailId. Without reconciliation this is a
+  // brand-new primary key as far as ON CONFLICT(email_id) is concerned, so a
+  // second row appears for one physical message.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-id-migration-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const oldFormatId = createEmailId("INBOX", 42); // legacy 3-field id, no uidValidity
+  const newFormatId = createEmailId("INBOX", 42, "2000000002"); // current 4-field id, same message
+
+  try {
+    // First sync: indexed under the old id format, unread, with a body.
+    await service.recordSnapshot({
+      syncedAt: "2026-04-05T10:00:00.000Z",
+      folders: [uidMigrationFolderInfo()],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "recent" }],
+      emails: [{ ...uidMigrationBaseEmail(oldFormatId), isRead: false, preview: "body contains oldsecret" }],
+    });
+
+    let status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 1);
+
+    // Second sync: the SAME uid, now indexed via the current id-producing
+    // path (new 4-field id) — a metadata-only refresh (isRead flips, no body
+    // re-fetched), which is exactly how a routine flags sync behaves.
+    status = await service.recordSnapshot({
+      syncedAt: "2026-04-05T10:05:00.000Z",
+      folders: [uidMigrationFolderInfo()],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "incremental_window" }],
+      emails: [{ ...uidMigrationBaseEmail(newFormatId), isRead: true, preview: undefined }],
+    });
+
+    assert.equal(status.storedMessageCount, 1, "the id-format upgrade must not create a duplicate row");
+
+    const byOldId = await service.search({ query: undefined, folder: "INBOX", limit: 10 });
+    const rows = byOldId.emails.filter((email) => email.uid === 42);
+    assert.equal(rows.length, 1, "exactly one row should exist for this physical message");
+    assert.equal(rows[0].id, newFormatId, "the surviving row should be keyed by the new-format id");
+    assert.equal(rows[0].isRead, true, "the metadata refresh must be reflected");
+    assert.equal(
+      rows[0].preview,
+      "body contains oldsecret",
+      "body content captured under the old id must not be lost by the migration",
+    );
+
+    // FTS must reflect the merged single row: searchable under the new id,
+    // and the old id's FTS entry must be gone (not a leftover duplicate).
+    const ftsResult = await service.search({ query: "oldsecret", folder: "INBOX", limit: 10 });
+    assert.equal(ftsResult.emails.length, 1, "full-text search must return exactly one match, not two");
+    assert.equal(ftsResult.emails[0].id, newFormatId, "full-text search must find the message under its new id");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("recordSnapshot does not merge a genuine UIDVALIDITY change that reuses a UID for a different message", async () => {
+  // A real UIDVALIDITY change means the server's UID numbering restarted —
+  // uid 42 in the new generation is NOT the same physical message as uid 42
+  // in the old generation, even though the id-migration reconciliation above
+  // also keys off (folder, uid). This must stay handled by the existing
+  // UIDVALIDITY-changed-folder wipe, not be merged by the new logic.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-uidvalidity-reuse-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const generationOneId = createEmailId("INBOX", 42, "1000000001");
+  const generationTwoId = createEmailId("INBOX", 42, "2000000002");
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-04-05T10:00:00.000Z",
+      folders: [uidMigrationFolderInfo()],
+      folderStats: [
+        { folder: "INBOX", fetched: 1, total: 1, strategy: "full", uidValidity: "1000000001", rangeStartUid: 1, rangeEndUid: 100 },
+      ],
+      emails: [{ ...uidMigrationBaseEmail(generationOneId), isRead: false, preview: "generation one secret" }],
+    });
+
+    let status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 1);
+
+    // Genuine UIDVALIDITY change: a different message now legitimately reuses uid 42.
+    status = await service.recordSnapshot({
+      syncedAt: "2026-04-05T11:00:00.000Z",
+      folders: [uidMigrationFolderInfo()],
+      folderStats: [
+        { folder: "INBOX", fetched: 1, total: 1, strategy: "full", uidValidity: "2000000002", rangeStartUid: 1, rangeEndUid: 100 },
+      ],
+      emails: [{ ...uidMigrationBaseEmail(generationTwoId), isRead: false, preview: "generation two content" }],
+    });
+
+    assert.equal(
+      status.storedMessageCount,
+      1,
+      "the existing UIDVALIDITY-changed-folder cleanup should replace, not accumulate, rows",
+    );
+
+    const result = await service.search({ query: undefined, folder: "INBOX", limit: 10 });
+    const rows = result.emails.filter((email) => email.uid === 42);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, generationTwoId);
+    assert.equal(
+      rows[0].preview,
+      "generation two content",
+      "the new generation's content must not be contaminated by the old generation's",
+    );
+
+    const staleSearch = await service.search({ query: "generation one secret", folder: "INBOX", limit: 10 });
+    assert.equal(staleSearch.emails.length, 0, "the old generation's content must not still be searchable");
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
