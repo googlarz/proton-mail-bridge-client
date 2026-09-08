@@ -1274,6 +1274,111 @@ test("getThreads and getThreadById find a thread beyond the DEFAULT_SNAPSHOT_LIM
   }
 });
 
+test("getFollowUpCandidates, getActionableThreads and getLabels find/count beyond the DEFAULT_SNAPSHOT_LIMIT-capped snapshot", async () => {
+  // Regression test for the P2 finding: every other loadSnapshot()-based reader had the
+  // identical bug already fixed once for getThreads()/getThreadById() — a mailbox with
+  // more than 5000 messages made them build their view purely from the newest 5000
+  // (mailbox-wide), silently hiding anything older. Reproduces the exact scenario from
+  // the self-audit: uid 1 is a 5-day-old unread thread from a VIP client with an invoice
+  // attachment, and uids 2-5001 are 5000 recent, read messages that push uid 1 out of
+  // the naive cap. Reuses the fixture-building pattern from the getThreads/getThreadById
+  // regression test above.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-reader-cap-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    const total = 5001;
+    const now = Date.now();
+    const fiveDaysAgo = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const emails = Array.from({ length: total }, (_, i) => {
+      const uid = i + 1;
+      const isOldest = uid === 1;
+      const recentDate = new Date(now - (total - uid) * 1000).toISOString();
+      return {
+        id: `INBOX::${uid}`,
+        folder: "INBOX",
+        uid,
+        seq: uid,
+        messageId: `<msg-${uid}@example.com>`,
+        threadId: isOldest ? "old-thread-1" : `thread-${uid}`,
+        subject: isOldest ? "Invoice for services rendered" : `Routine update ${uid}`,
+        from: [{ address: isOldest ? "vip@client.com" : "sender@example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: isOldest ? fiveDaysAgo : recentDate,
+        internalDate: isOldest ? fiveDaysAgo : recentDate,
+        isRead: !isOldest,
+        isStarred: false,
+        flags: [],
+        preview: isOldest ? "Please find the attached invoice" : "Body",
+        hasAttachments: isOldest,
+        attachments: isOldest
+          ? [{ filename: "invoice.pdf", kind: "document", contentType: "application/pdf" }]
+          : [],
+        labels: [],
+      };
+    });
+
+    await service.recordSnapshot({
+      syncedAt: new Date(now).toISOString(),
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: total,
+          unseen: 1,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: total, total, strategy: "full" }],
+      emails,
+    });
+
+    // getFollowUpCandidates() exists specifically to find OLD threads awaiting a reply —
+    // it must find uid 1 even though it's entirely outside the newest 5000 messages.
+    const followUps = await service.getFollowUpCandidates({ minAgeHours: 24 });
+    assert.equal(followUps.total, 1, "getFollowUpCandidates() should find the stale thread beyond the 5000-message cap");
+    assert.equal(followUps.threads[0].id, "imap:old-thread-1");
+
+    // getActionableThreads() with the default unreadOnly:true must also find it — it's
+    // the only unread thread in the mailbox, but its message aged out of the cap.
+    const actionable = await service.getActionableThreads({ unreadOnly: true });
+    assert.equal(actionable.total, 1, "getActionableThreads() should find the unread thread beyond the 5000-message cap");
+    assert.equal(actionable.threads[0].id, "imap:old-thread-1");
+
+    // getInboxDigest()'s staleAwaitingYou section has the exact same "find OLD stuff"
+    // problem — it must surface uid 1 too.
+    const digest = await service.getInboxDigest({ minAgeHours: 24 });
+    assert.equal(digest.counts.staleAwaitingYou, 1, "getInboxDigest()'s staleAwaitingYou should count the stale thread beyond the cap");
+    assert.equal(digest.staleAwaitingYou[0].id, "imap:old-thread-1");
+
+    // findDocumentThreads() must find the invoice attachment on the aged-out message.
+    const documents = await service.findDocumentThreads({ category: "invoice" });
+    assert.equal(documents.total, 1, "findDocumentThreads() should find the invoice thread beyond the 5000-message cap");
+    assert.equal(documents.threads[0].id, "imap:old-thread-1");
+
+    // getMeetingPrep() searching by the VIP client's domain must find their thread too.
+    const meetingPrep = await service.getMeetingPrep({ domain: "client.com" });
+    assert.equal(meetingPrep.totalThreads, 1, "getMeetingPrep() should find the VIP thread beyond the 5000-message cap");
+
+    // getLabels()'s INBOX message count must report the real total (5001), not plateau
+    // at DEFAULT_SNAPSHOT_LIMIT (5000) the way storedMessageCount/dedupedMessageCount
+    // used to before realMessageCounts() fixed the identical bug.
+    const labels = await service.getLabels();
+    const inboxLabel = labels.find((label) => label.id === "folder:inbox");
+    assert.ok(inboxLabel, "getLabels() should report an INBOX folder label");
+    assert.equal(inboxLabel.messageCount, total, "getLabels() should report the accurate INBOX message count, not capped at 5000");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("getSyncCheckpointMap reads sync_state directly without touching the messages table", async () => {
   // Regression test for the Performance finding: getSyncCheckpointMap() used to call
   // loadSnapshot(), which also fetched and deserialized up to 5000 message rows via
