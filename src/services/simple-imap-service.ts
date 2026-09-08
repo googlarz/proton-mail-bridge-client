@@ -1187,58 +1187,137 @@ export class SimpleIMAPService {
     const searchQuery = this.buildSearchQuery(input);
     const collected: EmailSummary[] = [];
     let totalMatched = 0;
+    let anyCandidatesUnexamined = false;
+
+    // Local-only filters (hasAttachment/attachmentName/label/threadId/senderDomain/
+    // mailboxRole) are everything matchesLocalSearchFilters checks — IMAP SEARCH
+    // (buildSearchQuery above) can't express any of them server-side, so they can
+    // only be evaluated after a candidate's full data is fetched.
+    const hasLocalOnlyFilters =
+      typeof input.hasAttachment === "boolean" ||
+      Boolean(input.threadId) ||
+      Boolean(input.label) ||
+      Boolean(input.attachmentName) ||
+      Boolean(input.senderDomain) ||
+      Boolean(input.mailboxRole);
 
     for (const folder of folders) {
-      const emails = await this.withMailbox(folder, true, async (client) => {
+      const { results: emails, moreRemain } = await this.withMailbox(folder, true, async (client) => {
         const searchResult = await client.search(searchQuery, { uid: true });
         const uids = searchResult || [];
         totalMatched += uids.length;
         if (uids.length === 0) {
-          return [];
+          return { results: [], moreRemain: false };
         }
-
-        // UID order does not track date order (e.g. after a cross-provider import),
-        // so a naive slice(-limit) on UIDs can silently drop the newest messages.
-        // Fetch cheap INTERNALDATE-only headers first, sort by date, then pick the target UIDs.
-        let targetUids = uids;
-        if (uids.length > limit) {
-          const dated: { uid: number; date: number }[] = [];
-          for await (const message of client.fetch(uids, FETCH_INDEX_QUERY, { uid: true })) {
-            dated.push({ uid: message.uid, date: new Date(message.internalDate ?? 0).getTime() });
-          }
-          targetUids = pickNewestUids(dated, limit);
-        } else {
-          targetUids = [...uids].reverse();
-        }
-
-        const results: EmailSummary[] = [];
 
         const fetchQuery = input.includeSnippet ? FETCH_DETAIL_QUERY : FETCH_SUMMARY_QUERY;
-        for await (const message of client.fetch(targetUids, fetchQuery, { uid: true })) {
-          const summary = this.toSummary(folder, message);
-          const enriched =
-            input.includeSnippet && message.source
-              ? await this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), false)
-              : summary;
-          results.push(enriched);
-          this.messageCache.set(enriched.id, enriched);
-          this.capMessageCache();
+
+        if (!hasLocalOnlyFilters) {
+          // UID order does not track date order (e.g. after a cross-provider import),
+          // so a naive slice(-limit) on UIDs can silently drop the newest messages.
+          // Fetch cheap INTERNALDATE-only headers first, sort by date, then pick the target UIDs.
+          let targetUids = uids;
+          if (uids.length > limit) {
+            const dated: { uid: number; date: number }[] = [];
+            for await (const message of client.fetch(uids, FETCH_INDEX_QUERY, { uid: true })) {
+              dated.push({ uid: message.uid, date: new Date(message.internalDate ?? 0).getTime() });
+            }
+            targetUids = pickNewestUids(dated, limit);
+          } else {
+            targetUids = [...uids].reverse();
+          }
+
+          const results: EmailSummary[] = [];
+          for await (const message of client.fetch(targetUids, fetchQuery, { uid: true })) {
+            const summary = this.toSummary(folder, message);
+            const enriched =
+              input.includeSnippet && message.source
+                ? await this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), false)
+                : summary;
+            results.push(enriched);
+            this.messageCache.set(enriched.id, enriched);
+            this.capMessageCache();
+          }
+          return { results, moreRemain: false };
         }
 
-        // FIX #3: verified — hasAttachment, attachmentName, label, threadId handled above
-        return results.filter((email) => matchesLocalSearchFilters(email, input));
+        // A local-only filter narrows the FINAL result, not the IMAP-SEARCH candidate
+        // set — applying it after picking the newest `limit` UIDs (as the branch above
+        // does) can silently drop a genuine match that isn't among the newest `limit`
+        // candidates by date, because it never even gets fetched. E.g.: an older
+        // message with a real attachment, behind a newer attachment-less one, and
+        // limit:1 — the old newest-N selection would pick only the newer non-match and
+        // return nothing, even though a true match exists.
+        //
+        // Fix: order every candidate newest-first by INTERNALDATE (same cheap header
+        // fetch as above), then walk it in `limit`-sized bounded batches — fetch a
+        // batch, apply the FULL filter (matchesLocalSearchFilters included) to it, keep
+        // genuine matches, and continue to the next batch only if `limit` genuine
+        // matches haven't been found yet. This mirrors the bounded-batch/resume-cursor
+        // reasoning used for large incremental-sync gaps: bound the work done per call
+        // instead of fetching the entire broad candidate set regardless of `limit`.
+        const dated: { uid: number; date: number }[] = [];
+        for await (const message of client.fetch(uids, FETCH_INDEX_QUERY, { uid: true })) {
+          dated.push({ uid: message.uid, date: new Date(message.internalDate ?? 0).getTime() });
+        }
+        const orderedUids = pickNewestUids(dated, dated.length);
+
+        const results: EmailSummary[] = [];
+        let moreRemain = false;
+        for (let offset = 0; offset < orderedUids.length; offset += limit) {
+          const batch = orderedUids.slice(offset, offset + limit);
+          for await (const message of client.fetch(batch, fetchQuery, { uid: true })) {
+            const summary = this.toSummary(folder, message);
+            const enriched =
+              input.includeSnippet && message.source
+                ? await this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), false)
+                : summary;
+            this.messageCache.set(enriched.id, enriched);
+            this.capMessageCache();
+            if (matchesLocalSearchFilters(enriched, input)) {
+              results.push(enriched);
+            }
+          }
+          if (results.length >= limit) {
+            moreRemain = offset + limit < orderedUids.length;
+            break;
+          }
+        }
+        return { results, moreRemain };
       });
 
       collected.push(...emails);
+      anyCandidatesUnexamined = anyCandidatesUnexamined || moreRemain;
     }
 
     const sorted = sortEmailsByNewest(dedupeEmails(collected)).slice(0, limit);
+
+    // totalMatched/hasMore mean different things depending on whether a local-only
+    // filter is present:
+    // - No local-only filters: every IMAP-SEARCH candidate is a genuine match (IMAP
+    //   already applied every requested filter), so the raw SEARCH count (totalMatched)
+    //   is exact, and totalMatched > sorted.length is an exact "more exist" signal.
+    // - A local-only filter is present: the raw SEARCH count is pre-filter and can be
+    //   wildly misleading here — e.g. this method's own repro (hasAttachment:true over
+    //   2 candidates where only 1 genuinely matches) would otherwise report
+    //   totalMatched:2 and hasMore:true for a query with nothing further to find.
+    //   Report the exact number of genuine matches found among the candidates actually
+    //   examined instead (not the full universe — an exact post-filter total would
+    //   require scanning every candidate in every folder regardless of `limit`, which
+    //   defeats the bounded-batch fix above), and derive hasMore from whether any
+    //   folder's bounded scan stopped early with candidates still unexamined, or the
+    //   combined cross-folder result was itself truncated to `limit`.
+    const totalMatchedForResponse = hasLocalOnlyFilters ? collected.length : totalMatched;
+    const hasMore = hasLocalOnlyFilters
+      ? anyCandidatesUnexamined || collected.length > sorted.length
+      : totalMatched > sorted.length;
+
     return {
       folders,
       limit,
       total: sorted.length,
-      totalMatched,
-      hasMore: totalMatched > sorted.length,
+      totalMatched: totalMatchedForResponse,
+      hasMore,
       emails: sorted,
     };
   }
