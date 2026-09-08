@@ -208,6 +208,18 @@ export class SMTPService {
       ? this.sanitizeHtmlContent(htmlContent)
       : htmlContent;
 
+    // Sanitization can legitimately reduce a body to nothing (e.g. it was only a
+    // <script> tag or other disallowed markup with no surviving visible text).
+    // If we let that through, applySignature treats an empty htmlBody as "leave
+    // unchanged" so it's never restored, and `text` below falls back to undefined
+    // because isHtml is true — the result is a completely blank send with no
+    // warning to the caller. Fail loudly instead so the caller can fix their input.
+    if (input.isHtml && shouldSanitize && htmlContent && !sanitizedHtml?.trim()) {
+      throw new Error(
+        "The email body was empty after removing disallowed HTML content (scripts, unsafe markup). Provide plain text or valid HTML content.",
+      );
+    }
+
     const { body: finalBody, htmlBody: finalHtml } = applySignature(input.body, sanitizedHtml, input.appendSignature);
 
     return {
