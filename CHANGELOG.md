@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.5] — 2026-09-08
+
+A self-initiated adversarial review round, matching the methodology of the four external reviews that preceded it (real reproductions against compiled code, not code reading): 5 parallel audits each writing and running actual exploit scripts against `dist/`, covering claim/lock state machines, UIDVALIDITY and account-identity call-site completeness, bulk/batch operation consistency, local-index migration/capping, and a fresh sweep of previously-unreviewed files. Ten confirmed findings, fixed and verified with new regression tests (264 → 294).
+
+### Fixed — Security
+- **`clear()` on `LocalIndexService` and `DraftStoreService` (the former wired to the live `clear_index` tool) completely bypassed account-identity isolation.** Every other method on both classes gates on `ensureAccountIdentityMatches()` before touching disk; `clear()` called `rm()` directly. Reproduced: a fresh service instance for account B, with `clear()` as its very first call, deleted account A's entire index with no error and no check ever having run. This is the most severe finding of this round — a live, zero-friction path to destroying another account's data.
+- **`saveAttachment`/`saveAttachments` (no explicit `outputPath`) never checked account identity**, silently writing attachment content into whatever `dataDir` was configured regardless of which account it belonged to — `SimpleIMAPService` was the one service never wired into the account-isolation guard added in 2.0.2.
+- **`export_email` bypassed the round-4 UIDVALIDITY fix entirely**, doing its own raw fetch instead of routing through the now-protected read path — a stale-generation id silently exported a completely different message's raw content to disk with no error.
+
+### Fixed — Data integrity
+- **`bulkMove` never received the resolve-once/lock-scoped-recheck fix its three siblings (`bulkDelete`/`bulkUpdateFlags`/`bulkUpdateLabels`) already had**, despite being flagged as having "the identical gap" in two prior rounds — confirmed independently by three separate review passes this round. Reproduced both halves: a batch-size limit silently bypassed via double resolution, and a stale-generation move executing unchecked.
+- **`moveThread`/`deleteThread`/`flagThread` had the identical missing-generation-check gap** as `bulkMove` — a code path no prior round had examined.
+- **`batch_email_action`/`apply_thread_action` had no batch-size limit at all**, unlike every `bulk_*` tool — an arbitrarily large `emailIds` array was processed in full with no safety cap.
+- **`schedule_draft`'s duplicate-scheduling guard was a non-atomic check-then-write**, letting two concurrent calls for the same draft both succeed and create two independent pending records. `checkDue()`'s existing atomic draft-claim prevented an actual double send, but the loser was left with a misleading "failed" entry blaming a `send_draft` call that never happened. The dedupe check is now atomic, inside the same lock as the write.
+- **Nearly every `loadSnapshot()`-based reader still silently truncated at 5,000 messages mailbox-wide** — only `getThreads`/`getThreadById` had been fixed for this in earlier rounds. `getFollowUpCandidates` was the worst-affected: its entire purpose is finding *old* threads, but its snapshot specifically excluded anything beyond the newest 5,000 messages, making it structurally incapable of ever surfacing an old candidate in a mailbox with more than 5,000 recent messages. Also fixed: `getActionableThreads`, `getInboxDigest`'s stale-detection section, `findDocumentThreads`, `getMeetingPrep`, `getLabels`' folder counts, and `search()`'s threadId path.
+- **The 2.0.4 index-migration fix only checked the immediately-prior 3-field id format, missing the even older 2-field (pre-checksum) format** — a message still stored under the oldest shape could still end up duplicated after the format transition.
+
+### Fixed — Correctness
+- **`buildMailOptions` could silently send a completely empty-body email** when HTML sanitization stripped a body down to nothing (e.g. content that was only a `<script>` tag) — now throws before ever reaching the SMTP transport.
+
 ## [2.0.4] — 2026-09-08
 
 Six findings (5 P1, 1 P2) from a fourth independent external review, fixed and verified with new regression tests (241 → 264). All are edge cases in the UIDVALIDITY-safe id scheme and send-claim mechanism landed in 2.0.3 — integration gaps between that new format/mechanism and the existing index, CLI, bulk operations, and delivery queue.
