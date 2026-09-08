@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { ImapFlow, type FetchMessageObject, type ListResponse, type SearchObject } from "imapflow";
 import { simpleParser, type ParsedMail } from "mailparser";
@@ -3584,11 +3584,29 @@ export class SimpleIMAPService {
     attachment: EmailDetail["attachments"][number] & { content: Buffer; checksum?: string },
     outputPath?: string,
   ): Promise<AttachmentContentResult> {
-    const outputFilePath = await this.resolveAttachmentOutputPath(emailId, attachment, outputPath);
-    // 0o700/0o600: this writes the user's own private email content — restrict
-    // it to the owner regardless of the destination directory's own permissions.
-    await mkdir(dirname(outputFilePath), { recursive: true, mode: 0o700 });
-    await writeFile(outputFilePath, attachment.content, { mode: 0o600 });
+    let outputFilePath: string;
+    if (!outputPath) {
+      // No caller-supplied outputPath: attachments land in a shared default
+      // per-message directory keyed only by their own (sanitized) filename,
+      // so two attachments sharing a name — in this batch, or left over from
+      // a prior save — must never silently clobber each other. Resolve the
+      // final on-disk name via atomic exclusive-create instead of the
+      // explicit-outputPath branch below, which already gets its uniqueness
+      // and containment guarantees from the caller (saveAttachments' usedPaths
+      // dedup) and guardAttachmentOutputPath.
+      const filename = sanitizeFileName(attachment.filename, attachment.id || "attachment");
+      const dirPath = join(this.config.dataDir, "attachments", encodeURIComponent(emailId));
+      // 0o700/0o600: this writes the user's own private email content — restrict
+      // it to the owner regardless of the destination directory's own permissions.
+      await mkdir(dirPath, { recursive: true, mode: 0o700 });
+      outputFilePath = await this.writeAttachmentUnique(dirPath, filename, attachment.content);
+    } else {
+      outputFilePath = await this.resolveAttachmentOutputPath(emailId, attachment, outputPath);
+      // 0o700/0o600: this writes the user's own private email content — restrict
+      // it to the owner regardless of the destination directory's own permissions.
+      await mkdir(dirname(outputFilePath), { recursive: true, mode: 0o700 });
+      await writeFile(outputFilePath, attachment.content, { mode: 0o600 });
+    }
 
     return {
       emailId,
@@ -3607,6 +3625,42 @@ export class SimpleIMAPService {
       },
       outputPath: basename(outputFilePath),
     };
+  }
+
+  // Writes `content` under dirPath as `filename`, guaranteeing the result
+  // never silently overwrites an existing file — whether that file is another
+  // attachment from the same save() call or one left over from a prior save.
+  // Uses open(..., "wx") (atomic exclusive-create, same primitive
+  // file-lock.ts uses for its own lock files) rather than existsSync() +
+  // writeFile(), so a second concurrent save can't interleave between the
+  // check and the write. On a collision, retries with a numeric suffix before
+  // the extension (report.txt → report (1).txt → report (2).txt → ...),
+  // matching the convention saveAttachments already uses for its
+  // explicit-outputPath batch dedup.
+  private async writeAttachmentUnique(dirPath: string, filename: string, content: Buffer): Promise<string> {
+    const ext = filename.includes(".") ? filename.slice(filename.lastIndexOf(".")) : "";
+    const stem = filename.slice(0, filename.length - ext.length);
+    let candidateName = filename;
+    let counter = 0;
+    for (;;) {
+      const candidatePath = join(dirPath, candidateName);
+      try {
+        const handle = await open(candidatePath, "wx", 0o600);
+        try {
+          await handle.writeFile(content);
+        } finally {
+          await handle.close();
+        }
+        return candidatePath;
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "EEXIST") {
+          counter += 1;
+          candidateName = `${stem} (${counter})${ext}`;
+          continue;
+        }
+        throw error;
+      }
+    }
   }
 
   // Returns the validated real path so callers write through the same
