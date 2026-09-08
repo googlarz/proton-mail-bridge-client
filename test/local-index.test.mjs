@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { LocalIndexService } from "../dist/services/local-index-service.js";
 
 function createConfig(dataDir) {
@@ -1183,6 +1184,165 @@ test("meeting prep filters threads by domain and exposes latest inbound context"
 
     assert.equal(prep.totalThreads, 1);
     assert.equal(prep.latestInbound[0].emailId, "INBOX::41");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("getThreads and getThreadById find a thread beyond the DEFAULT_SNAPSHOT_LIMIT-capped snapshot", async () => {
+  // Regression test for the P2 finding: loadSnapshot() caps snapshot.messages at
+  // 5000 (newest-first), and getThreads()/getThreadById() used to build their view
+  // purely from that capped array. A folder with more than 5000 messages made both
+  // silently blind to anything entirely outside the newest 5000 — search() (which
+  // queries SQL directly) still found it, but getThreads() returned total:0 and a
+  // threadId valid before the index grew past 5000 started throwing "Thread not
+  // found" afterward, even though the thread's messages were still fully in SQLite.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-thread-cap-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    const total = 5001;
+    // uid 1 is the single oldest message (by internalDate/uid, both ascending with
+    // uid) — it sorts dead last under loadSnapshot()'s `ORDER BY internal_date DESC,
+    // uid DESC`, so it is always the one message excluded once there are more than
+    // DEFAULT_SNAPSHOT_LIMIT (5000) rows.
+    const emails = Array.from({ length: total }, (_, i) => {
+      const uid = i + 1;
+      const isOldest = uid === 1;
+      return {
+        id: `INBOX::${uid}`,
+        folder: "INBOX",
+        uid,
+        seq: uid,
+        messageId: `<msg-${uid}@example.com>`,
+        threadId: isOldest ? "old-thread-1" : `thread-${uid}`,
+        subject: isOldest ? "oldneedle archival report" : `Routine update ${uid}`,
+        from: [{ address: "sender@example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: `2026-01-01T00:${String(uid % 60).padStart(2, "0")}:00.000Z`,
+        internalDate: new Date(2026, 0, 1, 0, 0, uid).toISOString(),
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: isOldest ? "Contains oldneedle for search regression coverage" : "Body",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      };
+    });
+
+    await service.recordSnapshot({
+      syncedAt: "2026-09-08T00:00:00.000Z",
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: total,
+          unseen: 0,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: total, total, strategy: "full" }],
+      emails,
+    });
+
+    // Sanity: plain search() (SQL-direct) already finds the old message.
+    const searchResult = await service.search({ query: "oldneedle", limit: 10 });
+    assert.equal(searchResult.total, 1, "search() should find the message beyond the 5000-message cap");
+    assert.equal(searchResult.emails[0].id, "INBOX::1");
+
+    // getThreads() must now find it too, instead of returning total:0.
+    const threadsResult = await service.getThreads({ query: "oldneedle", limit: 10 });
+    assert.equal(threadsResult.total, 1, "getThreads() should find the thread beyond the 5000-message cap");
+    assert.equal(threadsResult.threads[0].id, "imap:old-thread-1");
+
+    // getThreadById() for that thread id must resolve without throwing, even though
+    // its only message is entirely outside the newest 5000.
+    const detail = await service.getThreadById("imap:old-thread-1");
+    assert.equal(detail.messages.length, 1);
+    assert.equal(detail.messages[0].primaryEmailId, "INBOX::1");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("getSyncCheckpointMap reads sync_state directly without touching the messages table", async () => {
+  // Regression test for the Performance finding: getSyncCheckpointMap() used to call
+  // loadSnapshot(), which also fetched and deserialized up to 5000 message rows via
+  // rowToEmailSummary() even though this method only ever reads snapshot.syncCheckpoints.
+  // Prove the narrow path never touches messages at all by dropping the messages table
+  // out from under the index after indexing: any code path that queries it would throw.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-checkpoint-narrow-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-09-08T00:00:00.000Z",
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: 1,
+          unseen: 0,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "full" }],
+      emails: [
+        {
+          id: "INBOX::1",
+          folder: "INBOX",
+          uid: 1,
+          seq: 1,
+          messageId: "<msg-1@example.com>",
+          subject: "Hello",
+          from: [{ address: "sender@example.com" }],
+          to: [{ address: "owner@example.com" }],
+          cc: [],
+          bcc: [],
+          replyTo: [],
+          date: "2026-09-08T00:00:00.000Z",
+          internalDate: "2026-09-08T00:00:00.000Z",
+          isRead: true,
+          isStarred: false,
+          flags: [],
+          preview: "Body",
+          hasAttachments: false,
+          attachments: [],
+          labels: [],
+        },
+      ],
+    });
+
+    // Confirm the checkpoint exists via the normal path first.
+    const before = await service.getSyncCheckpointMap();
+    assert.equal(before.INBOX.strategy, "full");
+
+    // Corrupt the messages table (via a second connection) so any query against it
+    // throws — while sync_state is left completely intact.
+    const raw = new Database(join(dataDir, "mail-index.sqlite"));
+    raw.exec(`DROP TABLE messages`);
+    raw.close();
+
+    // getSyncCheckpointMap() must still succeed: it never queries the messages table.
+    const after = await service.getSyncCheckpointMap();
+    assert.equal(after.INBOX.strategy, "full");
+    assert.equal(after.INBOX.fetched, 1);
+
+    // Contrast: a path that genuinely needs message rows now fails, proving the
+    // dropped table would have broken getSyncCheckpointMap() too if it still used it.
+    await assert.rejects(() => service.getThreads({}));
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

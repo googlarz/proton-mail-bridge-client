@@ -584,8 +584,17 @@ export class LocalIndexService {
   }
 
   async getStatus(): Promise<LocalIndexStatus> {
-    const snapshot = await this.loadSnapshot();
+    const db = await this.ensureDb();
+    const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
+    const syncCheckpoints = this.loadCheckpointsSync(db);
     const counts = await this.realMessageCounts();
+    // threadCount/labelCount (below, via toStatus -> buildThreads/buildMailboxMessages)
+    // genuinely need message content — thread grouping via thread_id/References/In-Reply-To
+    // and per-message label normalization aren't derivable from folders/sync_state alone.
+    // Reuse the same deliberately-capped message query loadSnapshot() uses elsewhere for
+    // this; every other field above is now sourced without touching the messages table.
+    const messages = this.loadMessages(db, {});
+    const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
     return this.toStatus(snapshot, counts);
   }
 
@@ -790,8 +799,31 @@ export class LocalIndexService {
     threads: ThreadSummary[];
     lastSyncAt?: string;
     indexFreshnessMinutes?: number;
+    messagesCapped?: boolean;
   }> {
-    const snapshot = await this.loadSnapshot({ folder: input.folder, label: input.label });
+    const db = await this.ensureDb();
+    const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
+    const syncCheckpoints = this.loadCheckpointsSync(db);
+
+    let messages: EmailSummary[];
+    let messagesCapped = false;
+    const hasFilter = Boolean(input.folder || input.label || input.query);
+    if (hasFilter) {
+      // Filter/search in SQL first — mirroring how search() builds its SQL query
+      // before any snapshot-size limiting — so a thread whose messages sit entirely
+      // outside the DEFAULT_SNAPSHOT_LIMIT-capped snapshot is never silently missed
+      // just because a folder/label/query filter was given.
+      messages = this.loadThreadCandidateMessages(db, input);
+    } else {
+      // No filter at all: a huge mailbox still needs SOME cap on what's fetched, so
+      // keep the deliberate DEFAULT_SNAPSHOT_LIMIT cap here — but surface it via
+      // messagesCapped instead of silently truncating, since real pagination over an
+      // un-scoped "every thread" view isn't possible without a separate thread index.
+      messages = this.loadMessages(db, {});
+      messagesCapped = messages.length >= DEFAULT_SNAPSHOT_LIMIT;
+    }
+
+    const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
     const threads = this.buildThreads(snapshot).filter((thread) => {
       if (input.label) {
         const labelNeedle = input.label.toLowerCase();
@@ -824,10 +856,39 @@ export class LocalIndexService {
       hasMore: totalCount > offset + limit,
       threads: threads.slice(offset, offset + limit),
       ...this.indexFreshnessFields(snapshot.updatedAt),
+      ...(messagesCapped ? { messagesCapped: true } : {}),
     };
   }
 
   async getThreadById(threadId: string): Promise<ThreadDetail> {
+    const db = await this.ensureDb();
+    const imapPrefix = "imap:";
+    if (threadId.startsWith(imapPrefix)) {
+      const rawThreadId = threadId.slice(imapPrefix.length);
+      // A thread keyed as "imap:<id>" was grouped directly off the persisted
+      // messages.thread_id column (see threadKeyForEmail/resolveThreadKey below) —
+      // its full membership can be queried by that column directly, unbounded by
+      // the DEFAULT_SNAPSHOT_LIMIT cap. This is what lets a threadId that was valid
+      // when the index was smaller keep resolving after the index grows past 5000,
+      // instead of throwing "Thread not found" just because its messages aged out
+      // of the capped snapshot below.
+      const rows = db.prepare(`SELECT * FROM messages WHERE thread_id = ?`).all(rawThreadId);
+      if (rows.length > 0) {
+        const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
+        const syncCheckpoints = this.loadCheckpointsSync(db);
+        const messages = rows.map((row) => this.rowToEmailSummary(row as MessageRow));
+        const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
+        const thread = (this.buildThreads(snapshot, true) as ThreadDetail[]).find((entry) => entry.id === threadId);
+        if (thread) {
+          return thread;
+        }
+      }
+    }
+
+    // Threads keyed off a References/In-Reply-To chain ("ref:...") or the
+    // participant-signature fallback have no persisted thread_id to query by —
+    // resolving them needs the cross-message reference graph, so this path stays
+    // scoped to the capped snapshot as before.
     const snapshot = await this.loadSnapshot();
     const thread = this.buildThreads(snapshot, true).find((entry) => entry.id === threadId) as
       | ThreadDetail
@@ -919,8 +980,12 @@ export class LocalIndexService {
   }
 
   async getSyncCheckpointMap(): Promise<Record<string, MailboxSyncCheckpoint>> {
-    const snapshot = await this.loadSnapshot();
-    return Object.fromEntries(snapshot.syncCheckpoints.map((checkpoint) => [checkpoint.folder, checkpoint]));
+    // Query sync_state directly — no need to pay loadSnapshot()'s up-to-5000-row
+    // message deserialization just to read checkpoints, which never touch a
+    // message row at all.
+    const db = await this.ensureDb();
+    const checkpoints = this.loadCheckpointsSync(db);
+    return Object.fromEntries(checkpoints.map((checkpoint) => [checkpoint.folder, checkpoint]));
   }
 
   async getInboxDigest(input: {
@@ -1896,9 +1961,15 @@ export class LocalIndexService {
     }
   }
 
-  private async loadSnapshot(options: SnapshotLoadOptions = {}): Promise<SnapshotData> {
-    const db = await this.ensureDb();
-
+  // Metadata/folders only — no messages table query at all. Split out of loadSnapshot()
+  // so callers that don't need message rows (getStatus, getThreads, getThreadById) don't
+  // pay for them.
+  private loadFoldersAndMetadata(db: Database.Database): {
+    ownerEmail?: string;
+    updatedAt?: string;
+    folders: FolderInfo[];
+    indexedFolders: IndexedFolderState[];
+  } {
     const metadataRows = db
       .prepare(`SELECT key, value FROM metadata`)
       .all() as Array<{ key: string; value: string }>;
@@ -1925,7 +1996,19 @@ export class LocalIndexService {
         lastIndexedCount: (row as { last_indexed_count?: number }).last_indexed_count,
       }));
 
-    const syncCheckpoints = db
+    return {
+      ownerEmail: metadata.ownerEmail || undefined,
+      updatedAt: metadata.updatedAt || undefined,
+      folders,
+      indexedFolders,
+    };
+  }
+
+  // sync_state only — no messages table query. Used directly by getSyncCheckpointMap()
+  // (which never needs a message row) and by loadSnapshot()/getStatus()/getThreads()/
+  // getThreadById() so none of them duplicate this query inline.
+  private loadCheckpointsSync(db: Database.Database): MailboxSyncCheckpoint[] {
+    return db
       .prepare(`
         SELECT folder, uid_validity, uid_next, highest_uid, last_sync_at, last_full_sync_at, strategy, changed, fetched, total, backfilled_to_uid, incremental_resume_uid
         FROM sync_state
@@ -1958,7 +2041,12 @@ export class LocalIndexService {
         // some comparisons, so map it away explicitly here too.
         incrementalResumeUid: (row as { incremental_resume_uid?: number | null }).incremental_resume_uid ?? undefined,
       } satisfies MailboxSyncCheckpoint));
+  }
 
+  // The message-row query, capped at DEFAULT_SNAPSHOT_LIMIT by default — split out of
+  // loadSnapshot() so getThreads() can call it directly (or substitute
+  // loadThreadCandidateMessages() below) without re-fetching folders/checkpoints.
+  private loadMessages(db: Database.Database, options: SnapshotLoadOptions): EmailSummary[] {
     const messageSqlParts = [`SELECT * FROM messages`];
     const messageParams: unknown[] = [];
     const messageConditions: string[] = [];
@@ -1991,14 +2079,80 @@ export class LocalIndexService {
     messageSqlParts.push(`ORDER BY COALESCE(internal_date, date) DESC, uid DESC LIMIT ? OFFSET ?`);
     messageParams.push(messageLimit, messageOffset);
 
-    const messages = db
+    return db
       .prepare(messageSqlParts.join(" "))
       .all(...messageParams)
       .map((row) => this.rowToEmailSummary(row as MessageRow));
+  }
+
+  // getThreads()'s filtered path: filter/search in SQL first (the same pattern
+  // loadCandidateEmails()/search() already use — a safe LIKE-based superset over every
+  // field the JS-level filter in getThreads() checks), then expand each match's
+  // persisted thread_id membership directly by that column, unbounded by
+  // DEFAULT_SNAPSHOT_LIMIT — so a thread is found and built complete even when most of
+  // its messages sit outside the newest 5000.
+  private loadThreadCandidateMessages(
+    db: Database.Database,
+    input: { folder?: string; label?: string; query?: string },
+  ): EmailSummary[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (input.folder) {
+      conditions.push(`folder = ?`);
+      params.push(input.folder);
+    }
+    if (input.label) {
+      const labelNeedle = escapeLike(input.label.toLowerCase());
+      conditions.push(`(LOWER(folder) LIKE ? ESCAPE '\\' OR LOWER(labels_json) LIKE ? ESCAPE '\\')`);
+      params.push(`%${labelNeedle}%`, `%${labelNeedle}%`);
+    }
+    if (input.query) {
+      const needle = `%${escapeLike(input.query.toLowerCase())}%`;
+      conditions.push(
+        `(LOWER(subject) LIKE ? ESCAPE '\\' OR LOWER(from_json) LIKE ? ESCAPE '\\' OR LOWER(to_json) LIKE ? ESCAPE '\\' OR LOWER(cc_json) LIKE ? ESCAPE '\\' OR LOWER(bcc_json) LIKE ? ESCAPE '\\' OR LOWER(labels_json) LIKE ? ESCAPE '\\')`,
+      );
+      params.push(needle, needle, needle, needle, needle, needle);
+    }
+
+    const sql = `SELECT * FROM messages${conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : ""}`;
+    const candidates = db
+      .prepare(sql)
+      .all(...params)
+      .map((row) => this.rowToEmailSummary(row as MessageRow));
+
+    const threadIds = [...new Set(
+      candidates.map((email) => email.threadId?.trim()).filter((id): id is string => Boolean(id)),
+    )];
+    if (threadIds.length === 0) {
+      return candidates;
+    }
+
+    const byId = new Map(candidates.map((email) => [email.id, email]));
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < threadIds.length; i += CHUNK_SIZE) {
+      const chunk = threadIds.slice(i, i + CHUNK_SIZE);
+      const rows = db
+        .prepare(`SELECT * FROM messages WHERE thread_id IN (${chunk.map(() => "?").join(", ")})`)
+        .all(...chunk);
+      for (const row of rows) {
+        const email = this.rowToEmailSummary(row as MessageRow);
+        byId.set(email.id, email);
+      }
+    }
+
+    return [...byId.values()];
+  }
+
+  private async loadSnapshot(options: SnapshotLoadOptions = {}): Promise<SnapshotData> {
+    const db = await this.ensureDb();
+    const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
+    const syncCheckpoints = this.loadCheckpointsSync(db);
+    const messages = this.loadMessages(db, options);
 
     return {
-      ownerEmail: metadata.ownerEmail || undefined,
-      updatedAt: metadata.updatedAt || undefined,
+      ownerEmail,
+      updatedAt,
       folders,
       indexedFolders,
       syncCheckpoints,
