@@ -247,3 +247,152 @@ test("resolveUidsForBulkOp: OLD-FORMAT ids (no embedded uidValidity) still resol
   const uids = await service.resolveUidsForBulkOp("INBOX", ids, undefined);
   assert.deepEqual(uids.sort((a, b) => a - b), [1, 2]);
 });
+
+// --- Regression coverage: the id's own embedded uidValidity must protect a
+// caller even when it doesn't separately pass the uidValidity parameter —
+// this is exactly cli.ts's calling shape (e.g. `imapService.deleteEmail(emailId)`
+// with no second argument), which previously got zero staleness protection
+// even though the id it passed in carried a perfectly valid generation.
+
+test("delete_email: called with NO second argument (CLI's exact calling shape) still rejects a stale-generation id", async () => {
+  const staleId = createEmailId("INBOX", 42, "1000000001");
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "new message" }]]) };
+  const service = createService(state);
+
+  await assert.rejects(
+    () => service.deleteEmail(staleId),
+    /before the mailbox changed|no longer points to a valid message/,
+  );
+  assert.equal(state.messages.has(42), true);
+});
+
+test("move_email: called with NO second argument for uidValidity (CLI's exact calling shape) still rejects a stale-generation id", async () => {
+  const staleId = createEmailId("INBOX", 42, "1000000001");
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "new message" }]]) };
+  const service = createService(state);
+
+  await assert.rejects(
+    () => service.moveEmail(staleId, "Archive"),
+    /before the mailbox changed|no longer points to a valid message/,
+  );
+});
+
+test("mark_email_read: called with NO uidValidity argument (CLI's exact calling shape) still rejects a stale-generation id", async () => {
+  const staleId = createEmailId("INBOX", 42, "1000000001");
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "new message" }]]) };
+  const service = createService(state);
+
+  await assert.rejects(
+    () => service.markEmailRead(staleId, true),
+    /before the mailbox changed|no longer points to a valid message/,
+  );
+});
+
+test("update_message_flags: called with NO uidValidity argument (CLI's exact calling shape) still rejects a stale-generation id", async () => {
+  const staleId = createEmailId("INBOX", 42, "1000000001");
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "new message" }]]) };
+  const service = createService(state);
+
+  await assert.rejects(
+    () => service.updateMessageFlags(staleId, ["\\Flagged"], []),
+    /before the mailbox changed|no longer points to a valid message/,
+  );
+});
+
+test("delete_email: an explicit uidValidity override, when supplied, is still respected (doesn't regress that path)", async () => {
+  // A legacy id (no embedded uidValidity) with an explicit override that
+  // mismatches the mailbox's actual current generation must still be
+  // rejected — the id's own (absent) uidValidity must never silently
+  // override an explicit, deliberately-supplied parameter.
+  const legacyId = createEmailId("INBOX", 42);
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "hi" }]]) };
+  const service = createService(state);
+
+  await assert.rejects(
+    () => service.deleteEmail(legacyId, "1000000001"),
+    /before the mailbox changed|no longer points to a valid message/,
+  );
+  assert.equal(state.messages.has(42), true);
+
+  // ...and still works normally when the explicit override matches.
+  const result = await service.deleteEmail(legacyId, "2000000002");
+  assert.equal(result.deleted, true);
+});
+
+// --- Finding 2: getParsedMailDetail (backing get_email_by_id) must enforce
+// the same UIDVALIDITY check mutations already do — previously it never
+// checked at all, so a stale-generation id silently returned a *different*
+// real message's content under a freshly-recomputed, correct-looking new id.
+
+function createDetailFakeClient(state) {
+  const raw = Buffer.from(
+    [
+      "From: alice@example.com",
+      "To: owner@example.com",
+      `Subject: ${state.subject}`,
+      "",
+      state.body,
+    ].join("\r\n"),
+  );
+  return {
+    usable: true,
+    capabilities: new Set(["UIDPLUS"]),
+    mailbox: false,
+    async getMailboxLock(folder) {
+      this._selected = folder;
+      this.mailbox = { uidValidity: state.uidValidity, exists: 1, uidNext: state.uidNext };
+      return { release: () => {} };
+    },
+    async fetchOne(range) {
+      const uid = Number(range);
+      if (uid !== state.uid) return false;
+      return {
+        uid,
+        seq: 1,
+        flags: ["\\Seen"],
+        envelope: { subject: state.subject, from: [], to: [], cc: [], bcc: [], replyTo: [] },
+        bodyStructure: {},
+        source: raw,
+      };
+    },
+  };
+}
+
+function createDetailService(state) {
+  const service = new SimpleIMAPService(createConfig(), quietLogger, 0);
+  service.client = createDetailFakeClient(state);
+  return service;
+}
+
+test("get_email_by_id: a stale-generation id must throw, not silently return a different message's content", async () => {
+  // Generation 1 minted this id for UID 42 pointing at "Original message".
+  // The mailbox was recreated and a genuinely different message now sits at
+  // UID 42 in generation 2 — reading it back must fail loudly, not
+  // relabel the new message under a "current"-looking id with no error.
+  const staleId = createEmailId("INBOX", 42, "1000000001");
+  const state = { uidValidity: "2000000002", uidNext: 100, uid: 42, subject: "A different message", body: "Hi" };
+  const service = createDetailService(state);
+
+  await assert.rejects(
+    () => service.getEmailById(staleId),
+    /before the mailbox changed|no longer points to a valid message/,
+  );
+});
+
+test("get_email_by_id: an id minted under the CURRENT UIDVALIDITY still works exactly as before (no regression)", async () => {
+  const currentId = createEmailId("INBOX", 42, "2000000002");
+  const state = { uidValidity: "2000000002", uidNext: 100, uid: 42, subject: "Current message", body: "Hi" };
+  const service = createDetailService(state);
+
+  const detail = await service.getEmailById(currentId);
+  assert.equal(detail.subject, "Current message");
+});
+
+test("get_email_by_id: an OLD-FORMAT id (no embedded uidValidity) still works with no new error (no regression for pre-existing ids)", async () => {
+  const legacyId = createEmailId("INBOX", 42); // 3-field, pre-UIDVALIDITY format
+  const state = { uidValidity: "2000000002", uidNext: 100, uid: 42, subject: "Legacy message", body: "Hi" };
+  const service = createDetailService(state);
+
+  const detail = await service.getEmailById(legacyId);
+  assert.equal(detail.subject, "Legacy message");
+});
