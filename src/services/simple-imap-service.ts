@@ -2294,6 +2294,16 @@ export class SimpleIMAPService {
     // comment) — when provided, skips re-resolving `match` here so the
     // dryRun preview and the real run act on the exact same set.
     resolvedUids?: number[];
+    // The UIDVALIDITY `resolvedUids` was resolved under (index.ts's
+    // currentUidValidity, fetched at the same point in time as
+    // resolvedUids) — re-checked inside the mutation's own withMailbox lock
+    // below via assertMailboxUidValidity, so a generation change in the gap
+    // between resolution and this method actually acquiring the lock is
+    // caught right there instead of silently mutating whatever now occupies
+    // those UIDs under the new generation. Undefined disables the check,
+    // same "can't verify it, so don't block on it" stance as everywhere
+    // else assertMailboxUidValidity is used.
+    uidValidity?: string;
   }): Promise<BulkOperationResult> {
     const folder = input.folder?.trim() || "INBOX";
     const uids = input.resolvedUids ?? await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
@@ -2337,6 +2347,12 @@ export class SimpleIMAPService {
             return new Set(Array.isArray(found) ? found : []);
           });
           await this.withMailbox(folder, false, async (client) => {
+            // Re-verify the generation resolvedUids was resolved under,
+            // inside the same lock the actual delete runs under — the
+            // filtering in resolveUidsForBulkOp only caught a stale id at
+            // resolution time, not a mailbox change in the gap between then
+            // and this lock being acquired.
+            this.assertMailboxUidValidity(client, input.uidValidity);
             const deleted = await client.messageDelete(uidSet, { uid: true });
             if (!deleted) throw new Error(`Server did not delete uid set ${uidSet}`);
           });
@@ -2345,6 +2361,8 @@ export class SimpleIMAPService {
           let hasUidPlus = false;
           await this.withMailbox(folder, false, async (client) => {
             folderUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
+            // Same lock-scoped re-check as the permanent-delete branch above.
+            this.assertMailboxUidValidity(client, input.uidValidity);
             const moved = await client.messageMove(uidSet, trashFolder, { uid: true });
             if (moved === false) throw new Error(`Server did not move uid set ${uidSet} to trash`);
             uidMap = moved.uidMap;
@@ -2366,9 +2384,10 @@ export class SimpleIMAPService {
           succeeded++;
         }
       } catch (err) {
+        const error = this.bulkExecutionErrorMessage(err);
         for (const uid of uids) {
           const emailId = createEmailId(folder, uid, folderUidValidity);
-          results.push({ uid, emailId, ok: false, error: String(err) });
+          results.push({ uid, emailId, ok: false, error });
           failed++;
         }
       }
@@ -2395,6 +2414,9 @@ export class SimpleIMAPService {
     // comment) — when provided, skips re-resolving `match` here so the
     // dryRun preview and the real run act on the exact same set.
     resolvedUids?: number[];
+    // The UIDVALIDITY `resolvedUids` was resolved under — see bulkDelete's
+    // identical parameter for the full rationale.
+    uidValidity?: string;
   }): Promise<BulkOperationResult> {
     const folder = input.folder?.trim() || "INBOX";
     const uids = input.resolvedUids ?? await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
@@ -2423,6 +2445,10 @@ export class SimpleIMAPService {
         const notAppliedByUid = new Map<number, string[]>();
         await this.withMailbox(folder, false, async (client) => {
           folderUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
+          // Re-verify the generation resolvedUids was resolved under,
+          // inside the same lock the flag mutation runs under — see
+          // bulkDelete's identical check for the full rationale.
+          this.assertMailboxUidValidity(client, input.uidValidity);
           if (flagsToAdd.length > 0) {
             await client.messageFlagsAdd(uidSet, flagsToAdd, { uid: true });
           }
@@ -2457,9 +2483,10 @@ export class SimpleIMAPService {
           succeeded++;
         }
       } catch (err) {
+        const error = this.bulkExecutionErrorMessage(err);
         for (const uid of uids) {
           const emailId = createEmailId(folder, uid, folderUidValidity);
-          results.push({ uid, emailId, ok: false, error: String(err) });
+          results.push({ uid, emailId, ok: false, error });
           failed++;
         }
       }
@@ -2485,6 +2512,14 @@ export class SimpleIMAPService {
     // comment) — when provided, skips re-resolving `match` here so the
     // dryRun preview and the real run act on the exact same set.
     resolvedUids?: number[];
+    // The UIDVALIDITY `resolvedUids` was resolved under — see bulkDelete's
+    // identical parameter for the full rationale. Takes priority over the
+    // fresh getMailboxUidValidity fallback below so the per-uid recheck
+    // (via updateMessageLabels's own assertMailboxUidValidity, inside its
+    // withMailbox lock) verifies against the generation this batch was
+    // actually resolved under, not merely whatever happens to be current
+    // the instant before this loop starts.
+    uidValidity?: string;
   }): Promise<BulkOperationResult> {
     const folder = input.folder?.trim() || "INBOX";
     const uids = input.resolvedUids ?? await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
@@ -2513,10 +2548,24 @@ export class SimpleIMAPService {
     // defense-in-depth recheck (updateMessageLabels's own withMailbox call
     // re-verifies it against the *live* mailbox at execution time), not a
     // second independent resolution.
-    const folderUidValidity = await this.getMailboxUidValidity(folder).catch(() => undefined);
+    const folderUidValidity = input.uidValidity ?? await this.getMailboxUidValidity(folder).catch(() => undefined);
 
+    // Unlike bulkDelete/bulkUpdateFlags (one command mutating the whole uid
+    // set under a single withMailbox lock), labels are applied per-uid,
+    // each under its own lock via updateMessageLabels. So a lock-scoped
+    // generation mismatch can only be caught per-uid, not once up front —
+    // but per the same "fail the whole batch, not just this id" contract,
+    // once one is caught the rest of the batch is aborted too rather than
+    // silently continuing to mutate under a mailbox that's no longer the
+    // one this batch was resolved against.
+    let batchAborted = false;
     for (const uid of uids) {
       const emailId = createEmailId(folder, uid, folderUidValidity);
+      if (batchAborted) {
+        results.push({ uid, emailId, ok: false, error: this.bulkExecutionErrorMessage(new Error(UID_VALIDITY_MISMATCH_ERROR)) });
+        failed++;
+        continue;
+      }
       try {
         // updateMessageLabels never throws for a failed COPY/removal — it
         // catches per-label and reports failures via its own return value
@@ -2546,7 +2595,10 @@ export class SimpleIMAPService {
           succeeded++;
         }
       } catch (err) {
-        results.push({ uid, emailId, ok: false, error: String(err) });
+        if (err instanceof Error && err.message === UID_VALIDITY_MISMATCH_ERROR) {
+          batchAborted = true;
+        }
+        results.push({ uid, emailId, ok: false, error: this.bulkExecutionErrorMessage(err) });
         failed++;
       }
     }
@@ -3835,6 +3887,21 @@ export class SimpleIMAPService {
     if (mailbox?.uidValidity?.toString() !== expectedUidValidity) {
       throw new Error(UID_VALIDITY_MISMATCH_ERROR);
     }
+  }
+
+  // Distinguishes a bulk batch's execution-time generation mismatch (caught
+  // here, from assertMailboxUidValidity re-checking the whole resolved set
+  // right before the mutation) from the per-id "this one id's own embedded
+  // generation was stale" filtering resolveUidsForBulkOp already does before
+  // the batch ever gets here. Both ultimately trace back to the same
+  // UID_VALIDITY_MISMATCH_ERROR wording, but callers need to tell them apart:
+  // this one means the *entire* resolved batch was invalidated by a mailbox
+  // change after resolution, not just some individual ids.
+  private bulkExecutionErrorMessage(err: unknown): string {
+    if (err instanceof Error && err.message === UID_VALIDITY_MISMATCH_ERROR) {
+      return `Bulk operation aborted: the mailbox's UIDVALIDITY changed after this batch's UIDs were resolved and before the mutation ran, invalidating the entire resolved batch (not just individual ids). ${UID_VALIDITY_MISMATCH_ERROR}`;
+    }
+    return String(err);
   }
 
   private async writeAttachmentToPath(

@@ -396,3 +396,192 @@ test("get_email_by_id: an OLD-FORMAT id (no embedded uidValidity) still works wi
   const detail = await service.getEmailById(legacyId);
   assert.equal(detail.subject, "Legacy message");
 });
+
+// Reproduces the P1 fixed here: resolvedUids/uidValidity were threaded
+// through resolution (resolveUidsForBulkOp / getBulkNotFoundEmailIds) but
+// never re-checked again inside the mutation's own withMailbox lock. If the
+// mailbox's UIDVALIDITY changes in the real window between resolution
+// finishing and the mutation's lock being acquired (network latency,
+// concurrent activity), the resolved UIDs — valid under the OLD generation —
+// would get mutated under the NEW generation with no re-check at all.
+
+test("bulk_delete: mailbox generation changes between resolution and the mutation's lock — the whole batch is rejected, nothing is deleted", async () => {
+  const state = { uidValidity: "1000000001", uidNext: 100, messages: new Map([[42, { subject: "msg" }]]) };
+  const service = createService(state);
+
+  // Resolution happens under generation 1 — mirrors index.ts's shared
+  // currentUidValidity fetch feeding both resolveUidsForBulkOp and the
+  // resolvedUids/uidValidity pair passed into bulkDelete.
+  const resolvedUidValidity = state.uidValidity;
+  const id = createEmailId("INBOX", 42, resolvedUidValidity);
+  const uids = await service.resolveUidsForBulkOp("INBOX", [id], undefined, resolvedUidValidity);
+  assert.deepEqual(uids, [42]);
+
+  // The mailbox is recreated (generation bumps 1 -> 2) in the gap between
+  // resolution finishing and the real mutation's withMailbox call below
+  // acquiring its lock — the exact TOCTOU window from the bug report.
+  state.uidValidity = "2000000002";
+
+  let deleteCalled = false;
+  const originalDelete = service.client.messageDelete.bind(service.client);
+  service.client.messageDelete = async (...args) => {
+    deleteCalled = true;
+    return originalDelete(...args);
+  };
+
+  const result = await service.bulkDelete({
+    emailIds: [id],
+    folder: "INBOX",
+    permanent: true,
+    resolvedUids: uids,
+    uidValidity: resolvedUidValidity,
+  });
+
+  assert.equal(result.succeeded, 0);
+  assert.equal(result.failed, 1);
+  // Whole-batch abort, distinct wording from the per-id "stale id excluded"
+  // filtering resolveUidsForBulkOp already does at resolution time.
+  assert.match(result.results[0].error, /entire resolved batch/);
+  assert.equal(deleteCalled, false);
+  // The message under uid 42 in the NEW generation must survive untouched.
+  assert.equal(state.messages.has(42), true);
+});
+
+test("bulk_delete: resolution and execution under the SAME generation — batch succeeds exactly as before (no regression)", async () => {
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "msg" }]]) };
+  const service = createService(state);
+
+  const currentUidValidity = state.uidValidity;
+  const id = createEmailId("INBOX", 42, currentUidValidity);
+  const uids = await service.resolveUidsForBulkOp("INBOX", [id], undefined, currentUidValidity);
+
+  const result = await service.bulkDelete({
+    emailIds: [id],
+    folder: "INBOX",
+    permanent: true,
+    resolvedUids: uids,
+    uidValidity: currentUidValidity,
+  });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(state.messages.has(42), false);
+});
+
+test("bulk_update_flags: mailbox generation changes between resolution and the mutation's lock — the whole batch is rejected, no flags are touched", async () => {
+  const state = { uidValidity: "1000000001", uidNext: 100, messages: new Map([[42, { subject: "msg", flags: [] }]]) };
+  const service = createService(state);
+  let flagsAddCalled = false;
+  service.client.messageFlagsAdd = async () => {
+    flagsAddCalled = true;
+    return true;
+  };
+  service.client.messageFlagsRemove = async () => true;
+  service.client.fetch = async function* () {};
+
+  const resolvedUidValidity = state.uidValidity;
+  const id = createEmailId("INBOX", 42, resolvedUidValidity);
+  const uids = await service.resolveUidsForBulkOp("INBOX", [id], undefined, resolvedUidValidity);
+  assert.deepEqual(uids, [42]);
+
+  state.uidValidity = "2000000002";
+
+  const result = await service.bulkUpdateFlags({
+    emailIds: [id],
+    folder: "INBOX",
+    flagsToAdd: ["\\Flagged"],
+    resolvedUids: uids,
+    uidValidity: resolvedUidValidity,
+  });
+
+  assert.equal(result.succeeded, 0);
+  assert.equal(result.failed, 1);
+  assert.match(result.results[0].error, /entire resolved batch/);
+  assert.equal(flagsAddCalled, false);
+});
+
+test("bulk_update_flags: resolution and execution under the SAME generation — batch succeeds exactly as before (no regression)", async () => {
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "msg" }]]) };
+  const service = createService(state);
+  service.client.messageFlagsAdd = async () => true;
+  service.client.messageFlagsRemove = async () => true;
+  service.client.fetch = async function* (range) {
+    for (const uid of String(range).split(",").map(Number)) {
+      yield { uid, flags: ["\\Flagged"] };
+    }
+  };
+
+  const currentUidValidity = state.uidValidity;
+  const id = createEmailId("INBOX", 42, currentUidValidity);
+  const uids = await service.resolveUidsForBulkOp("INBOX", [id], undefined, currentUidValidity);
+
+  const result = await service.bulkUpdateFlags({
+    emailIds: [id],
+    folder: "INBOX",
+    flagsToAdd: ["\\Flagged"],
+    resolvedUids: uids,
+    uidValidity: currentUidValidity,
+  });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 0);
+});
+
+test("bulk_update_labels: mailbox generation changes between resolution and the mutation's lock — the whole batch is rejected, no labels are touched", async () => {
+  const state = { uidValidity: "1000000001", uidNext: 100, messages: new Map([[42, { subject: "msg" }]]) };
+  const service = createService(state);
+  let copyCalled = false;
+  service.client.messageCopy = async () => {
+    copyCalled = true;
+    return true;
+  };
+
+  const resolvedUidValidity = state.uidValidity;
+  const id = createEmailId("INBOX", 42, resolvedUidValidity);
+  const uids = await service.resolveUidsForBulkOp("INBOX", [id], undefined, resolvedUidValidity);
+  assert.deepEqual(uids, [42]);
+
+  state.uidValidity = "2000000002";
+
+  const result = await service.bulkUpdateLabels({
+    emailIds: [id],
+    folder: "INBOX",
+    labelsToAdd: ["Labels/Work"],
+    resolvedUids: uids,
+    uidValidity: resolvedUidValidity,
+  });
+
+  assert.equal(result.succeeded, 0);
+  assert.equal(result.failed, 1);
+  assert.match(result.results[0].error, /entire resolved batch/);
+  assert.equal(copyCalled, false);
+});
+
+test("bulk_update_labels: resolution and execution under the SAME generation — batch succeeds exactly as before (no regression)", async () => {
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "msg" }]]) };
+  const service = createService(state);
+  service.client.fetchOne = async (range, query) => {
+    const uid = Number(range);
+    if (!state.messages.has(uid)) return false;
+    if (query && query.envelope) {
+      return { uid, envelope: { messageId: "<msg-1@example.com>" } };
+    }
+    return { uid };
+  };
+  service.client.messageCopy = async () => true;
+
+  const currentUidValidity = state.uidValidity;
+  const id = createEmailId("INBOX", 42, currentUidValidity);
+  const uids = await service.resolveUidsForBulkOp("INBOX", [id], undefined, currentUidValidity);
+
+  const result = await service.bulkUpdateLabels({
+    emailIds: [id],
+    folder: "INBOX",
+    labelsToAdd: ["Labels/Work"],
+    resolvedUids: uids,
+    uidValidity: currentUidValidity,
+  });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 0);
+});

@@ -4767,6 +4767,7 @@ export function createServer(
               folder,
               permanent,
               resolvedUids: uids,
+              uidValidity: currentUidValidity,
               dryRun: true,
             });
             return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
@@ -4778,6 +4779,7 @@ export function createServer(
               folder,
               permanent,
               resolvedUids: uids,
+              uidValidity: currentUidValidity,
               dryRun: false,
             })
           );
@@ -4810,11 +4812,11 @@ export function createServer(
           const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
           ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
-            const preview = await imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, dryRun: true });
+            const preview = await imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, uidValidity: currentUidValidity, dryRun: true });
             return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
           }
           const result = await withAudit(auditService, name, args, () =>
-            imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, dryRun: false })
+            imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, uidValidity: currentUidValidity, dryRun: false })
           );
           return createTextResult(withBulkNotFound(result, notFoundEmailIds));
         }
@@ -4844,11 +4846,11 @@ export function createServer(
           const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
           ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
-            const preview = await imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, dryRun: true });
+            const preview = await imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, uidValidity: currentUidValidity, dryRun: true });
             return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
           }
           const result = await withAudit(auditService, name, args, () =>
-            imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, dryRun: false })
+            imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, uidValidity: currentUidValidity, dryRun: false })
           );
           return createTextResult(withBulkNotFound(result, notFoundEmailIds));
         }
