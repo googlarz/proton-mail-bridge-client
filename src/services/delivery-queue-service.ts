@@ -128,6 +128,27 @@ export class DeliveryQueueService {
     };
     await this.withLock(async () => {
       const store = await this.loadUnlocked();
+      // Found live: schedule_draft's own duplicate-scheduling guard read
+      // list() and checked for an existing pending record for this draft
+      // BEFORE calling enqueue() — a classic read-then-write TOCTOU race.
+      // Two concurrent schedule_draft calls for the same draft (double-click,
+      // a client retry, two agents racing) could both observe "no existing
+      // pending schedule" and both enqueue, producing two independent
+      // pending records for one draft. The check now happens here, under the
+      // same lock as the write, against the just-loaded store state — so
+      // only one of two racing enqueue() calls can ever see no existing
+      // record. Mirrors send_draft's own "already has a pending scheduled
+      // send" message for consistency.
+      if (sourceDraftId) {
+        const existing = Object.values(store.items).find(
+          (item) => item.sourceDraftId === sourceDraftId && item.status === "pending",
+        );
+        if (existing) {
+          throw new Error(
+            `This draft already has a pending scheduled send (id ${existing.id}, sendAt ${existing.sendAt}). Scheduling it again would deliver it twice. Cancel the existing one with cancel_send first if you want a different sendAt.`,
+          );
+        }
+      }
       store.items[record.id] = record;
       await this.save(store);
     });
