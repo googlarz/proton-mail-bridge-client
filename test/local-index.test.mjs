@@ -2192,3 +2192,187 @@ test("recordSnapshot does not merge a genuine UIDVALIDITY change that reuses a U
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("actionable-thread pendingOn uses the stored isAutomated header verdict over the sender regex", async () => {
+  // Found live: after the v2.0.6 local-part regex, a 57k-message mailbox still had 38,532
+  // of ~57k threads "pending on you" because transactional senders (order confirmations
+  // from 'domeny@netart.pl' and the like) carry no no-reply marker in the address. The
+  // real signal is the List-Unsubscribe/List-Id/Precedence/Auto-Submitted headers captured
+  // at index time as isAutomated; it must win in both directions over the regex, and the
+  // regex must remain the fallback only for rows where isAutomated is undefined.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-is-automated-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const baseEmail = (overrides) => ({
+      folder: "INBOX",
+      to: [{ address: "owner@example.com" }],
+      cc: [],
+      bcc: [],
+      replyTo: [],
+      date: tenDaysAgo,
+      internalDate: tenDaysAgo,
+      isRead: true,
+      isStarred: false,
+      flags: [],
+      hasAttachments: false,
+      attachments: [],
+      labels: [],
+      ...overrides,
+    });
+    const emails = [
+      // (b) header verdict says automated, address looks human -> must NOT be pending on you.
+      baseEmail({
+        id: "INBOX::1",
+        uid: 1,
+        seq: 1,
+        messageId: "<order@netart.pl>",
+        threadId: "transactional-thread",
+        subject: "Potwierdzenie zamówienia",
+        from: [{ address: "domeny@netart.pl" }],
+        preview: "Order confirmation",
+        isAutomated: true,
+      }),
+      // (c) header verdict says human, address matches the regex -> real signal beats regex.
+      baseEmail({
+        id: "INBOX::2",
+        uid: 2,
+        seq: 2,
+        messageId: "<human-noreply@example.com>",
+        threadId: "human-noreply-thread",
+        subject: "Question about the invoice",
+        from: [{ address: "notification.team@example.com" }],
+        preview: "Could you confirm the amount?",
+        isAutomated: false,
+      }),
+      // (d) no verdict captured -> regex fallback still classifies this as automated.
+      baseEmail({
+        id: "INBOX::3",
+        uid: 3,
+        seq: 3,
+        messageId: "<legacy-noreply@example.com>",
+        threadId: "legacy-noreply-thread",
+        subject: "Your parcel is on its way",
+        from: [{ address: "no-reply@courier.example.com" }],
+        preview: "Tracking update",
+      }),
+      // (d) no verdict captured, human-looking address -> regex fallback leaves it pending on you.
+      baseEmail({
+        id: "INBOX::4",
+        uid: 4,
+        seq: 4,
+        messageId: "<legacy-human@example.com>",
+        threadId: "legacy-human-thread",
+        subject: "Can you review this?",
+        from: [{ address: "colleague@example.com" }],
+        preview: "Can you review this?",
+      }),
+    ];
+
+    await service.recordSnapshot({
+      syncedAt: new Date().toISOString(),
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: emails.length,
+          unseen: 0,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: emails.length, total: emails.length, strategy: "full" }],
+      emails,
+    });
+
+    const followUps = await service.getFollowUpCandidates({ minAgeHours: 24, limit: 10 });
+    assert.deepEqual(
+      followUps.threads.map((thread) => thread.id).sort(),
+      ["imap:human-noreply-thread", "imap:legacy-human-thread"],
+    );
+
+    // isAutomated must round-trip through the messages table (NULL <-> undefined).
+    const recent = await service.listRecentMessages(10);
+    const byId = new Map(recent.map((message) => [message.id, message.isAutomated]));
+    assert.equal(byId.get("INBOX::1"), true);
+    assert.equal(byId.get("INBOX::2"), false);
+    assert.equal(byId.get("INBOX::3"), undefined);
+    assert.equal(byId.get("INBOX::4"), undefined);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("opening an index created before the is_automated column migrates in place and reads old rows as undefined", async () => {
+  // Existing installs have a messages table without is_automated. The schema bootstrap must
+  // ALTER TABLE it in (like references_json/attachment_text before it) without dropping any
+  // rows, and rows that predate the column must read back isAutomated: undefined so the
+  // actionable-thread scorer keeps using the regex fallback for them until a full re-sync.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-is-automated-migration-test-"));
+  const dbPath = join(dataDir, "mail-index.sqlite");
+
+  const legacy = new Database(dbPath);
+  legacy.exec(`
+    CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO metadata (key, value) VALUES ('schemaVersion', '3'), ('ownerEmail', 'owner@example.com');
+    CREATE TABLE messages (
+      email_id TEXT PRIMARY KEY,
+      folder TEXT NOT NULL,
+      uid INTEGER NOT NULL,
+      seq INTEGER NOT NULL,
+      message_id TEXT,
+      in_reply_to TEXT,
+      references_json TEXT NOT NULL DEFAULT '[]',
+      thread_id TEXT,
+      subject TEXT NOT NULL,
+      from_json TEXT NOT NULL,
+      to_json TEXT NOT NULL,
+      cc_json TEXT NOT NULL,
+      bcc_json TEXT NOT NULL,
+      reply_to_json TEXT NOT NULL,
+      date TEXT,
+      internal_date TEXT,
+      is_read INTEGER NOT NULL,
+      is_starred INTEGER NOT NULL,
+      flags_json TEXT NOT NULL,
+      size INTEGER,
+      preview TEXT,
+      has_attachments INTEGER NOT NULL,
+      attachments_json TEXT NOT NULL,
+      attachment_text TEXT,
+      labels_json TEXT NOT NULL
+    );
+    INSERT INTO messages (
+      email_id, folder, uid, seq, message_id, thread_id, subject, from_json, to_json, cc_json, bcc_json, reply_to_json,
+      date, internal_date, is_read, is_starred, flags_json, has_attachments, attachments_json, labels_json
+    ) VALUES (
+      'INBOX::1', 'INBOX', 1, 1, '<old@example.com>', 'old-thread', 'Old message',
+      '[{"address":"colleague@example.com"}]', '[{"address":"owner@example.com"}]', '[]', '[]', '[]',
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 1, 0, '[]', 0, '[]', '[]'
+    );
+  `);
+  legacy.close();
+
+  const service = new LocalIndexService(createConfig(dataDir));
+  try {
+    const recent = await service.listRecentMessages(10);
+    assert.equal(recent.length, 1, "pre-existing row must survive the migration");
+    assert.equal(recent[0].id, "INBOX::1");
+    assert.equal(recent[0].isAutomated, undefined);
+
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const columns = db.prepare(`PRAGMA table_info(messages)`).all().map((row) => row.name);
+      assert.ok(columns.includes("is_automated"));
+      assert.equal(db.prepare(`SELECT is_automated FROM messages WHERE email_id = 'INBOX::1'`).get().is_automated, null);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

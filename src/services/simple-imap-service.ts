@@ -72,8 +72,22 @@ const FETCH_INDEX_QUERY = {
 // search — collectFolderForIndex previously used FETCH_INDEX_QUERY (no source), so
 // every indexed message's preview and attachmentText silently stayed undefined and
 // search_indexed_emails' body search always returned nothing.
+// Header fields that mark one-way automated/bulk mail. Fetched via HEADER.FIELDS inside the
+// same FETCH as the index detail query (no extra round-trip) so the index can tell
+// transactional senders (order confirmations, receipts) apart from humans even when the
+// address itself carries no no-reply marker — the local-part regex in the index service
+// could never see those, which left ~68% of a live mailbox's threads "pending on you".
+const AUTOMATED_SIGNAL_HEADER_FIELDS = [
+  "List-Unsubscribe",
+  "List-Id",
+  "Precedence",
+  "Auto-Submitted",
+  "X-Auto-Response-Suppress",
+];
+
 const FETCH_INDEX_DETAIL_QUERY = {
   ...FETCH_INDEX_QUERY,
+  headers: AUTOMATED_SIGNAL_HEADER_FIELDS,
   source: true,
 } as const;
 
@@ -504,6 +518,42 @@ function createParsedAttachmentId(
 //   - list (merged from List-Unsubscribe/List-Id/etc.) -> a nested object, kept structured
 //     since callers (e.g. the unsubscribe tool) need list.unsubscribe.url/.mail directly.
 // A blind String(value) on any of these produces the literal string "[object Object]".
+// Parses the raw HEADER.FIELDS Buffer imapflow returns for `headers: [...]` (one folded
+// header per logical line) into an automated-mail verdict. Returns undefined when no header
+// data was fetched at all, so a fetch path without headers never masquerades as "human".
+export function detectAutomatedFromHeaders(headers: Buffer | undefined): boolean | undefined {
+  if (!headers) {
+    return undefined;
+  }
+
+  const unfolded = headers.toString("utf8").replace(/\r?\n[ \t]+/g, " ");
+  for (const line of unfolded.split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) {
+      continue;
+    }
+    const name = line.slice(0, separator).trim().toLowerCase();
+    const value = line.slice(separator + 1).trim().toLowerCase();
+    switch (name) {
+      case "list-unsubscribe":
+      case "list-id":
+      case "x-auto-response-suppress":
+        return true;
+      case "precedence":
+        if (value === "bulk" || value === "list" || value === "junk") {
+          return true;
+        }
+        break;
+      case "auto-submitted":
+        if (value !== "no") {
+          return true;
+        }
+        break;
+    }
+  }
+  return false;
+}
+
 export function mapHeaderValue(value: unknown): unknown {
   if (value === null || value === undefined) {
     return value;
@@ -3429,6 +3479,7 @@ export class SimpleIMAPService {
       attachments,
       attachmentText: undefined,
       labels: [...(message.labels ?? [])],
+      isAutomated: detectAutomatedFromHeaders(message.headers),
     };
   }
 
