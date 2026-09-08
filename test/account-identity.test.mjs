@@ -9,6 +9,7 @@ import {
 } from "../dist/utils/account-identity.js";
 import { LocalIndexService } from "../dist/services/local-index-service.js";
 import { DeliveryQueueService } from "../dist/services/delivery-queue-service.js";
+import { AuditService } from "../dist/services/audit-service.js";
 
 function createConfig(dataDir, username) {
   return {
@@ -189,5 +190,97 @@ test("DeliveryQueueService refuses to open a dataDir belonging to a different ac
 
     // Confirm account B's SMTP transport never handled account A's queued item.
     assert.equal(smtpB.sent.length, 0);
+  });
+});
+
+test("AuditService refuses to read a dataDir belonging to a different account and never returns its audit entries", async () => {
+  await withTempDir(async (dataDir) => {
+    const auditA = new AuditService(createConfig(dataDir, "accountA@example.com"));
+    await auditA.record({
+      timestamp: "2026-03-24T12:00:00.000Z",
+      tool: "send_email",
+      status: "success",
+      input: { subject: "a very private phrase only account A should ever see" },
+      result: { subject: "a very private phrase only account A should ever see" },
+    });
+
+    const auditB = new AuditService(createConfig(dataDir, "accountB@example.com"));
+    await assert.rejects(
+      () => auditB.list(),
+      (error) => {
+        assert.match(error.message, /accounta@example\.com/);
+        assert.match(error.message, /accountb@example\.com/);
+        return true;
+      },
+    );
+
+    // Sanity check: the data really is there under account A, so the
+    // rejection above is an actual refusal, not just an empty result.
+    const entriesFromA = await auditA.list();
+    assert.equal(entriesFromA.length, 1);
+    assert.match(JSON.stringify(entriesFromA), /a very private phrase only account A should ever see/);
+  });
+});
+
+test("AuditService.record also refuses a mismatched account (not just list)", async () => {
+  await withTempDir(async (dataDir) => {
+    const auditA = new AuditService(createConfig(dataDir, "accountA@example.com"));
+    await auditA.record({ timestamp: "2026-03-24T12:00:00.000Z", tool: "send_email", status: "success" });
+
+    const auditB = new AuditService(createConfig(dataDir, "accountB@example.com"));
+    await assert.rejects(() =>
+      auditB.record({ timestamp: "2026-03-24T12:00:01.000Z", tool: "send_email", status: "success" }),
+    );
+  });
+});
+
+test("ensureAccountIdentityMatches: N concurrent first-time calls for the same account all succeed and leave one consistent marker", async () => {
+  await withTempDir(async (dataDir) => {
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, () => ensureAccountIdentityMatches(dataDir, "accountA@example.com")),
+    );
+
+    for (const result of results) {
+      assert.equal(result.status, "fulfilled", result.reason?.message);
+    }
+
+    const marker = JSON.parse(await readFile(join(dataDir, "account.json"), "utf8"));
+    assert.equal(marker.accountEmail, "accounta@example.com");
+  });
+});
+
+test("ensureAccountIdentityMatches: concurrent first-time calls for DIFFERENT accounts leave exactly one winner and clean mismatch errors for the rest", async () => {
+  await withTempDir(async (dataDir) => {
+    const calls = [
+      ...Array.from({ length: 5 }, () => ensureAccountIdentityMatches(dataDir, "accountA@example.com")),
+      ...Array.from({ length: 5 }, () => ensureAccountIdentityMatches(dataDir, "accountB@example.com")),
+    ];
+    const results = await Promise.allSettled(calls);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+
+    // Exactly one account "wins" the race and every call for that account
+    // succeeds (5 calls); every call for the other account must get a clear
+    // mismatch error, never a silent wrong-success.
+    assert.equal(fulfilled.length, 5, "exactly the winning account's 5 calls should succeed");
+    assert.equal(rejected.length, 5, "the losing account's 5 calls must all be refused, not silently succeed");
+    for (const r of rejected) {
+      assert.ok(r.reason instanceof AccountIdentityMismatchError, r.reason?.message);
+    }
+
+    // The marker on disk must be valid, parseable JSON naming exactly one
+    // account — not corrupted or interleaved by the concurrent writers.
+    const marker = JSON.parse(await readFile(join(dataDir, "account.json"), "utf8"));
+    assert.ok(["accounta@example.com", "accountb@example.com"].includes(marker.accountEmail));
+
+    // The winning account is whichever one succeeded — confirm consistency
+    // between the marker on disk and which calls were fulfilled.
+    const winner = marker.accountEmail;
+    for (const r of rejected) {
+      const other = winner === "accounta@example.com" ? "accountb@example.com" : "accounta@example.com";
+      assert.equal(r.reason.current, other);
+      assert.equal(r.reason.onDisk, winner);
+    }
   });
 });

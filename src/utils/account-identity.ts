@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { withFileLock } from "./file-lock.js";
 import { lowerCaseAddress } from "./helpers.js";
 
 // Guards against a real cross-account privacy leak: PROTONMAIL_DATA_DIR
@@ -63,29 +65,55 @@ export async function ensureAccountIdentityMatches(
   const current = lowerCaseAddress(currentAccountEmail) || "";
   const path = markerPath(dataDir);
 
-  let existing: AccountMarkerFile | undefined;
-  try {
-    const raw = await readFile(path, "utf8");
-    existing = JSON.parse(raw) as AccountMarkerFile;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  if (existing?.accountEmail) {
-    if (existing.accountEmail !== current) {
-      throw new AccountIdentityMismatchError(dataDir, existing.accountEmail, current);
-    }
-    return;
-  }
-
-  // First use of this dataDir (fresh, or pre-fix with no marker yet) — write
-  // the marker. Atomic temp+rename, 0o600, mirroring DraftStoreService's/
-  // TemplateService's own JSON store persistence pattern.
+  // mkdir up front (not just in the write branch below) so a fresh dataDir
+  // gets 0o700 before withFileLock's own acquire() has a chance to create it
+  // first with default permissions while creating the lock file's directory.
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  const marker: AccountMarkerFile = { version: 1, accountEmail: current };
-  const tempPath = `${path}.tmp`;
-  await writeFile(tempPath, JSON.stringify(marker, null, 2), { encoding: "utf8", mode: 0o600 });
-  await rename(tempPath, path);
+
+  // The read-check-write sequence below must run under a lock scoped to this
+  // dataDir's marker file: without it, two callers racing the FIRST write of
+  // a fresh marker (e.g. every store constructed at server startup) can both
+  // observe "no marker yet" and both proceed to write — if they're for
+  // different accounts, that's the exact cross-account collision this marker
+  // exists to prevent, silently defeating mismatch detection instead of
+  // raising it. withFileLock is the same cross-process advisory lock
+  // DraftStoreService/TemplateService/etc. already use for equally small
+  // critical sections, so this doesn't meaningfully slow the common case
+  // (marker already exists and matches — one lock + one small read).
+  await withFileLock(path, async () => {
+    // Re-read here, not just before acquiring the lock: another caller may
+    // have written the marker (for this account, or a different one) while
+    // this call was waiting for the lock.
+    let existing: AccountMarkerFile | undefined;
+    try {
+      const raw = await readFile(path, "utf8");
+      existing = JSON.parse(raw) as AccountMarkerFile;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    if (existing?.accountEmail) {
+      if (existing.accountEmail !== current) {
+        throw new AccountIdentityMismatchError(dataDir, existing.accountEmail, current);
+      }
+      return;
+    }
+
+    // First use of this dataDir (fresh, or pre-fix with no marker yet) —
+    // write the marker. Atomic temp+rename, 0o600, mirroring
+    // DraftStoreService's/TemplateService's own JSON store persistence
+    // pattern — except the temp filename is unique per call
+    // (pid + random suffix) rather than fixed, because this path (unlike
+    // those stores' own saves) isn't otherwise guarded against two
+    // concurrent writers of a FRESH marker both reaching this branch: a
+    // fixed name would let one caller's rename() race another's, causing
+    // ENOENT on the loser even though both were legitimately racing to
+    // initialize the same account.
+    const marker: AccountMarkerFile = { version: 1, accountEmail: current };
+    const tempPath = `${path}.${process.pid}-${randomUUID()}.tmp`;
+    await writeFile(tempPath, JSON.stringify(marker, null, 2), { encoding: "utf8", mode: 0o600 });
+    await rename(tempPath, path);
+  });
 }

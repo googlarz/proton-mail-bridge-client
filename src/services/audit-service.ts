@@ -1,6 +1,7 @@
 import { appendFile, chmod, mkdir, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AuditEntry, ProtonMailConfig } from "../types/index.js";
+import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 
 const MAX_AUDIT_BYTES = 5 * 1024 * 1024;
 const MAX_AUDIT_LINES = 10000;
@@ -11,6 +12,7 @@ export class AuditService {
   private readonly archivePath2: string;
   private _rotateLock: Promise<void> = Promise.resolve();
   private permissionsChecked = false;
+  private identityChecked = false;
 
   constructor(private readonly config: ProtonMailConfig) {
     this.auditPath = join(this.config.dataDir, "audit.log");
@@ -22,7 +24,21 @@ export class AuditService {
     return this.auditPath;
   }
 
+  // See DeliveryQueueService.loadUnlocked's identical guard: refuse to
+  // touch this dataDir's audit.log (or its rotated archives) if it belongs
+  // to a different account. AuditService is append-only-log-backed rather
+  // than JSON-blob-backed like the other stores, so there's no single
+  // loadUnlocked() choke point to hang this on — record() and list() are
+  // its two entry points that actually touch disk, so both call this.
+  private async ensureIdentity(): Promise<void> {
+    if (!this.identityChecked) {
+      await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
+      this.identityChecked = true;
+    }
+  }
+
   async record(entry: AuditEntry): Promise<void> {
+    await this.ensureIdentity();
     await mkdir(dirname(this.auditPath), { recursive: true, mode: 0o700 });
     // appendFile's `mode` option only applies when the file doesn't already
     // exist — on every real upgrade (not a fresh install), audit.log already
@@ -51,6 +67,7 @@ export class AuditService {
   }
 
   async list(limit = 100): Promise<AuditEntry[]> {
+    await this.ensureIdentity();
     const cap = Math.min(limit, MAX_AUDIT_LINES);
     const entries = [
       ...(await this.readEntries(this.archivePath2, cap)),
