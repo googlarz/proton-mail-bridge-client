@@ -1585,12 +1585,21 @@ export class SimpleIMAPService {
     isRead: boolean;
     notApplied: string[];
   }> {
-    const { folder, uid } = parseEmailId(emailId);
+    // The id's own embedded uidValidity (parsed above) is the actual source
+    // of protection — the `uidValidity` parameter only tightens it further
+    // for a caller with some other reason to supply one. Previously this was
+    // backwards: a caller that omitted the parameter (e.g. cli.ts, which
+    // never threaded it) got zero staleness protection even though the id it
+    // passed in already carried a perfectly valid generation. Found live:
+    // delete_email's CLI shortcut on a generation-1 id against a
+    // generation-2 mailbox deleted the message with no error.
+    const { folder, uid, uidValidity: idUidValidity } = parseEmailId(emailId);
+    const expectedUidValidity = uidValidity ?? idUidValidity;
     let notApplied: string[] = [];
 
     await this.withTimeout(
       this.withMailbox(folder, false, async (client) => {
-        this.assertMailboxUidValidity(client, uidValidity);
+        this.assertMailboxUidValidity(client, expectedUidValidity);
         if (isRead) {
           await client.messageFlagsAdd(String(uid), ["\\Seen"], { uid: true });
         } else {
@@ -1626,12 +1635,16 @@ export class SimpleIMAPService {
     isStarred: boolean;
     notApplied: string[];
   }> {
-    const { folder, uid } = parseEmailId(emailId);
+    // Same reasoning as markEmailRead above: the id's own embedded
+    // uidValidity is what actually protects this call, the parameter only
+    // tightens it further.
+    const { folder, uid, uidValidity: idUidValidity } = parseEmailId(emailId);
+    const expectedUidValidity = uidValidity ?? idUidValidity;
     let notApplied: string[] = [];
 
     await this.withTimeout(
       this.withMailbox(folder, false, async (client) => {
-        this.assertMailboxUidValidity(client, uidValidity);
+        this.assertMailboxUidValidity(client, expectedUidValidity);
         if (isStarred) {
           await client.messageFlagsAdd(String(uid), ["\\Flagged"], { uid: true });
         } else {
@@ -1660,13 +1673,18 @@ export class SimpleIMAPService {
     targetUid?: number;
     targetEmailId?: string;
   }> {
-    const { folder, uid } = parseEmailId(emailId);
+    // Same reasoning as markEmailRead above: the id's own embedded
+    // uidValidity is what actually protects this call, the parameter only
+    // tightens it further. archiveEmail/trashEmail/restoreEmail all delegate
+    // to this method, so they inherit the same protection.
+    const { folder, uid, uidValidity: idUidValidity } = parseEmailId(emailId);
+    const expectedUidValidity = uidValidity ?? idUidValidity;
     let targetUid: number | undefined;
     let targetFolderUidValidity: string | undefined;
 
     await this.withTimeout(
       this.withMailbox(folder, false, async (client) => {
-        this.assertMailboxUidValidity(client, uidValidity);
+        this.assertMailboxUidValidity(client, expectedUidValidity);
         const moved = await client.messageMove(String(uid), targetFolder, { uid: true });
         if (moved === false) {
           throw new Error(`Server did not move email ${emailId} to ${targetFolder}`);
@@ -1742,11 +1760,15 @@ export class SimpleIMAPService {
     uid: number;
     deleted: true;
   }> {
-    const { folder, uid } = parseEmailId(emailId);
+    // Same reasoning as markEmailRead above: the id's own embedded
+    // uidValidity is what actually protects this call, the parameter only
+    // tightens it further.
+    const { folder, uid, uidValidity: idUidValidity } = parseEmailId(emailId);
+    const expectedUidValidity = uidValidity ?? idUidValidity;
 
     await this.withTimeout(
       this.withMailbox(folder, false, async (client) => {
-        this.assertMailboxUidValidity(client, uidValidity);
+        this.assertMailboxUidValidity(client, expectedUidValidity);
         // messageDelete's own truthy/falsy result only reflects whether the
         // server accepted the EXPUNGE command, not whether any message
         // actually matched — a nonexistent UID's preceding \Deleted flag add
@@ -1789,7 +1811,11 @@ export class SimpleIMAPService {
     labelsToRemove: string[],
     uidValidity?: string,
   ): Promise<{ emailId: string; added: string[]; removed: string[]; notFound: string[]; failedLabels?: string[] }> {
-    const { folder, uid } = parseEmailId(emailId);
+    // Same reasoning as markEmailRead above: the id's own embedded
+    // uidValidity is what actually protects this call, the parameter only
+    // tightens it further.
+    const { folder, uid, uidValidity: idUidValidity } = parseEmailId(emailId);
+    const expectedUidValidity = uidValidity ?? idUidValidity;
     const added: string[] = [];
     const removed: string[] = [];
     const notFound: string[] = [];
@@ -1810,7 +1836,7 @@ export class SimpleIMAPService {
     let sourceExists = false;
     await this.withTimeout(
       this.withMailbox(folder, true, async (client) => {
-        this.assertMailboxUidValidity(client, uidValidity);
+        this.assertMailboxUidValidity(client, expectedUidValidity);
         const msg = await client.fetchOne(String(uid), { uid: true, envelope: true }, { uid: true });
         if (msg !== false) {
           sourceExists = true;
@@ -1891,12 +1917,16 @@ export class SimpleIMAPService {
     flagsToRemove: string[],
     uidValidity?: string,
   ): Promise<{ emailId: string; added: string[]; removed: string[]; notApplied: string[] }> {
-    const { folder, uid } = parseEmailId(emailId);
+    // Same reasoning as markEmailRead above: the id's own embedded
+    // uidValidity is what actually protects this call, the parameter only
+    // tightens it further.
+    const { folder, uid, uidValidity: idUidValidity } = parseEmailId(emailId);
+    const expectedUidValidity = uidValidity ?? idUidValidity;
     let notApplied: string[] = [];
 
     await this.withTimeout(
       this.withMailbox(folder, false, async (client) => {
-        this.assertMailboxUidValidity(client, uidValidity);
+        this.assertMailboxUidValidity(client, expectedUidValidity);
         if (flagsToAdd.length > 0) {
           await client.messageFlagsAdd(String(uid), flagsToAdd, { uid: true });
         }
@@ -3323,14 +3353,22 @@ export class SimpleIMAPService {
     detail: EmailDetail;
     parsed: ParsedMail;
   }> {
-    const { folder, uid } = parseEmailId(emailId);
+    const { folder, uid, uidValidity: expectedUidValidity } = parseEmailId(emailId);
 
     const { enriched, parsed } = await this.withTimeout(
       this.withMailbox(folder, true, async (client) => {
-        // NOTE: UIDs can be reused after mailbox recreation (UIDVALIDITY change).
-        // assertMailboxUidValidity handles this at the withMailbox level for mutating
-        // ops. For read-only fetches, callers should re-sync after a UIDVALIDITY
-        // change to avoid fetching the wrong message with a recycled UID.
+        // UIDs can be reused after mailbox recreation (UIDVALIDITY change).
+        // This backs content reads used for quoting/forwarding/replying, so a
+        // stale id here isn't just a failed fetch — it silently returns a
+        // *different real message's* content under a freshly-recomputed,
+        // correct-looking-for-that-message new id, with no error at all.
+        // Found live: get_email_by_id on a generation-1 id for UID 42 against
+        // a generation-2 mailbox with a different message at UID 42 returned
+        // that other message's subject/content with no exception. Enforce the
+        // same check mutations already do; an id with no embedded
+        // uidValidity (pre-this-fix format) still no-ops here via
+        // assertMailboxUidValidity's own `if (!expectedUidValidity) return`.
+        this.assertMailboxUidValidity(client, expectedUidValidity);
         const message = await client.fetchOne(String(uid), FETCH_DETAIL_QUERY, { uid: true });
         if (!message || !message.source) {
           throw new Error(`Email not found for id ${emailId}`);
