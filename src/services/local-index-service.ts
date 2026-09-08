@@ -16,6 +16,7 @@ import type {
   ThreadDetail,
   ThreadSummary,
 } from "../types/index.js";
+import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import {
   dedupeEmails,
   extractDomain,
@@ -1209,6 +1210,13 @@ export class LocalIndexService {
     if (this.db && this.initialized) {
       return this.db;
     }
+
+    // Refuse to open this dataDir's SQLite index if it belongs to a
+    // different account than the one currently configured (see
+    // account-identity.ts) — must run before the Database constructor below
+    // ever touches the file, so a mismatched account can never read a
+    // single row of the previous account's index.
+    await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
 
     await mkdir(dirname(this.dbPath), { recursive: true, mode: 0o700 });
     const isFirstOpen = !this.db;

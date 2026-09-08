@@ -3,6 +3,7 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DeliveryQueueKind, DeliveryQueueRecord, ProtonMailConfig, SendEmailInput } from "../types/index.js";
+import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { isProcessAlive, withFileLock } from "../utils/file-lock.js";
 import { ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -53,6 +54,7 @@ export class DeliveryQueueService {
   private _lock: Promise<void> = Promise.resolve();
   private timer?: NodeJS.Timeout;
   private started = false;
+  private identityChecked = false;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -354,6 +356,16 @@ export class DeliveryQueueService {
   // to this instance and never gets its write silently clobbered by a stale
   // in-memory copy on the next save().
   private async loadUnlocked(): Promise<DeliveryQueueFile> {
+    // Refuse to read/write this dataDir's queue if it belongs to a different
+    // account than the one currently configured (see account-identity.ts) —
+    // every read-modify-write path in this service goes through loadUnlocked,
+    // so this is the single choke point that covers all of them. Checked once
+    // per process lifetime; a mismatch throws and is never cached as "ok".
+    if (!this.identityChecked) {
+      await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
+      this.identityChecked = true;
+    }
+
     await this.cleanOrphanedTempFiles();
 
     try {
