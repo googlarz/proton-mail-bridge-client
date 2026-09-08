@@ -1,5 +1,17 @@
 # Changelog
 
+
+## Unreleased
+
+- Enforce action allowlists and destructive confirmation across batch, thread, move, delete, generic flag, and direct CLI routes.
+- Preserve body-text search and reply references during flags-only index refreshes; remove indexed messages when a mailbox is observed empty.
+- Bound incremental backlogs, retain backfill progress, and continue discovering new mail and reconciling old state after full backfill completes.
+- Bound local indexing source reads to 1 MiB per message and 16 MiB per folder per cycle; full email reads/exports are unaffected.
+- Track send/snooze operation owners across processes; recover abandoned operations without risking automatic duplicates.
+- Pause snooze wakes under read-only or archive-disabled policy and prevent duplicate concurrent wake moves.
+- Align declared Node.js support with CI: 20, 22, and 24.
+
+
 All notable changes to this project are documented here.
 
 ## [2.0.0] — 2026-09-08

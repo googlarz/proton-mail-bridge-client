@@ -62,3 +62,10 @@ test('source indexing is bounded per message and per folder', async t => {
  assert.ok(requested<=16*1024*1024);
  assert.equal(result.checkpoint.highestUid,50);
 });
+
+test('full sync discovers the first message after an empty-mailbox checkpoint', () => {
+ const p=plan({highestUid:0,uidValidity:'1',total:0},{full:true,exists:1,uidNext:2});
+ assert.equal(p.startUid,1);
+ assert.equal(p.endUid,1);
+ assert.equal(p.checkpointHighestUid,1);
+});

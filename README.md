@@ -12,7 +12,7 @@
 [![npm version](https://img.shields.io/npm/v/proton-mail-bridge-client?color=%236d4aff&label=npm)](https://www.npmjs.com/package/proton-mail-bridge-client)
 [![CI](https://github.com/googlarz/proton-mail-bridge-client/actions/workflows/ci.yml/badge.svg)](https://github.com/googlarz/proton-mail-bridge-client/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js 18+](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
+[![Node.js 20, 22, 24](https://img.shields.io/badge/node-20%20%7C%2022%20%7C%2024-brightgreen)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet)](https://modelcontextprotocol.io)
 [![GitHub stars](https://img.shields.io/github/stars/googlarz/proton-mail-bridge-client?style=social)](https://github.com/googlarz/proton-mail-bridge-client)
@@ -55,7 +55,7 @@ Download: [proton.me/mail/bridge](https://proton.me/mail/bridge)
 
 > **Bridge password vs Proton password:** Proton Bridge generates a separate local password that is *not* your Proton account password. Find it inside the Bridge app under **Account → Copy password** (or similar — exact label varies by Bridge version). You'll need this for setup.
 
-**2. Node.js 18 or later** — `node --version` to check.
+**2. Node.js 20, 22, or 24** — `node --version` to check.
 
 **3. Your Bridge credentials** — from the Bridge app:
 - IMAP host/port (default: `127.0.0.1:1143`)
@@ -498,3 +498,15 @@ Bug reports and pull requests welcome: [github.com/googlarz/proton-mail-bridge-c
 ## License
 
 MIT
+
+### Synchronization bounds and worker recovery
+
+`sync_emails` respects `limitPerFolder` across the entire batch. Incremental sync advances through a backlog in bounded steps and reconciles deletions in the scanned range. `full:true` shares the batch between new mail and historical backfill, then cycles through history again to refresh old flags and deletions. Large folders need multiple cycles; a successful cycle does not mean every message has been refreshed. An observed empty folder is cleared from the index immediately.
+
+Local body/attachment-text indexing is best effort: source reads are capped at 1 MiB per message and 16 MiB per folder per cycle, divided across the batch. Text beyond these bounds is not guaranteed searchable. Reading or exporting the original email still retrieves its full source.
+
+Snooze wakes obey the current read-only and archive-action policies. Restricted items stay pending with `pausedReason` and resume when allowed, without exhausting retries. Concurrent cancel requests return `waking` while the winning move is in progress.
+
+Send and snooze workers persist an owner PID and a unique operation token. A second process leaves a live owner's operation alone. Operations abandoned by a dead owner are marked failed with an unknown outcome and are not automatically retried. Restart existing MCP processes when updating so all workers use the same ownership protocol.
+
+The action allowlist applies to single-message, bulk, thread, and generic flag routes. Arbitrary moves require `move`; permanent deletions and adding `\Deleted` require `delete`. Under destructive confirmation mode, use `--confirmed` with CLI `batch` and `thread-action` deletes, or `confirmed:true` in tool arguments. Direct CLI reply/forward also honor confirmation and outbound-recipient restrictions.

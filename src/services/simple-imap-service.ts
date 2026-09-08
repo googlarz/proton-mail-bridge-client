@@ -298,12 +298,13 @@ export function planFolderSync(input: {
   }
 
   if (input.full) {
-    const valid = !input.checkpoint?.uidValidity || !input.uidValidity
-      || input.checkpoint.uidValidity === input.uidValidity;
-    const previousHigh = valid && (input.checkpoint?.highestUid ?? 0) <= highestKnownUid
-      ? input.checkpoint?.highestUid : undefined;
-    const priorFloor = valid && previousHigh !== undefined
-      ? input.checkpoint?.backfilledToUid : (valid && !input.checkpoint?.highestUid ? input.checkpoint?.backfilledToUid : undefined);
+    const reset = Boolean(input.checkpoint?.uidValidity && input.uidValidity
+      && input.checkpoint.uidValidity !== input.uidValidity)
+      || (input.checkpoint?.highestUid ?? 0) > highestKnownUid;
+    const previousHigh = !reset && input.checkpoint?.highestUid
+      ? input.checkpoint.highestUid : undefined;
+    const priorFloor = !reset && input.checkpoint?.highestUid !== 0
+      ? input.checkpoint?.backfilledToUid : undefined;
     // Reserve part of each full-sync batch for new mail while the rest walks
     // history. Once history reaches UID 1, cycle again to reconcile old flags
     // and deletions instead of permanently stopping refreshes.

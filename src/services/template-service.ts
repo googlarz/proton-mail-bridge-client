@@ -176,8 +176,7 @@ export class TemplateService {
     }
   }
 
-  // ponytail: same cross-process race as DeliveryQueueService.save — see that
-  // comment for why it's left unlocked and the real upgrade path (SQLite).
+  // Called while holding the cross-process file lock. Rename is atomic.
   private async save(store: TemplateFile): Promise<void> {
     await mkdir(dirname(this.storePath), { recursive: true, mode: 0o700 });
     const tempPath = `${this.storePath}.tmp`;

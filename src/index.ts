@@ -804,7 +804,7 @@ const TOOLS = [
   },
   {
     name: "cancel_snooze",
-    description: "Wake a snoozed email immediately, moving it back to its original folder before wakeAt. No effect (throws) if the snooze has already woken or was already canceled.",
+    description: "Wake a snoozed email immediately, moving it back to its original folder before wakeAt. Returns the existing status if already resolved; returns waking when another request owns the move.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -928,6 +928,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        confirmed: { type: "boolean", description: "Confirm adding the Deleted flag when destructive confirmation is enabled." },
         emailId: { type: "string", description: "Composite email id in FOLDER::UID format." },
         flagsToAdd: {
           type: "array",
@@ -1033,6 +1034,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        confirmed: { type: "boolean", description: "Confirm adding the Deleted flag when destructive confirmation is enabled." },
         emailIds: { type: "array", items: { type: "string" }, description: "Explicit email IDs. XOR with match." },
         match: { type: "object", description: "Search criteria. XOR with emailIds.", properties: { from: { type: "string" }, subject: { type: "string" }, text: { type: "string" }, since: { type: "string" }, before: { type: "string" }, isRead: { type: "boolean" }, isStarred: { type: "boolean" } } },
         folder: { type: "string", description: "Source folder (required with match)." },
@@ -1114,6 +1116,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        confirmed: { type: "boolean", description: "Confirm adding the Deleted flag when destructive confirmation is enabled." },
         messageId: { type: "string", description: "RFC 5322 Message-ID." },
         flagsToAdd: { type: "array", items: { type: "string" } },
         flagsToRemove: { type: "array", items: { type: "string" } },
@@ -1345,7 +1348,7 @@ const TOOLS = [
   },
   {
     name: "sync_emails",
-    description: "Incrementally sync email metadata from IMAP into the local SQLite index, using stored checkpoints to avoid re-fetching already-indexed messages. Use before calling search_indexed_emails or get_threads when the index may be stale. The default incremental sync only ever adds/updates recent messages — it never notices a message that was archived, trashed, or moved out of the synced folder by any client, so search/thread/digest tools can keep showing a message as still present indefinitely. Set full:true (per folder — sync each folder you want cleaned up) to also detect and prune those, in addition to fetching a larger sample. Prefer run_background_sync to trigger the scheduled sync cycle (also incremental-only by default; see PROTONMAIL_AUTO_SYNC_FULL).",
+    description: "Sync IMAP metadata into the local SQLite index in bounded batches. Incremental sync advances new mail and reconciles its scanned UID range. full:true also cycles through historical ranges to backfill and refresh older flags/deletions, while continuing to discover new mail. Repeat for large folders; one call is not a whole-mailbox snapshot. Empty mailboxes are cleared immediately. Body/attachment-text indexing is best effort, capped at 1 MiB source per message and 16 MiB per folder per cycle. Prefer run_background_sync for the configured scheduled cycle.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1702,6 +1705,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        confirmed: { type: "boolean", description: "Confirm adding the Deleted flag when destructive confirmation is enabled." },
         raw: { type: "string", description: "Full raw RFC822 message source (the .eml file content) as a UTF-8 string. Use rawBase64 instead for non-UTF-8 content. Exactly one of raw/rawBase64 is required." },
         rawBase64: { type: "string", description: "Full raw RFC822 message source (the .eml file content), base64-encoded, for byte-exact import of non-UTF-8 content. Exactly one of raw/rawBase64 is required." },
         targetFolder: { type: "string", description: "Destination folder. Defaults to INBOX." },
