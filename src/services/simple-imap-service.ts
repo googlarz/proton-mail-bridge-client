@@ -1124,8 +1124,23 @@ export class SimpleIMAPService {
           this.capMessageCache();
         }
       } else {
-        const endSeq = total - offset;
-        const startSeq = Math.max(1, endSeq - limit + 1);
+        // Found on review: sortByUid only sorted the fetched page afterward
+        // (below) — the *range itself* was always anchored to the newest
+        // end regardless of direction, so "asc" (oldest first) paginated
+        // through progressively OLDER newest-end windows (91-100, then
+        // 81-90) instead of walking forward from the true oldest message
+        // (1-10, then 11-20), contradicting the documented "oldest first"
+        // behavior and never reaching a stable, monotonically-advancing
+        // cursor across pages.
+        let startSeq: number;
+        let endSeq: number;
+        if (input.sortByUid === "asc") {
+          startSeq = offset + 1;
+          endSeq = Math.min(total, startSeq + limit - 1);
+        } else {
+          endSeq = total - offset;
+          startSeq = Math.max(1, endSeq - limit + 1);
+        }
 
         for await (const message of client.fetch(`${startSeq}:${endSeq}`, fetchQuery)) {
           const summary = this.toSummary(folder, message);
@@ -3605,7 +3620,7 @@ export class SimpleIMAPService {
       }
     }
 
-    if (!targetRealPath.startsWith(`${allowedRealPath}/`) && targetRealPath !== allowedRealPath) {
+    if (!targetRealPath.startsWith(`${allowedRealPath}${sep}`) && targetRealPath !== allowedRealPath) {
       throw new Error("outputPath path escapes the allowed directory.");
     }
 

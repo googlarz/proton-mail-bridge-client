@@ -82,9 +82,21 @@ async function isStale(lockPath: string): Promise<boolean> {
       if (alive === false) {
         return true;
       }
-      // Alive, or the probe was inconclusive (unexpected error code) — be
-      // conservative and fall through to the existing age-based check below
-      // rather than assume anything about a PID we can't rule out.
+      if (alive === true) {
+        // Confirmed alive — never steal, no matter how old the lock file
+        // is. Falling through to the age check here (a real, found-live
+        // bug) let a second process steal a live holder's lock after just
+        // 30s of legitimately slow I/O (long-running critical section, or
+        // the process resuming from sleep), silently reintroducing the
+        // lost-update race this lock exists to prevent — the token check in
+        // release() only stops the *original* holder from unlinking a lock
+        // it no longer owns, it doesn't restore mutual exclusion once two
+        // processes are both inside the critical section at once.
+        return false;
+      }
+      // Probe was inconclusive (unexpected error code) — be conservative
+      // and fall through to the existing age-based check below rather than
+      // assume anything about a PID we can't rule out.
     }
     // Malformed/legacy lock content (no parseable PID prefix) also falls
     // through here rather than throwing.

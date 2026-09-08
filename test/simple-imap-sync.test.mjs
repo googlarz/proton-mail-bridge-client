@@ -890,3 +890,44 @@ test("bulkDelete (to Trash) reports failure for a UID that doesn't exist (UIDPLU
   assert.equal(bad.ok, false);
   assert.match(bad.error, /not found/i);
 });
+
+test("getEmails(sortByUid:'asc') paginates forward from the oldest message, not backward from the newest window", async () => {
+  // Reproduces a real bug: sortByUid only sorted the messages *within* a
+  // fetched page, but which page got fetched (the sequence-number range
+  // itself) was always anchored to the mailbox's newest end regardless of
+  // direction. So "asc" (documented "oldest first") with limit:10 returned
+  // seq 91-100 on page one and seq 81-90 on page two — a mailbox of 100
+  // messages, walking backward from the newest end — instead of 1-10 then
+  // 11-20 as the oldest-first contract promises.
+  const service = new SimpleIMAPService(createConfig());
+
+  const requestedRanges = [];
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX", exists: 100 },
+    getMailboxLock: async () => ({ release() {} }),
+    async *fetch(range) {
+      requestedRanges.push(range);
+      const [start, end] = range.split(":").map(Number);
+      for (let seq = start; seq <= end; seq++) {
+        yield {
+          uid: seq,
+          seq,
+          envelope: { subject: `Message ${seq}`, from: [], to: [], cc: [], bcc: [], replyTo: [] },
+          flags: new Set(),
+        };
+      }
+    },
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  const page1 = await service.getEmails({ folder: "INBOX", limit: 10, offset: 0, sortByUid: "asc" });
+  const page2 = await service.getEmails({ folder: "INBOX", limit: 10, offset: 10, sortByUid: "asc" });
+
+  assert.deepEqual(page1.emails.map((e) => e.uid), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "page one must be the oldest 10 messages");
+  assert.deepEqual(page2.emails.map((e) => e.uid), [11, 12, 13, 14, 15, 16, 17, 18, 19, 20], "page two must continue forward, not repeat/regress toward the newest end");
+  assert.deepEqual(requestedRanges, ["1:10", "11:20"]);
+});

@@ -81,6 +81,12 @@ test("a slow holder whose lock was stolen as stale can't delete the new owner's 
 
   try {
     const holderA = withFileLock(storePath, async () => {
+      // Impersonate a dead PID on disk (A's own real token stays held only
+      // in withFileLock's closure, untouched) so B's steal is triggered by
+      // the liveness check — not by age alone, which a confirmed-alive PID
+      // (this test process's own, always A's real encoded PID) can no
+      // longer be stolen on, per the isStale() liveness-override fix.
+      await writeFile(lockPath, "999999-impersonated-dead-holder");
       const old = new Date(Date.now() - 60_000);
       await utimes(lockPath, old, old).catch(() => undefined);
       await new Promise((resolve) => setTimeout(resolve, 80));
@@ -161,6 +167,46 @@ test("a lock file whose encoded PID is confirmed dead is stolen immediately, wit
     assert.equal(ran, true);
     // Should steal near-immediately, not wait out STALE_LOCK_MS (30s).
     assert.ok(Date.now() - start < 2000, "expected the dead-PID lock to be stolen quickly");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a lock file whose encoded PID is confirmed alive is never stolen, even well past STALE_LOCK_MS", async () => {
+  // Reproduces the found-live bug: isStale() checked liveness first, but on
+  // alive===true it fell through to the plain age check anyway — so a
+  // confirmed-alive holder still lost its lock after 30s of legitimately
+  // slow I/O (a long critical section, or the process resuming from sleep),
+  // silently reintroducing the exact lost-update race this lock exists to
+  // prevent. This process's own PID is trivially "alive" from isProcessAlive's
+  // perspective, so it doubles as the live holder here.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-file-lock-alive-pid-test-"));
+  const storePath = join(dataDir, "store.json");
+  const lockPath = `${storePath}.lock`;
+  try {
+    await writeFile(lockPath, `${process.pid}-live-holder-uuid`);
+    // Back-date well past STALE_LOCK_MS (30s) — age alone would call this
+    // stealable; liveness must override that.
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lockPath, old, old);
+
+    let acquired = false;
+    const attempt = withFileLock(storePath, async () => {
+      acquired = true;
+    });
+    // Swallow the eventual timeout/success so it doesn't become an unhandled
+    // rejection once we release the lock below.
+    attempt.catch(() => {});
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(acquired, false, "a confirmed-alive holder's lock must not be stolen regardless of age");
+
+    // Release it as the "holder" would, then confirm the waiting caller can
+    // now proceed normally — this isn't a permanently wedged lock, just
+    // correctly not stealable while the owner is alive.
+    await rm(lockPath, { force: true });
+    await attempt;
+    assert.equal(acquired, true, "once released, the waiting caller should still be able to acquire it");
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
