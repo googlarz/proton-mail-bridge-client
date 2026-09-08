@@ -42,6 +42,7 @@ import {
   summarizeCalendarText,
 } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 
 const FETCH_SUMMARY_QUERY = {
   uid: true,
@@ -551,6 +552,7 @@ export class SimpleIMAPService {
   private _connectingPromise?: Promise<void>;
   private readonly _idleActive = new Map<string, boolean>();
   private consecutiveFastIdleReturns = 0;
+  private identityChecked = false;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -3919,6 +3921,18 @@ export class SimpleIMAPService {
       // explicit-outputPath branch below, which already gets its uniqueness
       // and containment guarantees from the caller (saveAttachments' usedPaths
       // dedup) and guardAttachmentOutputPath.
+      //
+      // This default path writes into config.dataDir with no "which account"
+      // ambiguity check otherwise — unlike the explicit-outputPath branch,
+      // which has no account ambiguity to begin with (the caller names an
+      // exact destination). Same guard as the other dataDir-backed stores
+      // (AuditService, DeliveryQueueService, etc.); SimpleIMAPService isn't a
+      // loadUnlocked()-per-JSON-store class, so it gets its own
+      // once-per-instance flag instead of reusing that pattern.
+      if (!this.identityChecked) {
+        await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
+        this.identityChecked = true;
+      }
       const filename = sanitizeFileName(attachment.filename, attachment.id || "attachment");
       const dirPath = join(this.config.dataDir, "attachments", encodeURIComponent(emailId));
       // 0o700/0o600: this writes the user's own private email content — restrict
@@ -4078,8 +4092,15 @@ export class SimpleIMAPService {
       outputPath,
     );
 
-    const { folder, uid } = parseEmailId(emailId);
+    const { folder, uid, uidValidity: expectedUidValidity } = parseEmailId(emailId);
     const source = await this.withMailbox(folder, true, async (client) => {
+      // Same stale-id protection as getParsedMailDetail: UIDs can be reused
+      // after mailbox recreation (UIDVALIDITY change), so without this check
+      // a stale id here would silently export a different real message's
+      // content under the requested (now-wrong) id. An id with no embedded
+      // uidValidity (pre-this-fix format) still no-ops here via
+      // assertMailboxUidValidity's own `if (!expectedUidValidity) return`.
+      this.assertMailboxUidValidity(client, expectedUidValidity);
       const message = await client.fetchOne(String(uid), { uid: true, source: true }, { uid: true });
       if (!message || !message.source) {
         throw new Error(`Email not found for id ${emailId}`);

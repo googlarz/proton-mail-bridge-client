@@ -585,3 +585,37 @@ test("bulk_update_labels: resolution and execution under the SAME generation —
   assert.equal(result.succeeded, 1);
   assert.equal(result.failed, 0);
 });
+
+// --- Finding 2 (round 5): exportEmail did its own raw parseEmailId +
+// withMailbox/fetchOne instead of routing through the now-protected
+// getParsedMailDetail, so it never called assertMailboxUidValidity — a
+// stale-generation id silently exported a different message's raw source.
+
+test("export_email: a stale-generation id must throw, not silently write a different message's content", async () => {
+  const staleId = createEmailId("INBOX", 42, "1000000001");
+  const state = { uidValidity: "2000000002", uidNext: 100, uid: 42, subject: "A different message", body: "Hi" };
+  const service = createDetailService(state);
+
+  await assert.rejects(
+    () => service.exportEmail(staleId),
+    /before the mailbox changed|no longer points to a valid message/,
+  );
+});
+
+test("export_email: an id minted under the CURRENT UIDVALIDITY still works exactly as before (no regression)", async () => {
+  const currentId = createEmailId("INBOX", 42, "2000000002");
+  const state = { uidValidity: "2000000002", uidNext: 100, uid: 42, subject: "Current message", body: "Hi" };
+  const service = createDetailService(state);
+
+  const result = await service.exportEmail(currentId);
+  assert.equal(result.emailId, currentId);
+});
+
+test("export_email: an OLD-FORMAT id (no embedded uidValidity) still works with no new error (no regression for pre-existing ids)", async () => {
+  const legacyId = createEmailId("INBOX", 42); // 3-field, pre-UIDVALIDITY format
+  const state = { uidValidity: "2000000002", uidNext: 100, uid: 42, subject: "Legacy message", body: "Hi" };
+  const service = createDetailService(state);
+
+  const result = await service.exportEmail(legacyId);
+  assert.equal(result.emailId, legacyId);
+});

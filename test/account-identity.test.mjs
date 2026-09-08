@@ -12,6 +12,8 @@ import { DeliveryQueueService } from "../dist/services/delivery-queue-service.js
 import { AuditService } from "../dist/services/audit-service.js";
 import { DraftStoreService } from "../dist/services/draft-store-service.js";
 import { access, constants as fsConstants } from "node:fs/promises";
+import { SimpleIMAPService } from "../dist/services/simple-imap-service.js";
+import { createEmailId } from "../dist/utils/helpers.js";
 
 function createConfig(dataDir, username) {
   return {
@@ -422,5 +424,126 @@ test("DraftStoreService.clear() still succeeds for the matching account", async 
     const result = await draftsA.clear();
     assert.equal(result.removed, true);
     assert.equal(await pathExists(draftPath), false, "draft store file should be gone after a same-account clear()");
+  });
+});
+
+// --- Finding 1 (round 5): saveAttachment/saveAttachments' default (no
+// explicit outputPath) write path never checked account identity before
+// writing into config.dataDir — a second account pointed at the same
+// dataDir could silently write its attachment content into the first
+// account's directory tree with no rejection.
+
+const quietLogger = { debug() {}, info() {}, warn() {}, error() {} };
+
+function attachmentSource(subject) {
+  return Buffer.from(
+    [
+      "From: alice@example.com",
+      "To: owner@example.com",
+      `Subject: ${subject}`,
+      "MIME-Version: 1.0",
+      'Content-Type: multipart/mixed; boundary="BOUNDARY"',
+      "",
+      "--BOUNDARY",
+      "Content-Type: text/plain",
+      "",
+      "Body text here",
+      "",
+      "--BOUNDARY",
+      'Content-Type: text/plain; name="test.txt"',
+      'Content-Disposition: attachment; filename="test.txt"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from("hello world").toString("base64"),
+      "",
+      "--BOUNDARY--",
+      "",
+    ].join("\r\n"),
+  );
+}
+
+function createAttachmentFakeClient(subject) {
+  const raw = attachmentSource(subject);
+  return {
+    usable: true,
+    capabilities: new Set(["UIDPLUS"]),
+    mailbox: false,
+    async getMailboxLock(folder) {
+      this._selected = folder;
+      this.mailbox = { uidValidity: "2000000002", exists: 1, uidNext: 100 };
+      return { release: () => {} };
+    },
+    async fetchOne(range) {
+      const uid = Number(range);
+      if (uid !== 42) return false;
+      return {
+        uid,
+        seq: 1,
+        flags: ["\\Seen"],
+        envelope: { subject, from: [], to: [], cc: [], bcc: [], replyTo: [] },
+        bodyStructure: {},
+        source: raw,
+      };
+    },
+  };
+}
+
+function createImapService(dataDir, username) {
+  // Legacy (no embedded uidValidity) id: sidesteps the unrelated round-4
+  // UIDVALIDITY check entirely, so this test isolates Finding 1's identity
+  // check from Finding 2's stale-id check.
+  const emailId = createEmailId("INBOX", 42);
+  const service = new SimpleIMAPService(createConfig(dataDir, username), quietLogger, 0);
+  service.client = createAttachmentFakeClient("Attachment test");
+  return { service, emailId };
+}
+
+test("saveAttachment (no outputPath): account A's marker exists, service configured for account B against the SAME dataDir — throws and writes nothing", async () => {
+  await withTempDir(async (dataDir) => {
+    await ensureAccountIdentityMatches(dataDir, "accountA@example.com");
+
+    const { service, emailId } = createImapService(dataDir, "accountB@example.com");
+    await assert.rejects(
+      () => service.saveAttachment(emailId, "test.txt"),
+      (error) => {
+        assert.ok(error instanceof AccountIdentityMismatchError);
+        assert.match(error.message, /accounta@example\.com/);
+        assert.match(error.message, /accountb@example\.com/);
+        return true;
+      },
+    );
+
+    // No attachment content was written into account A's dataDir.
+    await assert.rejects(() => readFile(join(dataDir, "attachments", encodeURIComponent(emailId), "test.txt")));
+  });
+});
+
+test("saveAttachments (no outputPath): account A's marker exists, service configured for account B against the SAME dataDir — throws and writes nothing", async () => {
+  await withTempDir(async (dataDir) => {
+    await ensureAccountIdentityMatches(dataDir, "accountA@example.com");
+
+    const { service, emailId } = createImapService(dataDir, "accountB@example.com");
+    await assert.rejects(
+      () => service.saveAttachments({ emailId }),
+      (error) => {
+        assert.ok(error instanceof AccountIdentityMismatchError);
+        return true;
+      },
+    );
+
+    await assert.rejects(() => readFile(join(dataDir, "attachments", encodeURIComponent(emailId), "test.txt")));
+  });
+});
+
+test("saveAttachment (no outputPath): matching account still writes successfully (no regression)", async () => {
+  await withTempDir(async (dataDir) => {
+    await ensureAccountIdentityMatches(dataDir, "accountA@example.com");
+
+    const { service, emailId } = createImapService(dataDir, "accountA@example.com");
+    const result = await service.saveAttachment(emailId, "test.txt");
+    assert.equal(result.attachment.filename, "test.txt");
+
+    const written = await readFile(join(dataDir, "attachments", encodeURIComponent(emailId), result.outputPath));
+    assert.equal(written.toString("utf8"), "hello world");
   });
 });
