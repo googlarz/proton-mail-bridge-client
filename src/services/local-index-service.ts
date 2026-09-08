@@ -1367,13 +1367,13 @@ export class LocalIndexService {
     const insertFts = db.prepare(`
       INSERT INTO messages_fts (
         email_id, subject, preview, folder, labels, participants, attachment_names
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ) SELECT ?, ?, preview, ?, ?, ?, ? FROM messages WHERE email_id = ?
     `);
     const setMetadata = db.prepare(`
       INSERT INTO metadata (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `);
-    const getStoredSyncState = db.prepare(`SELECT uid_validity FROM sync_state WHERE folder = ?`);
+    const getStoredSyncState = db.prepare(`SELECT uid_validity, backfilled_to_uid FROM sync_state WHERE folder = ?`);
     const deleteFtsForFolder = db.prepare(`
       DELETE FROM messages_fts
       WHERE email_id IN (SELECT email_id FROM messages WHERE folder = ?)
@@ -1395,6 +1395,10 @@ export class LocalIndexService {
         const stored = getStoredSyncState.get(folderStat.folder) as { uid_validity?: string | null } | undefined;
         const storedUidValidity = stored?.uid_validity ?? null;
         const serverUidValidity = folderStat.uidValidity ?? null;
+        if (folderStat.strategy === "empty" && folderStat.total === 0) {
+          deleteFtsForFolder.run(folderStat.folder);
+          deleteMessagesForFolder.run(folderStat.folder);
+        }
         if (storedUidValidity && serverUidValidity && storedUidValidity !== serverUidValidity) {
           this.log.warn(
             `UIDVALIDITY changed for folder ${folderStat.folder}, clearing local index.`,
@@ -1431,6 +1435,7 @@ export class LocalIndexService {
 
       for (const folderStat of input.folderStats) {
         const resetCheckpoint = foldersWithResetCheckpoint.has(folderStat.folder);
+        const previous = getStoredSyncState.get(folderStat.folder) as { backfilled_to_uid?: number } | undefined;
         upsertSyncState.run({
           folder: folderStat.folder,
           uid_validity: resetCheckpoint ? null : folderStat.uidValidity ?? null,
@@ -1445,7 +1450,8 @@ export class LocalIndexService {
           changed: folderStat.changed ? 1 : 0,
           fetched: folderStat.fetched ?? null,
           total: folderStat.total ?? null,
-          backfilled_to_uid: resetCheckpoint ? null : folderStat.backfilledToUid ?? null,
+          backfilled_to_uid: resetCheckpoint || folderStat.strategy === "empty"
+            ? null : folderStat.backfilledToUid ?? previous?.backfilled_to_uid ?? null,
         });
       }
 
@@ -1483,11 +1489,11 @@ export class LocalIndexService {
         insertFts.run(
           email.id,
           email.subject,
-          email.preview ?? "",
           email.folder,
           search.labels,
           search.participants,
           search.attachmentNames,
+          email.id,
         );
       }
 
