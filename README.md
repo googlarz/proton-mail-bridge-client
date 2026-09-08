@@ -26,6 +26,8 @@
 
 Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 95 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
 
+> **Battle-tested at scale (v2.0.0):** full mailbox backfill validated end-to-end against a real account with 57,000+ indexed messages across 62 folders/labels — including a 22,800-message Archive folder backfilled from scratch, UID-window by UID-window, with zero data loss across restarts, transient IMAP disconnects, and connection timeouts.
+
 ## What you get
 
 - **Claude reads and manages your Proton Mail** — triage, reply, draft, archive, search, move, batch-act on threads, pull attachments

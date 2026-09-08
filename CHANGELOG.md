@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.0] — 2026-09-08
+
+Major version bump: the full-mailbox backfill mechanism was broken through v1.19.5 and is fixed here, then validated live against a real account with 57,000+ indexed messages across 62 folders/labels — including a from-scratch, UID-window-by-window backfill of a 22,836-message Archive folder to completion, with zero data loss across restarts, transient IMAP disconnects, and request timeouts. This is the first release where `sync_emails({full:true})` on a large pre-existing folder actually works end-to-end rather than silently looping on the newest window or deleting older mail.
+
+### Fixed
+- **Full sync could never backfill folder history, and silently deleted it.** `full:true` always fetched the newest N UIDs from scratch on every call, ignoring any previous progress — and expunge-detection compared each freshly-fetched window against *every* stored message in the folder, so each new backfill window deleted everything outside itself. Repeated `full:true` calls converged to only the last-fetched window, making a large pre-existing folder (tens of thousands of messages) permanently unindexable beyond its newest slice. Now tracks a `backfilledToUid` checkpoint and walks the mailbox backward one window at a time, restarting cleanly if `UIDVALIDITY` changes, with expunge-detection scoped strictly to the UID range just re-scanned.
+- **`backfilledToUid` read back from SQLite as `NULL` broke the very first backfill call after a restart.** `NULL` mapped to JavaScript `null` instead of `undefined`, and `null <= 1` evaluates to `true` — so the very first post-restart backfill call looked like backfill was already complete and fetched nothing.
+- **`get_index_status` reported `storedMessageCount`/`dedupedMessageCount` capped at 5000** regardless of actual index size — it read off the thread-builder snapshot (deliberately capped for performance) instead of a real `COUNT(*)`. A 45,000-message index reported exactly 5000 stored messages.
+- **`sync_emails` silently ignored its own `folder`/`full`/`limitPerFolder`/`includeAttachmentText` arguments** and always ran whatever the background auto-sync was already configured for — calling `sync_emails({folder:"Archive", full:true})` had no effect at all.
+- **`bulk_update_labels` (and other bulk operations) failed completely on a single transient IMAP/IDLE disconnect** that `bulk_delete` recovered from automatically — the UID-matching search path inside `resolveUidsForBulkOp` had no reconnect-and-retry, unlike every other mutation.
+
 ## [1.19.5] — 2026-09-07
 
 Follow-up fixes from a final hacker/security/performance/senior-dev review pass of the v1.19.4 changes.
