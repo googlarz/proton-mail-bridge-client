@@ -77,6 +77,11 @@ const FETCH_INDEX_DETAIL_QUERY = {
 } as const;
 
 const MAX_ATTACHMENT_TEXT_BYTES = 512_000;
+// searchEmails' local-filter branch batches its detail fetch independently of the
+// caller's result `limit` (see the comment above that loop) — this is the floor on
+// each network batch so a small limit (e.g. 1) can't degrade into one `fetch` call
+// per candidate.
+export const SEARCH_FILTER_BATCH_SIZE = 50;
 // A healthy IMAP IDLE blocks until a mailbox change or the requested timeout.
 // If client.idle() returns faster than this with no events, IDLE never actually
 // engaged (e.g. imapflow's `idling` flag stuck true after Proton Bridge ended
@@ -1266,22 +1271,45 @@ export class SimpleIMAPService {
         // return nothing, even though a true match exists.
         //
         // Fix: order every candidate newest-first by INTERNALDATE (same cheap header
-        // fetch as above), then walk it in `limit`-sized bounded batches — fetch a
-        // batch, apply the FULL filter (matchesLocalSearchFilters included) to it, keep
-        // genuine matches, and continue to the next batch only if `limit` genuine
-        // matches haven't been found yet. This mirrors the bounded-batch/resume-cursor
-        // reasoning used for large incremental-sync gaps: bound the work done per call
-        // instead of fetching the entire broad candidate set regardless of `limit`.
+        // fetch as above), then walk it in bounded batches — fetch a batch, apply the
+        // FULL filter (matchesLocalSearchFilters included) to it, keep genuine matches,
+        // and continue to the next batch only if `limit` genuine matches haven't been
+        // found yet. This mirrors the bounded-batch/resume-cursor reasoning used for
+        // large incremental-sync gaps: bound the work done per call instead of fetching
+        // the entire broad candidate set regardless of `limit`.
+        //
+        // The batch SIZE is deliberately not just `limit` — a caller asking for a small
+        // number of RESULTS (e.g. limit:1) shouldn't force pathologically small network
+        // batches when nothing matches (worst case: one `fetch` call per candidate).
+        // SEARCH_FILTER_BATCH_SIZE is a floor under `limit` for the actual batch size;
+        // the early-stop-once-`limit`-matches-are-found behavior above is unaffected.
+        const batchSize = Math.max(limit, SEARCH_FILTER_BATCH_SIZE);
+
+        // FETCH_INDEX_QUERY's response already includes BODYSTRUCTURE, which is enough
+        // to resolve hasAttachment (see extractAttachments/toSummary) without fetching
+        // full detail again — so when hasAttachment is the filter, resolve it here and
+        // drop the candidates that already fail it, before they ever reach the detail
+        // fetch loop below.
+        const needsAttachmentPrefilter = typeof input.hasAttachment === "boolean";
         const dated: { uid: number; date: number }[] = [];
+        const hasAttachmentByUid = needsAttachmentPrefilter ? new Map<number, boolean>() : undefined;
         for await (const message of client.fetch(uids, FETCH_INDEX_QUERY, { uid: true })) {
           dated.push({ uid: message.uid, date: new Date(message.internalDate ?? 0).getTime() });
+          if (hasAttachmentByUid) {
+            hasAttachmentByUid.set(message.uid, extractAttachments(message.bodyStructure).length > 0);
+          }
         }
-        const orderedUids = pickNewestUids(dated, dated.length);
+        let orderedUids = pickNewestUids(dated, dated.length);
+        if (hasAttachmentByUid) {
+          orderedUids = orderedUids.filter(
+            (uid) => hasAttachmentByUid.get(uid) === input.hasAttachment,
+          );
+        }
 
         const results: EmailSummary[] = [];
         let moreRemain = false;
-        for (let offset = 0; offset < orderedUids.length; offset += limit) {
-          const batch = orderedUids.slice(offset, offset + limit);
+        for (let offset = 0; offset < orderedUids.length; offset += batchSize) {
+          const batch = orderedUids.slice(offset, offset + batchSize);
           for await (const message of client.fetch(batch, fetchQuery, { uid: true })) {
             const summary = this.toSummary(folder, message, uidValidity);
             const enriched =
@@ -1295,7 +1323,7 @@ export class SimpleIMAPService {
             }
           }
           if (results.length >= limit) {
-            moreRemain = offset + limit < orderedUids.length;
+            moreRemain = offset + batchSize < orderedUids.length;
             break;
           }
         }

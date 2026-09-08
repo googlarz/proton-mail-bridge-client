@@ -9,6 +9,7 @@ import {
   mapHeaderValue,
   pickNewestUids,
   planFolderSync,
+  SEARCH_FILTER_BATCH_SIZE,
   SimpleIMAPService,
 } from "../dist/services/simple-imap-service.js";
 
@@ -1266,7 +1267,7 @@ function makeSearchFakeClient(messages) {
       flags: new Set(),
       labels: [],
       bodyStructure: m.hasAttachment
-        ? { disposition: "attachment", parameters: { filename: "invoice.pdf" } }
+        ? { disposition: "attachment", parameters: { filename: m.attachmentFilename || "invoice.pdf" } }
         : {},
     };
   }
@@ -1327,7 +1328,7 @@ test("searchEmails(hasAttachment:true, limit:1) finds an older genuine match ins
   assert.deepEqual(result2.emails.map((e) => e.uid), [1]);
 });
 
-test("searchEmails with a local filter scans candidates in bounded limit-sized batches, newest-matching-first, without fetching everything up front", async () => {
+test("searchEmails with a local filter scans candidates in bounded batches, newest-matching-first, without fetching everything up front", async () => {
   // Six candidates, newest (uid 6) to oldest (uid 1); only uid 4 and uid 1
   // genuinely have an attachment, spread across what would have been
   // different newest-N batches under the old bug.
@@ -1350,14 +1351,19 @@ test("searchEmails with a local filter scans candidates in bounded limit-sized b
   );
 
   const fullBatches = fetchCalls.filter((c) => !c.isHeaderOnly);
-  // Bounded batches of size <= limit (2), not one fetch of the entire candidate set.
+  const expectedBatchSize = Math.max(2, SEARCH_FILTER_BATCH_SIZE);
+  // Bounded batches of size <= max(limit, SEARCH_FILTER_BATCH_SIZE), never the
+  // entire raw candidate set (only the 2 genuine hasAttachment matches survive
+  // the BODYSTRUCTURE prefilter here, so both fit in a single such batch).
   for (const batch of fullBatches) {
-    assert.ok(batch.uids.length <= 2, `batch fetched ${batch.uids.length} uids, expected <= limit (2)`);
+    assert.ok(
+      batch.uids.length <= expectedBatchSize,
+      `batch fetched ${batch.uids.length} uids, expected <= ${expectedBatchSize}`,
+    );
   }
-  assert.ok(fullBatches.length >= 2, "must have scanned more than one batch to find both spread-out matches");
   assert.ok(
     !fullBatches.some((batch) => batch.uids.length === messages.length),
-    "must never fetch the entire candidate set in a single batch",
+    "must never fetch the entire raw candidate set in a single batch",
   );
 });
 
@@ -1375,4 +1381,87 @@ test("searchEmails hasMore/totalMatched are not misleading when a local filter i
   // and hasMore must be false since there is nothing further to find.
   assert.equal(result.totalMatched, 1);
   assert.equal(result.hasMore, false);
+});
+
+// --- searchEmails local-filter small-limit fetch-batching regression tests ----
+//
+// Reproduces a real bug: the local-filter branch's detail-fetch batch size was
+// set directly to the caller's requested result `limit`, with no minimum. With
+// limit:1 and no genuine matches, this issued one `client.fetch` call PER
+// CANDIDATE instead of reasonably-sized network batches.
+
+test("searchEmails(hasAttachment:true, limit:1) no longer issues one fetch call per candidate when nothing matches (200 candidates)", async () => {
+  const messages = [];
+  for (let uid = 1; uid <= 200; uid++) {
+    messages.push({ uid, internalDate: new Date(2026, 0, uid), hasAttachment: false });
+  }
+  const { service, fetchCalls } = createServiceForSearchTest(messages);
+
+  const result = await service.searchEmails({ folder: "INBOX", hasAttachment: true, limit: 1 });
+
+  assert.deepEqual(result.emails, [], "nothing genuinely matches");
+
+  // Under the old bug this would be 1 (header pass) + 200 (one per candidate) = 201.
+  // Bounded batching alone (SEARCH_FILTER_BATCH_SIZE=50) would cap this around
+  // 1 + ceil(200/50) = 5; the BODYSTRUCTURE-reuse optimization below rules out
+  // every candidate during the header pass itself, so no detail batch runs at all.
+  assert.ok(
+    fetchCalls.length < 201,
+    `expected a bounded fetch call count, got ${fetchCalls.length} (the old bug produced 201)`,
+  );
+  assert.ok(
+    fetchCalls.length <= 1 + Math.ceil(200 / SEARCH_FILTER_BATCH_SIZE),
+    `expected at most 1 + ceil(200/${SEARCH_FILTER_BATCH_SIZE}) fetch calls, got ${fetchCalls.length}`,
+  );
+});
+
+test("searchEmails skips the detail-fetch loop entirely when BODYSTRUCTURE already rules out every candidate's hasAttachment", async () => {
+  const messages = [];
+  for (let uid = 1; uid <= 200; uid++) {
+    messages.push({ uid, internalDate: new Date(2026, 0, uid), hasAttachment: false });
+  }
+  const { service, fetchCalls } = createServiceForSearchTest(messages);
+
+  await service.searchEmails({ folder: "INBOX", hasAttachment: true, limit: 1 });
+
+  const fullDetailBatches = fetchCalls.filter((c) => !c.isHeaderOnly);
+  assert.equal(
+    fullDetailBatches.length,
+    0,
+    "hasAttachment is fully resolvable from the header pass' BODYSTRUCTURE, so the detail-fetch loop should never run",
+  );
+  // Only the single header-only pass (which already carries BODYSTRUCTURE) ran.
+  assert.equal(fetchCalls.length, 1);
+});
+
+test("searchEmails' local-filter batch size is decoupled from a small `limit` for filters BODYSTRUCTURE alone can't resolve (attachmentName)", async () => {
+  const messages = [];
+  for (let uid = 2; uid <= 121; uid++) {
+    messages.push({ uid, internalDate: new Date(2026, 0, uid), hasAttachment: false });
+  }
+  // The oldest candidate (uid 1) is the only genuine match, forcing a scan
+  // across every batch before it's found.
+  messages.unshift({
+    uid: 1,
+    internalDate: new Date(2026, 0, 1),
+    hasAttachment: true,
+    attachmentFilename: "special-report.pdf",
+  });
+
+  const { service, fetchCalls } = createServiceForSearchTest(messages);
+  const result = await service.searchEmails({ folder: "INBOX", attachmentName: "special", limit: 1 });
+
+  assert.deepEqual(result.emails.map((e) => e.uid), [1]);
+
+  const fullDetailBatches = fetchCalls.filter((c) => !c.isHeaderOnly);
+  for (const batch of fullDetailBatches) {
+    assert.ok(
+      batch.uids.length <= SEARCH_FILTER_BATCH_SIZE,
+      `batch fetched ${batch.uids.length} uids, expected <= SEARCH_FILTER_BATCH_SIZE (${SEARCH_FILTER_BATCH_SIZE})`,
+    );
+  }
+  // 121 candidates at batch size 50 needs 3 batches to reach the oldest (last)
+  // one — never 121 one-per-candidate fetches, and never a single batch covering
+  // everything regardless of the small `limit`.
+  assert.equal(fullDetailBatches.length, 3);
 });
