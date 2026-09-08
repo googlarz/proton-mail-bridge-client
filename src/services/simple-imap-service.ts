@@ -2591,6 +2591,12 @@ export class SimpleIMAPService {
           const enriched = message.source
             ? this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), input.includeAttachmentText)
             : summary;
+          if (message.source && (message.size ?? Number.POSITIVE_INFINITY) > message.source.length) {
+            // A partial MIME body cannot supply authoritative attachment sizes
+            // or a complete attachment list; keep the server's BODYSTRUCTURE.
+            enriched.attachments = summary.attachments;
+            enriched.hasAttachments = summary.hasAttachments;
+          }
           emails.push(enriched);
           this.messageCache.set(enriched.id, enriched);
           this.capMessageCache();

@@ -75,3 +75,13 @@ test('full sync discovers the first message after an empty-mailbox checkpoint', 
  assert.equal(p.endUid,1);
  assert.equal(p.checkpointHighestUid,1);
 });
+
+test('partial source indexing preserves authoritative attachment metadata', async t => {
+ const imap=new SimpleIMAPService(await fixture(t),quietLog);
+ const attachments=[{id:'1',filename:'large.bin',size:5000000,contentType:'application/octet-stream'}];
+ imap.toSummary=()=>({id:'INBOX::1',uid:1,folder:'INBOX',attachments,hasAttachments:true});
+ const source=Buffer.from('Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename="large.bin"\r\n\r\npartial');
+ imap.withMailbox=async(_folder,_readOnly,fn)=>fn({mailbox:{uidNext:2,uidValidity:1n,exists:1},async *fetch(){yield {uid:1,size:5000200,source};}});
+ const result=await imap.collectFolderForIndex('INBOX',{full:false,limit:1,includeAttachmentText:false,syncedAt:new Date().toISOString()});
+ assert.deepEqual(result.emails[0].attachments,attachments);
+});
