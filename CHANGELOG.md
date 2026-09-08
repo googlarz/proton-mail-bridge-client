@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.2] — 2026-09-08
+
+Ten findings (6 P1, 4 P2) plus a performance issue and two static-analysis notes from a second, independent external review, fixed and verified with new regression tests (197 → 215). One P1 (a UIDVALIDITY-unsafe email ID scheme) is deliberately deferred — see "Known limitation" below.
+
+### Fixed — Security
+- **`send_test_email` bypassed destructive confirmation and `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF`** — unlike every other outbound-send path, it accepted any recipient and free-text body with no confirmation and no self-address enforcement.
+- **A confirmed-alive process's file lock could still be stolen after 30 seconds.** `isStale()` checked PID liveness first, but on a confirmed-alive result fell through to the plain age check anyway — a legitimately slow holder (long critical section, or resuming from sleep) could have its lock stolen out from under it, reintroducing the exact lost-update race the lock exists to prevent.
+- **`guardAttachmentOutputPath`'s containment check still hardcoded `/`** while its own ENOENT fallback branch two lines above it already correctly used the platform path separator — a valid Windows path inside the allowed directory could be rejected as escaping it.
+- **`move_email`/`bulk_move` bypassed the per-action allowlist**, checking only read-only mode.
+
+### Fixed — Data integrity
+- **Switching Proton accounts with the same `PROTONMAIL_DATA_DIR` exposed the previous account's data.** Nothing checked whether the on-disk SQLite index, delivery queue, snooze, draft, or template store actually belonged to the currently-configured account — reproduced live: a second instance read a private phrase from a different account's index, and handed a different account's still-pending queued send to the wrong SMTP transport. Now writes and verifies a small account-identity marker before any store is opened, refusing with a clear error on mismatch (existing pre-fix data adopts the current account as authoritative going forward — this protects future opens, not a pre-existing collision).
+- **`send_draft` could deliver the same draft twice** when called concurrently — no atomic claim existed between reading `draft.status` and the final `markSent` write. A scheduled send that already fired also left the draft's own status stuck at `"draft"` forever, so a later manual `send_draft` call passed every guard and delivered a genuine second copy. Both paths now share one atomic claim (`draft → sending → sent`).
+- **`bulk_delete`/`bulk_update_flags`/`bulk_update_labels`'s batch-size limit was validated against a different set than what actually executed** — a match-based bulk operation resolved its criteria twice (once for the size check, once to execute), and the mailbox could change between the two IMAP round trips. Now resolves to a concrete UID set exactly once and executes against that same set.
+- **Default (no explicit `outputPath`) attachment saves silently overwrote same-named files** — two attachments sharing a filename, in one message or across separate saves, clobbered each other while the tool still reported both as successfully saved. Now uses atomic exclusive file creation with a numeric-suffix fallback on collision.
+- **Threads beyond the first 5,000 indexed messages silently disappeared from `getThreads`/`getThreadById`**, since both built their view from a capped 5,000-message snapshot — a query that plain `search()` still found correctly returned empty, and a previously-valid `threadId` could throw "Thread not found" once the index grew past the cap. Thread lookup and filtered search now query SQLite directly, unbounded by the cap.
+- **`getSyncCheckpointMap`/`getStatus` deserialized up to 5,000 message rows just to read sync checkpoints or folder metadata** — measured at 5,000 needless calls per checkpoint read. Both now query only what they need.
+
+### Known limitation (tracked, deliberately not fixed this release — needs dedicated design work)
+- **The email ID scheme (`folder::uid::checksum`) has no protection against a UIDVALIDITY change.** After a mailbox generation change (full recreation, some migration scenarios), an old, checksum-valid ID for a UID can silently resolve to a completely different message now occupying that UID. `assertMailboxUidValidity` already exists and works correctly when given an expected value, but nothing currently supplies one. A fix requires extending the ID format (with a documented backward-compatible parse path for existing IDs) and threading the expected value through every single-message and bulk mutation — a real design task, not a surgical patch, and deliberately not forced through under time pressure this release.
+
 ## [2.0.1] — 2026-09-08
 
 Nine findings from an independent external code review of v2.0.0 (5 P1, 4 P2), fixed and verified with 15 new regression tests (180 → 195).
