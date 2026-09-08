@@ -197,6 +197,54 @@ export class DeliveryQueueService {
       });
       if (!claimed) continue;
 
+      // Found live: this scheduled send's own queue record was claimed
+      // ("pending" -> "sending") above, but the DRAFT it came from stayed
+      // "draft" until AFTER SMTP had already succeeded — draftStore's own
+      // claimForSending() call used to live down in the success branch. That
+      // left a real window, for however long SMTP takes, where a concurrent
+      // manual send_draft on the same draft saw nothing blocking it, claimed
+      // the draft itself, and sent it too: two SMTP deliveries for one
+      // draft. The draft is now claimed BEFORE calling SMTP, mirroring
+      // exactly how send_draft's own handler in index.ts already does it —
+      // claim, then send, with a revert on failure — so the two paths race
+      // on the same lock instead of racing past each other.
+      let claimedDraft: Awaited<ReturnType<DraftStoreService["claimForSending"]>> | undefined;
+      if (claimed.sourceDraftId && this.draftStore) {
+        try {
+          claimedDraft = await this.draftStore.claimForSending(claimed.sourceDraftId);
+        } catch (draftClaimError) {
+          // Someone else — most likely a manual send_draft — already claimed
+          // or sent this draft first. This scheduled fire lost the race:
+          // sending now would duplicate whatever the other path already did
+          // or is doing, so this item must NOT proceed to SMTP. Its queue
+          // record did win its own claim above, though, so it can't be left
+          // "sending" forever either. There's no queue status that means
+          // "skipped, not actually a failure" — reusing "failed" (like the
+          // ambiguous-timeout case below already does) with a message that
+          // says plainly this was a lost race, not a delivery failure, is
+          // the least surprising fit: callers checking list_scheduled_sends
+          // see the item resolved rather than stuck, and the message makes
+          // clear no email was sent along this path.
+          this.log.warn(
+            "Scheduled send's source draft was already claimed or sent via another path — skipping this queued item without calling SMTP",
+            "DeliveryQueueService",
+            { id, draftId: claimed.sourceDraftId, error: draftClaimError },
+          );
+          await this.withLock(async () => {
+            const store = await this.loadUnlocked();
+            const record = store.items[id];
+            if (record && record.status === "sending") {
+              record.status = "failed";
+              record.failureReason =
+                "Skipped: the source draft was already sent (or is being sent) via another path, most likely a manual send_draft call that won the race. This scheduled send did not call SMTP and did not deliver a duplicate.";
+              await this.save(store);
+            }
+          });
+          failed += 1;
+          continue;
+        }
+      }
+
       try {
         // Runtime policy (allowSend/readOnly/restrictOutboundToSelf) is only
         // checked at enqueue time by the tool handler — re-check it here too,
@@ -231,39 +279,25 @@ export class DeliveryQueueService {
         });
         sent += 1;
 
-        // Found live: a scheduled send that fired here never told
-        // DraftStoreService about it — the queue record went "sent" but the
-        // source draft's own status stayed "draft" forever, so a later
-        // manual send_draft on the same draft delivered a genuine duplicate.
-        // Route this through the same claimForSending()/markSent() pair
-        // send_draft uses, so both paths share one source of truth for
-        // "has this draft already been sent".
-        if (claimed.sourceDraftId && this.draftStore) {
-          try {
-            const claimedDraft = await this.draftStore.claimForSending(claimed.sourceDraftId);
-            await this.draftStore.markSent(claimedDraft.id, {
-              messageId: result.messageId,
-              accepted: result.accepted,
-              rejected: result.rejected,
-              response: result.response,
-            });
-          } catch (draftError) {
-            // The only expected failure here is the draft already being
-            // "sent" or "sending" — e.g. a manual send_draft raced this
-            // scheduled fire and won. That's a legitimate race the other
-            // direction (mail already went out through the manual path, or
-            // is about to), not this checkDue() pass's problem to fix —
-            // the delivery-queue record above is already correctly "sent"
-            // regardless. Log and move on rather than throwing, since the
-            // actual email send already succeeded.
-            this.log.warn(
-              "Scheduled send fired but its source draft could not be marked sent",
-              "DeliveryQueueService",
-              { draftId: claimed.sourceDraftId, error: draftError },
-            );
-          }
+        // The draft was already claimed above, before SMTP — mark it sent
+        // now that delivery has actually completed, so both this path and
+        // send_draft share one source of truth for "has this draft already
+        // been sent".
+        if (claimedDraft) {
+          await this.draftStore!.markSent(claimedDraft.id, {
+            messageId: result.messageId,
+            accepted: result.accepted,
+            rejected: result.rejected,
+            response: result.response,
+          });
         }
       } catch (error) {
+        // SMTP failed (or timed out) after the draft claim succeeded above —
+        // revert it so the draft isn't stuck in "sending" forever, exactly
+        // like send_draft's own catch handler does for the same failure.
+        if (claimedDraft) {
+          await this.draftStore!.revertSending(claimedDraft.id);
+        }
         const rawMessage = error instanceof Error ? error.message : String(error);
         // withTimeout() races the send against a timer — it can't actually
         // cancel sendMail() (SMTP over a network socket has no cancellation
