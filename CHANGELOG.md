@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.1] — 2026-09-08
+
+Nine findings from an independent external code review of v2.0.0 (5 P1, 4 P2), fixed and verified with 15 new regression tests (180 → 195).
+
+### Fixed — Security
+- **`batch_email_action`/`apply_thread_action` could permanently delete messages while bypassing `confirmDestructive`** — `delete_email` already required `confirmed:true` for a permanent delete, but the batch and thread-scoped delete paths dispatched straight to the same underlying deletion without that check.
+- **`move_email`/`bulk_move` bypassed the per-action allowlist (`PROTONMAIL_ALLOWED_ACTIONS`)**, checking only read-only mode — an account restricted to e.g. `["mark_read"]` could still move any message anywhere, including to Trash.
+- **A pending snooze could still move mail after a restart into read-only mode.** `SnoozeService.wake()` had no fire-time runtime-policy recheck, unlike `DeliveryQueueService`'s equivalent send-time check — a snooze created while writes were allowed would still execute post-restart even if the server came back up read-only.
+
+### Fixed — Data integrity
+- **A flags-only (metadata-only) sync could silently remove a message's body from full-text search.** The FTS index was deleted and reinserted using the incoming (empty) preview/attachment text instead of the merged value the `messages` table's own `COALESCE` had just preserved — search could go from matching to zero results even though the stored row was intact.
+- **`sync_emails({full:true})` permanently stopped discovering new mail once a folder finished backfilling to UID 1** — exactly the scenario from this project's own from-scratch Archive backfill. Now tops up with a bounded fetch of anything newer than the last known top once backfill completes.
+- **Concurrent snooze wakes (e.g. a timer firing while a manual cancel is in flight) could both issue the same IMAP move.** Only the caller that actually wins the pending→waking claim now proceeds to move mail; a losing caller waits for that outcome instead of issuing a second network call.
+- **Starting a second server instance against the same data directory could corrupt the first instance's live in-flight send or wake**, marking an active send `failed` or resetting an active wake to `pending` even though the owning process was still alive and about to complete it. Both queues now stamp the claiming process's PID and only reclaim a record whose owner is confirmed dead (reusing the same liveness check `file-lock.ts` already uses for stale-lock detection).
+- **Syncing a folder the server reports as genuinely empty (`exists === 0`) never removed that folder's previously-indexed messages**, since cleanup only ran for a fetched UID range and the `"empty"` strategy fetches none. Distinguished from a merely-ambiguous "no known top UID" case so a connection error can never be mistaken for a real empty-mailbox observation.
+- **Incremental sync ignored its own per-folder fetch limit on a large backlog.** After a long gap offline or a large import, the incremental planner could plan a single fetch spanning the entire gap (e.g. UID 1000 to a current top of 100000) instead of bounding it — now uses the same bounded-window/durable-cursor pattern as `full:true` backfill.
+
+### Changed
+- Declared minimum Node version corrected from 18 to 20, matching `better-sqlite3`'s actual supported range and the CI test matrix.
+
 ## [2.0.0] — 2026-09-08
 
 Major version bump: the full-mailbox backfill mechanism was broken through v1.19.5 and is fixed here, then validated live against a real account with 57,000+ indexed messages across 62 folders/labels — including a from-scratch, UID-window-by-window backfill of a 22,836-message Archive folder to completion, with zero data loss across restarts, transient IMAP disconnects, and request timeouts. This is the first release where `sync_emails({full:true})` on a large pre-existing folder actually works end-to-end rather than silently looping on the newest window or deleting older mail.
