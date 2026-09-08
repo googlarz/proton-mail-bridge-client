@@ -2579,27 +2579,22 @@ export class SimpleIMAPService {
       const ranges = [{ startUid: plan.startUid, endUid: plan.endUid },
         ...(plan.refreshRange ? [plan.refreshRange] : [])];
       const emails: EmailSummary[] = [];
-      // Fetch metadata first, then bounded source fragments outside the fetch
-      // iterator (issuing another IMAP command inside it would deadlock).
+      const plannedCount = ranges.reduce((count, range) => count + range.endUid - range.startUid + 1, 0);
+      // One bounded FETCH per range, avoiding a source round-trip per email.
+      const sourceLimit = Math.min(1024 * 1024, Math.floor(16 * 1024 * 1024 / plannedCount));
+      const fetchQuery = needsFullDetail
+        ? { ...FETCH_INDEX_QUERY, source: { start: 0, maxLength: sourceLimit } }
+        : FETCH_INDEX_QUERY;
       for (const range of ranges) {
-        for await (const message of client.fetch(`${range.startUid}:${range.endUid}`, FETCH_INDEX_QUERY, { uid: true })) {
-          emails.push(this.toSummary(folder, message));
+        for await (const message of client.fetch(`${range.startUid}:${range.endUid}`, fetchQuery, { uid: true })) {
+          const summary = this.toSummary(folder, message);
+          const enriched = message.source
+            ? this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), input.includeAttachmentText)
+            : summary;
+          emails.push(enriched);
+          this.messageCache.set(enriched.id, enriched);
+          this.capMessageCache();
         }
-      }
-      let remainingSourceBytes = 16 * 1024 * 1024;
-      for (let i = 0; i < emails.length; i++) {
-        let summary = emails[i];
-        if (needsFullDetail && remainingSourceBytes > 0) {
-          const maxLength = Math.min(1024 * 1024, Math.floor(remainingSourceBytes / (emails.length - i)));
-          const detail = await client.fetchOne(String(summary.uid), { uid: true, source: { start: 0, maxLength } }, { uid: true });
-          if (detail && detail.source) {
-            remainingSourceBytes -= detail.source.length;
-            summary = this.enrichSummaryFromParsed(summary, await this.parseSource(detail.source), input.includeAttachmentText);
-            emails[i] = summary;
-          }
-        }
-        this.messageCache.set(summary.id, summary);
-        this.capMessageCache();
       }
       const highestUid = plan.checkpointHighestUid ?? plan.endUid;
       return {

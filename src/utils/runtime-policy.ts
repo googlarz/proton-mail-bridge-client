@@ -156,7 +156,8 @@ export function ensureToolActionAllowed(
     }
   }
   for (const action of actions) ensureEmailActionAllowed(runtime, action);
-  if (actions.has("delete") && !normalizeBoolean(args.dryRun, false)) {
+  const supportsDryRun = ["batch_email_action", "apply_thread_action", "bulk_delete", "delete_thread", "bulk_update_flags", "flag_thread"].includes(tool);
+  if (actions.has("delete") && !(supportsDryRun && normalizeBoolean(args.dryRun, false))) {
     ensureDestructiveConfirmed(runtime, normalizeBoolean(args.confirmed, false), `Permanently delete via ${tool}`);
   }
 }

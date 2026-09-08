@@ -47,3 +47,12 @@ test('alternate tools cannot bypass the action allowlist', async t => {
   ]) await assert.rejects(handler({ method: 'tools/call', params: { name, arguments: args } }, {}), /disabled/);
   assert.doesNotThrow(() => ensureToolActionAllowed(config.runtime, 'update_message_flags', { flagsToAdd: ['\\Seen'] }));
 });
+
+test('unsupported dryRun cannot bypass confirmation on flag updates or imports', async t => {
+ const app=createServer(await fixture(t,{confirmDestructive:true}));
+ const handler=app.server._requestHandlers.get('tools/call');
+ for(const [name,args] of [
+  ['update_message_flags',{emailId:'INBOX::1',flagsToAdd:['\\Deleted'],dryRun:true}],
+  ['import_email',{flags:['\\Deleted'],dryRun:true}],
+ ]) await assert.rejects(handler({method:'tools/call',params:{name,arguments:args}},{}),/Confirmation required/);
+});

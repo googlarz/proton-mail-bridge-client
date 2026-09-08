@@ -34,7 +34,7 @@ test('full cycles update old flags and expunges and discover new mail after comp
  const index=new LocalIndexService(config,quietLog);
  const folder={path:'INBOX',name:'INBOX',delimiter:'/',flags:[],listed:true,subscribed:true};
  const live=new Map(Array.from({length:6},(_,i)=>[i+1,{uid:i+1,seq:i+1,envelope:{subject:'message '+(i+1)},flags:new Set(),size:40}]));
- const client={mailbox:{uidNext:7,uidValidity:1n,exists:6},async *fetch(range){const [lo,hi]=range.split(':').map(Number);for(const [uid,msg] of live)if(uid>=lo&&uid<=hi)yield msg;},async fetchOne(uid){return {uid:Number(uid),source:Buffer.from('Subject: message\r\n\r\nuniqueneedle')};}};
+ const client={mailbox:{uidNext:7,uidValidity:1n,exists:6},async *fetch(range,query){const [lo,hi]=range.split(':').map(Number);for(const [uid,msg] of live)if(uid>=lo&&uid<=hi)yield {...msg,...(query.source?{source:Buffer.from("Subject: message\r\n\r\nuniqueneedle")}: {})};},async fetchOne(uid){return {uid:Number(uid),source:Buffer.from('Subject: message\r\n\r\nuniqueneedle')};}};
  imap.withMailbox=async(_folder,_readOnly,fn)=>fn(client);
  async function cycle() {
   const batch=await imap.collectFolderForIndex('INBOX',{full:true,limit:3,includeAttachmentText:true,checkpoint:(await index.getSyncCheckpointMap()).INBOX,syncedAt:new Date().toISOString()});
@@ -55,7 +55,13 @@ test('full cycles update old flags and expunges and discover new mail after comp
 test('source indexing is bounded per message and per folder', async t => {
  const imap=new SimpleIMAPService(await fixture(t),quietLog);
  let requested=0;
- const client={mailbox:{uidNext:51,uidValidity:1n,exists:50},async *fetch(){for(let uid=1;uid<=50;uid++)yield {uid,seq:uid,envelope:{subject:'large'},size:100*1024*1024};},async fetchOne(uid,query){assert.ok(query.source.maxLength<=1024*1024);requested+=query.source.maxLength;return {uid:Number(uid),source:Buffer.alloc(query.source.maxLength,32)};}};
+ const client={mailbox:{uidNext:51,uidValidity:1n,exists:50},async *fetch(_range,query){
+  assert.ok(query.source.maxLength<=1024*1024);
+  for(let uid=1;uid<=50;uid++) {
+   requested+=query.source.maxLength;
+   yield {uid,seq:uid,envelope:{subject:'large'},size:100*1024*1024,source:Buffer.alloc(query.source.maxLength,32)};
+  }
+ }};
  imap.withMailbox=async(_folder,_readOnly,fn)=>fn(client);
  const result=await imap.collectFolderForIndex('INBOX',{full:false,limit:50,includeAttachmentText:false,syncedAt:new Date().toISOString()});
  assert.equal(result.emails.length,50);
