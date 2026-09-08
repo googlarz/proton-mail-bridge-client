@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.4] — 2026-09-08
+
+Six findings (5 P1, 1 P2) from a fourth independent external review, fixed and verified with new regression tests (241 → 264). All are edge cases in the UIDVALIDITY-safe id scheme and send-claim mechanism landed in 2.0.3 — integration gaps between that new format/mechanism and the existing index, CLI, bulk operations, and delivery queue.
+
+### Fixed
+- **Indexing the same message under the old and new id formats created a duplicate row.** The `messages` table's primary key is the full id string, which changed for every message once ids started embedding UIDVALIDITY — a message already indexed under the pre-2.0.3 format got a second row once a normal sync produced its id in the new format, inflating `storedMessageCount` and letting search/dedup arbitrarily surface the stale old row. Reconciled via a single indexed lookup per upsert (not a table scan), preserving previously-captured content across the transition.
+- **UIDVALIDITY protection was opt-in per caller instead of intrinsic to the id.** `deleteEmail` and 5 sibling mutation methods discarded the id's own parsed generation and relied entirely on a separate, external parameter for the actual check — any caller that didn't explicitly pass it (all of `src/cli.ts`'s shortcuts did not) got zero protection even for an id that itself encoded a valid, checkable generation. All 6 methods now derive their expected generation from the id itself by default.
+- **Reading a stale id silently returned a different message's content under a freshly-relabeled new id.** `getParsedMailDetail` (backing `get_email_by_id`, shared by quote/forward/reply content reads) deliberately enforced nothing — a documented but unenforced risk. Now enforces the same generation check every mutation already does.
+- **Bulk operations lost the expected generation between id resolution and the actual mutation.** `bulkDelete`/`bulkUpdateFlags`/`bulkUpdateLabels` accepted pre-resolved UIDs but never re-verified the generation those UIDs were resolved under inside the mailbox lock the real mutation runs under — only at resolution time, before that lock was even acquired. A generation change in that window meant resolved UIDs got mutated under a different generation with no re-check. Now re-verified inside the same lock as the mutation itself.
+- **A draft-store finalization failure after a successful queued send re-unlocked the draft for resending.** `checkDue()`'s single try/catch spanned the SMTP call, the queue-record write, and the draft's own `markSent()` — if `markSent()` failed independently after SMTP had already succeeded, the catch treated it as a delivery failure and reverted the draft's claim, and double-counted the item as both sent and failed. `markSent()` failure is now handled independently (retried, then left in a non-resendable state rather than reverted) and never reaches the delivery-failure path.
+- **A small search result `limit` caused a cascade of single-message FETCH calls.** The local-filter search path used the caller's result limit directly as the network batch size — `limit:1` with no matches issued one IMAP command per candidate. Batch size is now decoupled from result count, and `hasAttachment` reuses data already fetched in an earlier pass instead of re-fetching.
+
 ## [2.0.3] — 2026-09-08
 
 Six findings (3 P1, 3 P2) from a third independent external review, fixed and verified with new regression tests (215 → 241). Also closes the UIDVALIDITY-unsafe email ID limitation deferred in [2.0.2] — see below.
