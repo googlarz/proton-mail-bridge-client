@@ -67,15 +67,6 @@ const FETCH_INDEX_QUERY = {
   bodyStructure: true,
 } as const;
 
-// Indexing needs the message source to populate preview/attachmentText for FTS body
-// search — collectFolderForIndex previously used FETCH_INDEX_QUERY (no source), so
-// every indexed message's preview and attachmentText silently stayed undefined and
-// search_indexed_emails' body search always returned nothing.
-const FETCH_INDEX_DETAIL_QUERY = {
-  ...FETCH_INDEX_QUERY,
-  source: true,
-} as const;
-
 const MAX_ATTACHMENT_TEXT_BYTES = 512_000;
 // A healthy IMAP IDLE blocks until a mailbox change or the requested timeout.
 // If client.idle() returns faster than this with no events, IDLE never actually
@@ -280,6 +271,8 @@ export interface FolderSyncPlan {
   startUid?: number;
   endUid?: number;
   highestKnownUid: number;
+  checkpointHighestUid?: number;
+  refreshRange?: { startUid: number; endUid: number };
   backfilledToUid?: number;
 }
 
@@ -305,39 +298,30 @@ export function planFolderSync(input: {
   }
 
   if (input.full) {
-    // Without backfill, every full:true call recomputed the same "newest N
-    // UIDs" window from scratch, so repeated calls could never reach
-    // anything older — found live: two consecutive full syncs of a
-    // 22k-message folder both fetched the identical top 500 UIDs, and the
-    // other ~22k older messages were permanently unreachable. Continue from
-    // where the last full/backfill call left off instead, walking the
-    // window backward through history one call at a time.
-    const uidValidityMatches =
-      !input.checkpoint?.uidValidity || !input.uidValidity || input.checkpoint.uidValidity === input.uidValidity;
-    const priorFloor = uidValidityMatches ? input.checkpoint?.backfilledToUid : undefined;
-
-    if (priorFloor !== undefined && priorFloor <= 1) {
-      // Already backfilled all the way back to UID 1 in a previous call —
-      // nothing older left to fetch.
-      return {
-        folder: input.folder,
-        strategy: "full",
-        changed: false,
-        highestKnownUid,
-        backfilledToUid: priorFloor,
-      };
-    }
-
-    const endUid = priorFloor !== undefined ? priorFloor - 1 : highestKnownUid;
-    const startUid = Math.max(1, endUid - input.limit + 1);
+    const valid = !input.checkpoint?.uidValidity || !input.uidValidity
+      || input.checkpoint.uidValidity === input.uidValidity;
+    const previousHigh = valid && (input.checkpoint?.highestUid ?? 0) <= highestKnownUid
+      ? input.checkpoint?.highestUid : undefined;
+    const priorFloor = valid && previousHigh !== undefined
+      ? input.checkpoint?.backfilledToUid : (valid && !input.checkpoint?.highestUid ? input.checkpoint?.backfilledToUid : undefined);
+    // Reserve part of each full-sync batch for new mail while the rest walks
+    // history. Once history reaches UID 1, cycle again to reconcile old flags
+    // and deletions instead of permanently stopping refreshes.
+    const newCount = previousHigh ? highestKnownUid - previousHigh : 0;
+    const refreshCount = Math.min(newCount, Math.ceil(input.limit / 2));
+    const refreshRange = refreshCount > 0 && previousHigh !== undefined
+      ? { startUid: previousHigh + 1, endUid: previousHigh + refreshCount } : undefined;
+    const historyBudget = input.limit - refreshCount;
+    const endUid = priorFloor !== undefined && priorFloor > 1
+      ? priorFloor - 1 : (previousHigh ?? highestKnownUid);
+    const startUid = Math.max(1, endUid - historyBudget + 1);
     return {
-      folder: input.folder,
-      strategy: "full",
-      changed: true,
-      startUid,
-      endUid,
-      highestKnownUid,
-      backfilledToUid: startUid,
+      folder: input.folder, strategy: "full", changed: true, highestKnownUid,
+      startUid: historyBudget > 0 ? startUid : refreshRange?.startUid,
+      endUid: historyBudget > 0 ? endUid : refreshRange?.endUid,
+      refreshRange: historyBudget > 0 ? refreshRange : undefined,
+      checkpointHighestUid: refreshRange?.endUid ?? previousHigh ?? highestKnownUid,
+      backfilledToUid: historyBudget > 0 ? startUid : priorFloor,
     };
   }
 
@@ -367,18 +351,18 @@ export function planFolderSync(input: {
     };
   }
 
-  const overlap = Math.min(input.limit, Math.max(25, Math.min(100, Math.ceil(input.limit / 2))));
-  const changed =
-    highestKnownUid > (input.checkpoint.highestUid ?? 0) ||
-    uidNext !== (input.checkpoint.uidNext ?? uidNext) ||
-    input.exists !== (input.checkpoint.total ?? input.exists);
+  const newCount = highestKnownUid - input.checkpoint.highestUid;
+  const overlap = Math.min(Math.max(0, input.limit - Math.min(newCount, input.limit)),
+    Math.max(25, Math.min(100, Math.ceil(input.limit / 2))));
+  const startUid = Math.max(1, input.checkpoint.highestUid - overlap + 1);
+  const endUid = Math.min(highestKnownUid, startUid + input.limit - 1);
+  const changed = newCount > 0 || input.exists !== (input.checkpoint.total ?? input.exists);
   return {
     folder: input.folder,
     strategy: changed ? "incremental" : "incremental_window",
-    changed,
-    startUid: Math.max(1, Math.min(highestKnownUid, input.checkpoint.highestUid) - overlap + 1),
-    endUid: highestKnownUid,
-    highestKnownUid,
+    changed, startUid, endUid, highestKnownUid,
+    checkpointHighestUid: endUid,
+    backfilledToUid: input.checkpoint.backfilledToUid,
   };
 }
 
@@ -2590,37 +2574,33 @@ export class SimpleIMAPService {
         };
       }
 
-      // On an unchanged incremental window (nothing new, checkpoint still matches),
-      // the overlap range only needs a flags refresh — IMAP content for a given UID
-      // never changes, so re-fetching source and re-parsing preview/attachmentText
-      // on every idle sync tick is pure waste. recordSnapshot's upsert preserves the
-      // existing preview/attachment_text via COALESCE when they come back unset here.
       const needsFullDetail = plan.strategy !== "incremental_window";
-      const fetchQuery = needsFullDetail ? FETCH_INDEX_DETAIL_QUERY : FETCH_INDEX_QUERY;
-
+      const ranges = [{ startUid: plan.startUid, endUid: plan.endUid },
+        ...(plan.refreshRange ? [plan.refreshRange] : [])];
       const emails: EmailSummary[] = [];
-      for await (const message of client.fetch(`${plan.startUid}:${plan.endUid}`, fetchQuery, { uid: true })) {
-        const summary = this.toSummary(folder, message);
-        const enriched = message.source
-          ? this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), input.includeAttachmentText)
-          : summary;
-        emails.push(enriched);
-        this.messageCache.set(enriched.id, enriched);
+      // Fetch metadata first, then bounded source fragments outside the fetch
+      // iterator (issuing another IMAP command inside it would deadlock).
+      for (const range of ranges) {
+        for await (const message of client.fetch(`${range.startUid}:${range.endUid}`, FETCH_INDEX_QUERY, { uid: true })) {
+          emails.push(this.toSummary(folder, message));
+        }
+      }
+      let remainingSourceBytes = 16 * 1024 * 1024;
+      for (let i = 0; i < emails.length; i++) {
+        let summary = emails[i];
+        if (needsFullDetail && remainingSourceBytes > 0) {
+          const maxLength = Math.min(1024 * 1024, Math.floor(remainingSourceBytes / (emails.length - i)));
+          const detail = await client.fetchOne(String(summary.uid), { uid: true, source: { start: 0, maxLength } }, { uid: true });
+          if (detail && detail.source) {
+            remainingSourceBytes -= detail.source.length;
+            summary = this.enrichSummaryFromParsed(summary, await this.parseSource(detail.source), input.includeAttachmentText);
+            emails[i] = summary;
+          }
+        }
+        this.messageCache.set(summary.id, summary);
         this.capMessageCache();
       }
-
-      // A backfill-continuation window's endUid is an older UID than the
-      // mailbox's true current top (highestKnownUid) — only derive
-      // highestUid from what was actually fetched when this window reaches
-      // that top; otherwise keep the existing checkpoint's highestUid
-      // unchanged; using this batch's (much lower) fetched UIDs here would
-      // silently roll the incremental-sync high-water-mark backward and
-      // make every subsequent incremental sync think a huge amount of
-      // "new" mail exists again.
-      const reachesTop = plan.endUid === plan.highestKnownUid;
-      const highestUid = reachesTop
-        ? emails.reduce((max, email) => Math.max(max, email.uid), 0) || plan.highestKnownUid
-        : (input.checkpoint?.highestUid ?? plan.highestKnownUid);
+      const highestUid = plan.checkpointHighestUid ?? plan.endUid;
       return {
         checkpoint: {
           folder,
@@ -2638,6 +2618,7 @@ export class SimpleIMAPService {
           total: exists,
           rangeStartUid: plan.startUid,
           rangeEndUid: plan.endUid,
+          scannedRanges: ranges,
           backfilledToUid: plan.backfilledToUid,
         },
         emails,

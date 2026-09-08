@@ -578,7 +578,7 @@ export class LocalIndexService {
   }): Promise<LocalIndexStatus> {
     const db = await this.ensureDb();
     const ownerEmail = lowerCaseAddress(this.config.smtp.username);
-    this.applySnapshot(db, input, ownerEmail, input.folderStats.some((entry) => entry.strategy === "full"));
+    this.applySnapshot(db, input, ownerEmail, input.folderStats.some((entry) => entry.rangeStartUid !== undefined || entry.scannedRanges?.length));
     return this.getStatus();
   }
 
@@ -1320,7 +1320,7 @@ export class LocalIndexService {
         seq = excluded.seq,
         message_id = excluded.message_id,
         in_reply_to = excluded.in_reply_to,
-        references_json = excluded.references_json,
+        references_json = CASE WHEN excluded.preview IS NULL THEN messages.references_json ELSE excluded.references_json END,
         thread_id = excluded.thread_id,
         subject = excluded.subject,
         from_json = excluded.from_json,
@@ -1527,26 +1527,19 @@ export class LocalIndexService {
             AND uid BETWEEN ? AND ?
             AND uid NOT IN (SELECT uid FROM temp_snapshot_uids)
         `);
-        const rangesByFullSyncFolder = new Map<string, { uids: Set<number>; rangeStartUid: number; rangeEndUid: number }>();
         for (const folderStat of input.folderStats) {
-          if (folderStat.strategy === "full" && folderStat.rangeStartUid !== undefined && folderStat.rangeEndUid !== undefined) {
-            rangesByFullSyncFolder.set(folderStat.folder, {
-              uids: new Set<number>(),
-              rangeStartUid: folderStat.rangeStartUid,
-              rangeEndUid: folderStat.rangeEndUid,
-            });
-          }
-        }
-        for (const email of input.emails) {
-          rangesByFullSyncFolder.get(email.folder)?.uids.add(email.uid);
-        }
-        for (const [folder, range] of rangesByFullSyncFolder) {
+          const ranges = folderStat.scannedRanges ?? (
+            folderStat.rangeStartUid !== undefined && folderStat.rangeEndUid !== undefined
+              ? [{ startUid: folderStat.rangeStartUid, endUid: folderStat.rangeEndUid }] : []);
+          if (ranges.length === 0) continue;
           clearSnapshotUidTable.run();
-          for (const uid of range.uids) {
-            insertSnapshotUid.run(uid);
+          for (const email of input.emails) {
+            if (email.folder === folderStat.folder) insertSnapshotUid.run(email.uid);
           }
-          deleteExpungedFts.run(folder, range.rangeStartUid, range.rangeEndUid);
-          deleteExpungedMessages.run(folder, range.rangeStartUid, range.rangeEndUid);
+          for (const range of ranges) {
+            deleteExpungedFts.run(folderStat.folder, range.startUid, range.endUid);
+            deleteExpungedMessages.run(folderStat.folder, range.startUid, range.endUid);
+          }
         }
         clearSnapshotUidTable.run();
       }

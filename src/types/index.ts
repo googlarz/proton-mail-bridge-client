@@ -424,6 +424,8 @@ export interface MailboxSyncCheckpoint {
   // call, so it must never treat UIDs outside its own window as expunged).
   rangeStartUid?: number;
   rangeEndUid?: number;
+  // Disjoint ranges reconciled in this snapshot (new mail plus history).
+  scannedRanges?: Array<{ startUid: number; endUid: number }>;
   // Lowest UID reached so far by repeated full:true backfill calls on this
   // folder. Persisted so each subsequent full sync continues one window
   // further back in history instead of re-fetching the same newest window

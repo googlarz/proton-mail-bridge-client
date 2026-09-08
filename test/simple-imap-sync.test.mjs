@@ -159,7 +159,7 @@ test("planFolderSync full:true continues backfilling older than the last window 
   assert.equal(plan.backfilledToUid, 44750);
 });
 
-test("planFolderSync full:true reports no more work once backfilled to UID 1", () => {
+test("planFolderSync full:true cycles history again after reaching UID 1", () => {
   const plan = planFolderSync({
     folder: "Archive",
     exists: 22871,
@@ -175,9 +175,9 @@ test("planFolderSync full:true reports no more work once backfilled to UID 1", (
   });
 
   assert.equal(plan.strategy, "full");
-  assert.equal(plan.changed, false);
-  assert.equal(plan.startUid, undefined);
-  assert.equal(plan.backfilledToUid, 1);
+  assert.equal(plan.changed, true);
+  assert.equal(plan.startUid, 45250);
+  assert.equal(plan.backfilledToUid, 45250);
 });
 
 test("planFolderSync full:true restarts backfill from the newest window when uidValidity changed", () => {
