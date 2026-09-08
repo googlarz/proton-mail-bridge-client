@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import {
   describeImapError,
   isLikelyAuthenticationError,
@@ -889,4 +891,170 @@ test("bulkDelete (to Trash) reports failure for a UID that doesn't exist (UIDPLU
   const bad = result.results.find((r) => r.uid === 999);
   assert.equal(bad.ok, false);
   assert.match(bad.error, /not found/i);
+});
+
+// --- saveAttachments default-path collision regression tests -------------
+//
+// Reproduces a real bug: when saveAttachments is called WITHOUT an explicit
+// outputPath, attachments land in a default per-message directory keyed only
+// by the attachment's own (sanitized) filename, with no collision check at
+// all. Two attachments sharing a filename — in the same message/batch, or
+// across two separate save calls for the same message — silently clobbered
+// each other: the tool still reported both as saved, each with the SAME
+// outputPath, but only the last write's content actually existed on disk.
+
+function buildRawWithSameNameAttachments(messageId) {
+  const boundary = "REGRESSION-BOUNDARY";
+  const first = Buffer.from("FIRST").toString("base64");
+  const second = Buffer.from("SECOND").toString("base64");
+  return Buffer.from(
+    [
+      "From: alice@example.com",
+      "To: owner@example.com",
+      "Subject: Test",
+      `Message-ID: ${messageId}`,
+      "MIME-Version: 1.0",
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      "",
+      `--${boundary}`,
+      "Content-Type: text/plain",
+      "",
+      "Body text",
+      "",
+      `--${boundary}`,
+      'Content-Type: text/plain; name="report.txt"',
+      'Content-Disposition: attachment; filename="report.txt"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      first,
+      "",
+      `--${boundary}`,
+      'Content-Type: text/plain; name="report.txt"',
+      'Content-Disposition: attachment; filename="report.txt"',
+      "Content-Transfer-Encoding: base64",
+      "",
+      second,
+      "",
+      `--${boundary}--`,
+      "",
+    ].join("\r\n"),
+  );
+}
+
+function buildRawWithSingleAttachment(messageId, filename, content) {
+  const boundary = "REGRESSION-BOUNDARY-2";
+  return Buffer.from(
+    [
+      "From: bob@example.com",
+      "To: owner@example.com",
+      "Subject: Test 2",
+      `Message-ID: ${messageId}`,
+      "MIME-Version: 1.0",
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      "",
+      `--${boundary}`,
+      "Content-Type: text/plain",
+      "",
+      "Body text",
+      "",
+      `--${boundary}`,
+      `Content-Type: text/plain; name="${filename}"`,
+      `Content-Disposition: attachment; filename="${filename}"`,
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from(content).toString("base64"),
+      "",
+      `--${boundary}--`,
+      "",
+    ].join("\r\n"),
+  );
+}
+
+function createServiceForAttachmentTest(dataDir, raw) {
+  const config = createConfig();
+  config.dataDir = dataDir;
+  const service = new SimpleIMAPService(config);
+  service.getFolders = async () => [
+    { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [] },
+  ];
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    fetchOne: async () => ({
+      uid: 1,
+      seq: 1,
+      flags: new Set(["\\Seen"]),
+      envelope: { messageId: "<id@example.com>", subject: "Test", from: [], to: [], cc: [], bcc: [], replyTo: [] },
+      bodyStructure: {},
+      source: raw,
+    }),
+    search: async () => [],
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+  service.withMailbox = async (folder, readOnly, action) => {
+    fakeClient.mailbox = { path: folder };
+    return action(fakeClient);
+  };
+  return service;
+}
+
+test("saveAttachments does not silently overwrite two same-named attachments saved in one call (no outputPath)", async () => {
+  const dataDir = "/tmp/protonmail-pro-mcp-test-attach-batch";
+  await rm(dataDir, { recursive: true, force: true });
+  const raw = buildRawWithSameNameAttachments("<batch@example.com>");
+  const service = createServiceForAttachmentTest(dataDir, raw);
+
+  const result = await service.saveAttachments({ emailId: "INBOX::1" });
+
+  assert.equal(result.saved.length, 2);
+  // Both entries must report DIFFERENT actual on-disk paths — not the same
+  // filename twice.
+  const paths = result.saved.map((entry) => entry.outputPath);
+  assert.notEqual(paths[0], paths[1]);
+
+  const dir = join(dataDir, "attachments", encodeURIComponent("INBOX::1"));
+  const firstContent = await readFile(join(dir, paths[0]), "utf8");
+  const secondContent = await readFile(join(dir, paths[1]), "utf8");
+  // Read back the exact reported path for each — content must match its own
+  // source attachment, not have been clobbered by the other.
+  assert.deepEqual(new Set([firstContent, secondContent]), new Set(["FIRST", "SECOND"]));
+
+  await rm(dataDir, { recursive: true, force: true });
+});
+
+test("saveAttachments does not silently overwrite a file left over from a prior save (no outputPath)", async () => {
+  const dataDir = "/tmp/protonmail-pro-mcp-test-attach-prior";
+  await rm(dataDir, { recursive: true, force: true });
+
+  // First save: a message with a single attachment named report.txt.
+  const rawFirst = buildRawWithSingleAttachment("<prior@example.com>", "report.txt", "ORIGINAL");
+  const serviceFirst = createServiceForAttachmentTest(dataDir, rawFirst);
+  const firstResult = await serviceFirst.saveAttachments({ emailId: "INBOX::1" });
+  assert.equal(firstResult.saved.length, 1);
+  const firstPath = firstResult.saved[0].outputPath;
+
+  const dir = join(dataDir, "attachments", encodeURIComponent("INBOX::1"));
+  assert.equal(await readFile(join(dir, firstPath), "utf8"), "ORIGINAL");
+
+  // Second, separate saveAttachments() call against the SAME emailId
+  // directory, with a different attachment that sanitizes to the same
+  // default target filename ("report.txt").
+  const rawSecond = buildRawWithSingleAttachment("<prior@example.com>", "report.txt", "NEWER");
+  const serviceSecond = createServiceForAttachmentTest(dataDir, rawSecond);
+  const secondResult = await serviceSecond.saveAttachments({ emailId: "INBOX::1" });
+  assert.equal(secondResult.saved.length, 1);
+  const secondPath = secondResult.saved[0].outputPath;
+
+  // Must not silently overwrite: the second save gets a different path...
+  assert.notEqual(secondPath, firstPath);
+  // ...and the pre-existing file's content is unchanged.
+  assert.equal(await readFile(join(dir, firstPath), "utf8"), "ORIGINAL");
+  // ...while the new file holds the new content, at its own reported path.
+  assert.equal(await readFile(join(dir, secondPath), "utf8"), "NEWER");
+
+  await rm(dataDir, { recursive: true, force: true });
 });
