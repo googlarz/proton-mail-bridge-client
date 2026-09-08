@@ -4707,15 +4707,23 @@ export function createServer(
           // mailbox each time.
           const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
           const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
-          const preview = await imapService.bulkMove({
-            emailIds,
-            match,
-            folder,
-            targetFolder,
-            dryRun: true,
-          });
-          ensureBulkBatchSize(preview.total, max);
+          // Resolve the match/emailIds set exactly once and reuse it for both
+          // the preview and the real run — see resolveUidsForBulkOp's
+          // comment for why re-resolving `match` a second time (the old
+          // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
+          // Also excludes any id whose embedded UIDVALIDITY is stale.
+          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
+          ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
+            const preview = await imapService.bulkMove({
+              emailIds,
+              match,
+              folder,
+              targetFolder,
+              resolvedUids: uids,
+              uidValidity: currentUidValidity,
+              dryRun: true,
+            });
             return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
           }
           const result = await withAudit(auditService, name, args, () =>
@@ -4724,6 +4732,8 @@ export function createServer(
               match,
               folder,
               targetFolder,
+              resolvedUids: uids,
+              uidValidity: currentUidValidity,
               dryRun: false,
             })
           );

@@ -2201,9 +2201,16 @@ export class SimpleIMAPService {
     folder?: string;
     targetFolder: string;
     dryRun?: boolean;
+    // Pre-resolved UIDs from a single resolveUidsForBulkOp call (see its
+    // comment) — when provided, skips re-resolving `match` here so the
+    // dryRun preview and the real run act on the exact same set.
+    resolvedUids?: number[];
+    // The UIDVALIDITY `resolvedUids` was resolved under — see bulkDelete's
+    // identical parameter for the full rationale.
+    uidValidity?: string;
   }): Promise<BulkOperationResult> {
     const folder = input.folder?.trim() || "INBOX";
-    const uids = await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
+    const uids = input.resolvedUids ?? await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
 
     if (input.dryRun) {
       return {
@@ -2234,6 +2241,10 @@ export class SimpleIMAPService {
         await this.withTimeout(
           this.withMailbox(folder, false, async (client) => {
             sourceUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
+            // Re-verify the generation resolvedUids was resolved under,
+            // inside the same lock the actual move runs under — see
+            // bulkDelete's identical check for the full rationale.
+            this.assertMailboxUidValidity(client, input.uidValidity);
             const moved = await client.messageMove(uidSet, input.targetFolder, { uid: true });
             if (moved === false) {
               throw new Error(`Server did not move uid set ${uidSet}`);
@@ -2266,9 +2277,10 @@ export class SimpleIMAPService {
           succeeded++;
         }
       } catch (err) {
+        const error = this.bulkExecutionErrorMessage(err);
         for (const uid of uids) {
           const emailId = createEmailId(folder, uid, sourceUidValidity);
-          results.push({ uid, emailId, ok: false, error: String(err) });
+          results.push({ uid, emailId, ok: false, error });
           failed++;
         }
       }
@@ -2673,8 +2685,8 @@ export class SimpleIMAPService {
     messageId: string,
     acrossFolders = true,
     folders?: string[],
-  ): Promise<Array<{ folder: string; uid: number; emailId: string }>> {
-    const results: Array<{ folder: string; uid: number; emailId: string }> = [];
+  ): Promise<Array<{ folder: string; uid: number; emailId: string; uidValidity?: string }>> {
+    const results: Array<{ folder: string; uid: number; emailId: string; uidValidity?: string }> = [];
 
     // acrossFolders was previously accepted and documented ("Also search
     // Sent and All Mail.", default false) but silently discarded — every
@@ -2717,7 +2729,14 @@ export class SimpleIMAPService {
         for (const uid of [...byMsgId, ...byRefs]) {
           if (!seen.has(uid)) {
             seen.add(uid);
-            results.push({ folder, uid, emailId: createEmailId(folder, uid, folderUidValidity) });
+            // uidValidity is each match's own captured generation, from the
+            // withMailbox call above that resolved it — not a single
+            // folder-level value shared across the whole batch the way the
+            // bulk_* operations use one. Thread messages are resolved
+            // per-folder here, so each match's mutation (moveThread/
+            // deleteThread/flagThread) re-checks against exactly the
+            // generation this match itself was found under.
+            results.push({ folder, uid, emailId: createEmailId(folder, uid, folderUidValidity), uidValidity: folderUidValidity });
           }
         }
       } catch { /* skip inaccessible folders */ }
@@ -2741,10 +2760,17 @@ export class SimpleIMAPService {
     let moved = 0;
     let notMoved = 0;
 
-    for (const { folder, uid, emailId } of matches) {
+    for (const { folder, uid, emailId, uidValidity } of matches) {
       try {
         await this.withTimeout(
           this.withMailbox(folder, false, async (client) => {
+            // Re-verify the generation this match was resolved under
+            // (resolveThreadUids's own captured uidValidity for this
+            // specific folder/uid, not a single shared folder-level value —
+            // see resolveThreadUids's comment), inside the same lock the
+            // actual move runs under. Same class of bug fixed in
+            // bulkDelete/bulkMove for the batch case.
+            this.assertMailboxUidValidity(client, uidValidity);
             const result = await client.messageMove(String(uid), input.destination, { uid: true });
             if (result === false) throw new Error(`Server did not move uid ${uid}`);
           }),
@@ -2792,13 +2818,17 @@ export class SimpleIMAPService {
 
     let deleted = 0;
 
-    for (const { folder, uid, emailId } of matches) {
+    for (const { folder, uid, emailId, uidValidity } of matches) {
       try {
+        // Re-verify the generation this match was resolved under — see
+        // moveThread's identical check for the full rationale.
         const action = input.permanent || !trashFolder
           ? this.withMailbox(folder, false, async (client) => {
+              this.assertMailboxUidValidity(client, uidValidity);
               await client.messageDelete(String(uid), { uid: true });
             })
           : this.withMailbox(folder, false, async (client) => {
+              this.assertMailboxUidValidity(client, uidValidity);
               await client.messageMove(String(uid), trashFolder, { uid: true });
             });
         await this.withTimeout(
@@ -2839,10 +2869,13 @@ export class SimpleIMAPService {
     let affected = 0;
     const allNotApplied: string[] = [];
 
-    for (const { folder, uid } of matches) {
+    for (const { folder, uid, uidValidity } of matches) {
       try {
         await this.withTimeout(
           this.withMailbox(folder, false, async (client) => {
+            // Re-verify the generation this match was resolved under — see
+            // moveThread's identical check for the full rationale.
+            this.assertMailboxUidValidity(client, uidValidity);
             if (flagsToAdd.length > 0) {
               await client.messageFlagsAdd(String(uid), flagsToAdd, { uid: true });
             }
