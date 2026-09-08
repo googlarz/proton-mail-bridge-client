@@ -182,7 +182,11 @@ export interface EmailDetail extends EmailSummary {
 }
 
 export type DraftMode = "compose" | "reply" | "forward";
-export type DraftStatus = "draft" | "sent";
+// "sending" is a transitional claim state between "draft" and "sent" — see
+// DraftStoreService.claimForSending(). It exists so two concurrent send_draft
+// calls (or a scheduled send racing a manual one) can't both observe "draft"
+// and both dispatch via SMTP.
+export type DraftStatus = "draft" | "sending" | "sent";
 
 export interface DraftSendResult {
   messageId?: string;

@@ -199,13 +199,14 @@ const TOOLS = [
   },
   {
     name: "send_test_email",
-    description: "Send a minimal diagnostic email to confirm Proton Bridge SMTP credentials and connectivity. Use before relying on send_email in a new environment. Prefer get_connection_status for a connectivity check that does not actually send mail. Returns transport debug info and delivery status.",
+    description: "Send a minimal diagnostic email to confirm Proton Bridge SMTP credentials and connectivity. Use before relying on send_email in a new environment. Prefer get_connection_status for a connectivity check that does not actually send mail. Returns transport debug info and delivery status. Requires PROTONMAIL_ALLOW_SEND, and confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled; subject to PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF like every other send path.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
       properties: {
         to: { type: "string", description: "Recipient email address." },
         customMessage: { type: "string", description: "Optional custom test body." },
+        confirmed: { type: "boolean", description: "Set to true to confirm this send when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
       required: ["to"],
     },
@@ -3112,6 +3113,9 @@ export function createServer(
     logger,
   );
   const deliveryQueueService = new DeliveryQueueService(config, smtpService, logger);
+  // Lets a fired scheduled_send close the loop back to its source draft —
+  // see DeliveryQueueService.checkDue()'s draftStore usage.
+  deliveryQueueService.setDraftStore(draftStore);
   const snoozeService = new SnoozeService(config, imapService, logger);
   const templateService = new TemplateService(config, logger);
 
@@ -3458,11 +3462,14 @@ export function createServer(
         }
 
         case "send_test_email": {
-          ensureSendAllowed(config.runtime);
           const to = requireString(args, "to");
           if (!isValidEmail(to)) {
             throw new McpError(ErrorCode.InvalidParams, "to must be a valid email address.");
           }
+
+          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Send test email to ${to}`);
+          ensureSendAllowed(config.runtime);
+          ensureOutboundRecipientsAllowed(config.runtime, config.smtp.username, [to]);
 
           const result = await withAudit(auditService, name, args, async () =>
             smtpService.sendTestEmail(to, optionalString(args, "customMessage")),
@@ -4182,26 +4189,43 @@ export function createServer(
             }, false, [draftSource(draft)]);
           }
 
-          const result = await withAudit(auditService, name, args, async () =>
-            smtpService.sendEmail({
-              to: draft.to,
-              cc: draft.cc,
-              bcc: draft.bcc,
-              subject: draft.subject,
-              body: draft.body,
-              isHtml: draft.isHtml,
-              priority: draft.priority,
-              replyTo: draft.replyTo,
-              inReplyTo: draft.inReplyTo,
-              references: draft.references,
-              attachments: draft.attachments,
-              // Draft content is already finalized and reviewed — appending a
-              // signature invisibly at send time would change what the user
-              // saw and approved. If a signature is wanted, it belongs in the
-              // draft body itself.
-              appendSignature: false,
-            }),
-          );
+          // Atomic claim: the status/pending-scheduled checks above are read
+          // then acted on non-atomically, so two concurrent send_draft calls
+          // (or a scheduled send firing at the same instant) could both pass
+          // them. claimForSending() re-reads status under the draft store's
+          // lock and flips "draft" -> "sending" in that same critical
+          // section — only the call that wins the claim proceeds to SMTP.
+          await draftStore.claimForSending(draft.id);
+
+          let result: Awaited<ReturnType<typeof smtpService.sendEmail>>;
+          try {
+            result = await withAudit(auditService, name, args, async () =>
+              smtpService.sendEmail({
+                to: draft.to,
+                cc: draft.cc,
+                bcc: draft.bcc,
+                subject: draft.subject,
+                body: draft.body,
+                isHtml: draft.isHtml,
+                priority: draft.priority,
+                replyTo: draft.replyTo,
+                inReplyTo: draft.inReplyTo,
+                references: draft.references,
+                attachments: draft.attachments,
+                // Draft content is already finalized and reviewed — appending a
+                // signature invisibly at send time would change what the user
+                // saw and approved. If a signature is wanted, it belongs in the
+                // draft body itself.
+                appendSignature: false,
+              }),
+            );
+          } catch (error) {
+            // Mirrors SnoozeService.wake()'s catch handler: revert the claim
+            // so the draft is retryable instead of stuck in "sending"
+            // forever because SMTP failed.
+            await draftStore.revertSending(draft.id);
+            throw error;
+          }
 
           let sentDraft = await draftStore.markSent(draft.id, {
             messageId: result.messageId,
@@ -5317,7 +5341,7 @@ export function createServer(
             },
             drafts: {
               total: drafts.length,
-              active: drafts.filter((draft) => draft.status === "draft").length,
+              active: drafts.filter((draft) => draft.status !== "sent").length,
               remoteSynced: drafts.filter((draft) => draft.remoteSyncState === "synced").length,
               syncFailed: drafts.filter((draft) => draft.remoteSyncState === "sync_failed").length,
             },

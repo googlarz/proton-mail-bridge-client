@@ -8,6 +8,7 @@ import { ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/run
 import { logger, type Logger } from "../utils/logger.js";
 import { withTimeout } from "../utils/helpers.js";
 import { SMTPService } from "./smtp-service.js";
+import type { DraftStoreService } from "./draft-store-service.js";
 
 const SEND_ITEM_TIMEOUT_MS = 30_000;
 // How long a terminal (sent/failed) record is kept before checkDue() prunes
@@ -53,6 +54,12 @@ export class DeliveryQueueService {
   private _lock: Promise<void> = Promise.resolve();
   private timer?: NodeJS.Timeout;
   private started = false;
+  // Optional — set via setDraftStore() right after construction in
+  // index.ts's wiring. Lets checkDue() close the loop back to the draft that
+  // originated a scheduled_send record when it fires, instead of leaving the
+  // draft's own status stuck at "draft" forever after real delivery (see
+  // checkDue()'s success path below).
+  private draftStore?: DraftStoreService;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -60,6 +67,10 @@ export class DeliveryQueueService {
     private readonly log: Logger = logger,
   ) {
     this.queuePath = join(this.config.dataDir, "delivery-queue.json");
+  }
+
+  setDraftStore(draftStore: DraftStoreService): void {
+    this.draftStore = draftStore;
   }
 
   async start(): Promise<void> {
@@ -217,6 +228,39 @@ export class DeliveryQueueService {
           }
         });
         sent += 1;
+
+        // Found live: a scheduled send that fired here never told
+        // DraftStoreService about it — the queue record went "sent" but the
+        // source draft's own status stayed "draft" forever, so a later
+        // manual send_draft on the same draft delivered a genuine duplicate.
+        // Route this through the same claimForSending()/markSent() pair
+        // send_draft uses, so both paths share one source of truth for
+        // "has this draft already been sent".
+        if (claimed.sourceDraftId && this.draftStore) {
+          try {
+            const claimedDraft = await this.draftStore.claimForSending(claimed.sourceDraftId);
+            await this.draftStore.markSent(claimedDraft.id, {
+              messageId: result.messageId,
+              accepted: result.accepted,
+              rejected: result.rejected,
+              response: result.response,
+            });
+          } catch (draftError) {
+            // The only expected failure here is the draft already being
+            // "sent" or "sending" — e.g. a manual send_draft raced this
+            // scheduled fire and won. That's a legitimate race the other
+            // direction (mail already went out through the manual path, or
+            // is about to), not this checkDue() pass's problem to fix —
+            // the delivery-queue record above is already correctly "sent"
+            // regardless. Log and move on rather than throwing, since the
+            // actual email send already succeeded.
+            this.log.warn(
+              "Scheduled send fired but its source draft could not be marked sent",
+              "DeliveryQueueService",
+              { draftId: claimed.sourceDraftId, error: draftError },
+            );
+          }
+        }
       } catch (error) {
         const rawMessage = error instanceof Error ? error.message : String(error);
         // withTimeout() races the send against a timer — it can't actually
