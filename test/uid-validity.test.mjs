@@ -619,3 +619,177 @@ test("export_email: an OLD-FORMAT id (no embedded uidValidity) still works with 
   const result = await service.exportEmail(legacyId);
   assert.equal(result.emailId, legacyId);
 });
+
+// --- Finding 1 (P1): bulkMove was the one bulk_* sibling never updated to
+// the resolvedUids/uidValidity pattern the other three (bulkDelete/
+// bulkUpdateFlags/bulkUpdateLabels) already carry — see those methods'
+// identical tests above for the same two bugs.
+
+test("bulk_move: resolvedUids locks the mutation to the exactly-once-resolved set, even if a fresh resolution would now return more (TOCTOU)", async () => {
+  const state = {
+    uidValidity: "2000000002",
+    uidNext: 100,
+    messages: new Map([[1, {}], [2, {}], [3, {}], [4, {}], [5, {}]]),
+  };
+  const service = createService(state);
+  const movedUidSets = [];
+  service.client.messageMove = async (uidSet) => {
+    movedUidSets.push(String(uidSet));
+    const uids = String(uidSet).split(",").map(Number);
+    return { uidMap: new Map(uids.map((uid) => [uid, uid])) };
+  };
+
+  // Mirrors the live TOCTOU repro: a fresh resolveUidsForBulkOp call (e.g.
+  // new mail matching `match` arriving between a dry-run preview and the
+  // real run) would now return a wider set than the one actually resolved
+  // once at the top of index.ts's bulk_move handler. Passing resolvedUids
+  // must make bulkMove ignore that and act on exactly the resolved-once set.
+  service.resolveUidsForBulkOp = async () => [1, 2, 3, 4, 5];
+
+  const result = await service.bulkMove({
+    match: { from: "someone@example.com" },
+    folder: "INBOX",
+    targetFolder: "Archive",
+    resolvedUids: [1],
+    uidValidity: state.uidValidity,
+  });
+
+  assert.equal(result.total, 1);
+  assert.equal(result.succeeded, 1);
+  assert.deepEqual(movedUidSets, ["1"]);
+});
+
+test("bulk_move: mailbox generation changes between resolution and the mutation's lock — the whole batch is rejected, nothing is moved", async () => {
+  const state = { uidValidity: "1000000001", uidNext: 100, messages: new Map([[42, { subject: "msg" }]]) };
+  const service = createService(state);
+  let moveCalled = false;
+  service.client.messageMove = async () => {
+    moveCalled = true;
+    return { uidMap: new Map([[42, 42]]) };
+  };
+
+  const resolvedUidValidity = state.uidValidity;
+  const id = createEmailId("INBOX", 42, resolvedUidValidity);
+  const uids = await service.resolveUidsForBulkOp("INBOX", [id], undefined, resolvedUidValidity);
+  assert.deepEqual(uids, [42]);
+
+  // The mailbox is recreated (generation bumps 1 -> 2) in the gap between
+  // resolution finishing and the real mutation's withMailbox call below
+  // acquiring its lock — the exact TOCTOU window from the bug report.
+  state.uidValidity = "2000000002";
+
+  const result = await service.bulkMove({
+    emailIds: [id],
+    folder: "INBOX",
+    targetFolder: "Archive",
+    resolvedUids: uids,
+    uidValidity: resolvedUidValidity,
+  });
+
+  assert.equal(result.succeeded, 0);
+  assert.equal(result.failed, 1);
+  // Whole-batch abort, distinct wording from the per-id "stale id excluded"
+  // filtering resolveUidsForBulkOp already does at resolution time.
+  assert.match(result.results[0].error, /entire resolved batch/);
+  assert.equal(moveCalled, false);
+});
+
+test("bulk_move: resolution and execution under the SAME generation — batch succeeds exactly as before (no regression)", async () => {
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, { subject: "msg" }]]) };
+  const service = createService(state);
+  service.client.messageMove = async () => ({ uidMap: new Map([[42, 42]]) });
+
+  const currentUidValidity = state.uidValidity;
+  const id = createEmailId("INBOX", 42, currentUidValidity);
+  const uids = await service.resolveUidsForBulkOp("INBOX", [id], undefined, currentUidValidity);
+
+  const result = await service.bulkMove({
+    emailIds: [id],
+    folder: "INBOX",
+    targetFolder: "Archive",
+    resolvedUids: uids,
+    uidValidity: currentUidValidity,
+  });
+
+  assert.equal(result.succeeded, 1);
+  assert.equal(result.failed, 0);
+});
+
+// --- Finding 2 (P1): moveThread/deleteThread/flagThread resolve each match's
+// own UIDVALIDITY generation (resolveThreadUids) but never re-checked it
+// before mutating. moveThread is covered thoroughly below; deleteThread and
+// flagThread share the identical resolve-once-then-mutate-per-uid shape and
+// received the identical assertMailboxUidValidity call at the identical
+// point (inside each match's own withMailbox lock, before the mutation
+// command) — verified by reading their implementations, not separately
+// re-run here.
+
+function createThreadFakeClient(state) {
+  return {
+    usable: true,
+    capabilities: new Set(["UIDPLUS"]),
+    mailbox: false,
+    async getMailboxLock(folder) {
+      this.mailbox = { uidValidity: state.uidValidity, exists: state.messages.size, uidNext: state.uidNext };
+      return { release: () => {} };
+    },
+    async search(query) {
+      if (query && query.header && query.header["Message-ID"]) {
+        const found = [...state.messages.keys()];
+        // Simulates the mailbox being recreated (generation bumps 1 -> 2) in
+        // the real gap between resolveThreadUids capturing this match's
+        // generation and moveThread's own withMailbox call, later, acquiring
+        // its lock for the mutation — the exact TOCTOU window from the bug
+        // report. Only bumped once so the "SAME generation" regression test
+        // below (which never sets bumpAfterResolve) isn't affected.
+        if (state.bumpAfterResolve) {
+          state.uidValidity = state.bumpAfterResolve;
+          state.bumpAfterResolve = undefined;
+        }
+        return found;
+      }
+      return [];
+    },
+    async messageMove() {
+      state.moveCalled = true;
+      return { path: "INBOX", destination: "Archive" };
+    },
+  };
+}
+
+test("move_thread: mailbox generation changes between resolution and the mutation's lock — the match is rejected, nothing is moved", async () => {
+  const state = {
+    uidValidity: "1000000001",
+    uidNext: 100,
+    messages: new Map([[42, {}]]),
+    moveCalled: false,
+    bumpAfterResolve: "2000000002",
+  };
+  const service = new SimpleIMAPService(createConfig(), quietLogger, 0);
+  service.client = createThreadFakeClient(state);
+  // resolveThreadUids (acrossFolders: false, moveThread's default) filters
+  // getFolders() down to INBOX/Sent — seed the cache directly so this test
+  // doesn't need to simulate a full LIST round trip.
+  service.folderCache = [{ path: "INBOX", name: "INBOX", delimiter: "/", listed: true, subscribed: true, flags: [] }];
+  service.folderCacheAt = Date.now();
+
+  const result = await service.moveThread({ messageId: "<msg-1@example.com>", destination: "Archive" });
+
+  assert.equal(result.moved, 0);
+  assert.equal(result.notMoved, 1);
+  assert.equal(state.moveCalled, false);
+});
+
+test("move_thread: resolution and execution under the SAME generation — the match succeeds exactly as before (no regression)", async () => {
+  const state = { uidValidity: "2000000002", uidNext: 100, messages: new Map([[42, {}]]), moveCalled: false };
+  const service = new SimpleIMAPService(createConfig(), quietLogger, 0);
+  service.client = createThreadFakeClient(state);
+  service.folderCache = [{ path: "INBOX", name: "INBOX", delimiter: "/", listed: true, subscribed: true, flags: [] }];
+  service.folderCacheAt = Date.now();
+
+  const result = await service.moveThread({ messageId: "<msg-1@example.com>", destination: "Archive" });
+
+  assert.equal(result.moved, 1);
+  assert.equal(result.notMoved, 0);
+  assert.equal(state.moveCalled, true);
+});
