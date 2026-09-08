@@ -336,6 +336,19 @@ export class DraftStoreService {
 
   async clear(): Promise<{ path: string; removed: boolean }> {
     return this.withLock(async () => {
+      // clear() deletes the store file directly rather than going through
+      // loadUnlocked(), so it must run the same account-identity guard
+      // loadUnlocked() runs — otherwise a mismatched account could delete
+      // another account's entire draft store with no prior read having
+      // checked identity. Reuses the same identityChecked flag so a
+      // process that already checked (via a prior load/save) doesn't pay
+      // the cost twice, but a fresh instance where clear() is the very
+      // first call still gets checked here.
+      if (!this.identityChecked) {
+        await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
+        this.identityChecked = true;
+      }
+
       try {
         await rm(this.draftPath);
         return { path: this.draftPath, removed: true };

@@ -695,6 +695,13 @@ export class LocalIndexService {
   }
 
   async clear(): Promise<{ path: string; removed: boolean }> {
+    // Unlike every other method here, clear() doesn't go through ensureDb()
+    // (it deletes the db file rather than opening it), so it must run the
+    // same account-identity guard itself — otherwise a mismatched account
+    // could delete another account's entire index with no prior open ever
+    // having checked identity. Must run before closeDb()/rm() below.
+    await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
+
     this.closeDb();
     let removed = false;
 

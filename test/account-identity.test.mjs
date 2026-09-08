@@ -10,6 +10,8 @@ import {
 import { LocalIndexService } from "../dist/services/local-index-service.js";
 import { DeliveryQueueService } from "../dist/services/delivery-queue-service.js";
 import { AuditService } from "../dist/services/audit-service.js";
+import { DraftStoreService } from "../dist/services/draft-store-service.js";
+import { access, constants as fsConstants } from "node:fs/promises";
 
 function createConfig(dataDir, username) {
   return {
@@ -282,5 +284,143 @@ test("ensureAccountIdentityMatches: concurrent first-time calls for DIFFERENT ac
       assert.equal(r.reason.current, other);
       assert.equal(r.reason.onDisk, winner);
     }
+  });
+});
+
+async function pathExists(path) {
+  try {
+    await access(path, fsConstants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("LocalIndexService.clear() refuses a mismatched account and does NOT delete another account's index (P1)", async () => {
+  await withTempDir(async (dataDir) => {
+    const serviceA = new LocalIndexService(createConfig(dataDir, "accountA@example.com"));
+    await serviceA.recordSnapshot({
+      syncedAt: "2026-03-24T12:00:00.000Z",
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: 1,
+          unseen: 1,
+        },
+      ],
+      emails: [
+        {
+          id: "INBOX::1",
+          uid: 1,
+          seq: 1,
+          folder: "INBOX",
+          messageId: "<m1@example.com>",
+          subject: "account A's only copy of this data",
+          from: [{ address: "someone@example.com" }],
+          to: [{ address: "accountA@example.com" }],
+          cc: [],
+          bcc: [],
+          replyTo: [],
+          date: "2026-03-24T12:00:00.000Z",
+          internalDate: "2026-03-24T12:00:00.000Z",
+          isRead: false,
+          isStarred: false,
+          flags: [],
+          preview: "account A's only copy of this data",
+          hasAttachments: false,
+          attachments: [],
+          labels: [],
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1 }],
+    });
+
+    const dbPath = join(dataDir, "mail-index.sqlite");
+    assert.ok(await pathExists(dbPath), "sanity check: account A's index file exists on disk");
+
+    // A fresh instance for account B, with clear() as the VERY FIRST call —
+    // no prior getStatus()/search()/recordSnapshot() on this instance, so
+    // this reproduces the bug exactly: clear() must still refuse, not
+    // silently delete because "nothing else ran the identity check yet".
+    const serviceB = new LocalIndexService(createConfig(dataDir, "accountB@example.com"));
+    await assert.rejects(
+      () => serviceB.clear(),
+      (error) => {
+        assert.match(error.message, /accounta@example\.com/);
+        assert.match(error.message, /accountb@example\.com/);
+        return true;
+      },
+    );
+
+    // The whole point: account A's index must still be there.
+    assert.ok(await pathExists(dbPath), "account A's index must NOT have been deleted");
+    const resultsFromA = await serviceA.search({ query: "only copy" });
+    assert.equal(resultsFromA.emails.length, 1, "account A's data must still be readable and intact");
+  });
+});
+
+test("LocalIndexService.clear() still succeeds for the matching account", async () => {
+  await withTempDir(async (dataDir) => {
+    const serviceA = new LocalIndexService(createConfig(dataDir, "accountA@example.com"));
+    await serviceA.recordSnapshot({
+      syncedAt: "2026-03-24T12:00:00.000Z",
+      folders: [],
+      emails: [],
+      folderStats: [],
+    });
+
+    const dbPath = join(dataDir, "mail-index.sqlite");
+    assert.ok(await pathExists(dbPath), "sanity check: index file exists before clear");
+
+    const result = await serviceA.clear();
+    assert.equal(result.removed, true);
+    assert.equal(await pathExists(dbPath), false, "index file should be gone after a same-account clear()");
+  });
+});
+
+test("DraftStoreService.clear() refuses a mismatched account and does NOT delete another account's drafts (P1)", async () => {
+  await withTempDir(async (dataDir) => {
+    const draftsA = new DraftStoreService(createConfig(dataDir, "accountA@example.com"));
+    await draftsA.createDraft({ subject: "account A's private draft", body: "test body" });
+
+    const draftPath = join(dataDir, "drafts.json");
+    assert.ok(await pathExists(draftPath), "sanity check: account A's draft store exists on disk");
+
+    // Fresh instance for account B, with clear() as the very first call —
+    // no prior listDrafts()/createDraft() on this instance.
+    const draftsB = new DraftStoreService(createConfig(dataDir, "accountB@example.com"));
+    await assert.rejects(
+      () => draftsB.clear(),
+      (error) => {
+        assert.match(error.message, /accounta@example\.com/);
+        assert.match(error.message, /accountb@example\.com/);
+        return true;
+      },
+    );
+
+    assert.ok(await pathExists(draftPath), "account A's draft store must NOT have been deleted");
+    const draftsFromA = await draftsA.listDrafts();
+    assert.equal(draftsFromA.length, 1, "account A's draft must still be intact");
+    assert.equal(draftsFromA[0].subject, "account A's private draft");
+  });
+});
+
+test("DraftStoreService.clear() still succeeds for the matching account", async () => {
+  await withTempDir(async (dataDir) => {
+    const draftsA = new DraftStoreService(createConfig(dataDir, "accountA@example.com"));
+    await draftsA.createDraft({ subject: "will be cleared", body: "test body" });
+
+    const draftPath = join(dataDir, "drafts.json");
+    assert.ok(await pathExists(draftPath), "sanity check: draft store exists before clear");
+
+    const result = await draftsA.clear();
+    assert.equal(result.removed, true);
+    assert.equal(await pathExists(draftPath), false, "draft store file should be gone after a same-account clear()");
   });
 });
