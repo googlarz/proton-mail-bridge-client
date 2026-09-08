@@ -1897,7 +1897,18 @@ export class SimpleIMAPService {
     return { folder, deleted: uids.length };
   }
 
-  private async resolveUidsForBulkOp(
+  // Not private: index.ts's bulk_delete/bulk_update_flags/bulk_update_labels
+  // handlers call this directly to resolve a match/emailIds set exactly
+  // once, then pass the result back in as `resolvedUids` so the dryRun and
+  // real-run calls act on the identical set instead of each re-resolving
+  // `match` against the live mailbox. See resolvedUids below for why: two
+  // separate resolutions of the same `match` can return different UID sets
+  // if the mailbox changes between them (e.g. new mail arrives), letting a
+  // bulk op exceed its configured maxBatchSize. Found live: with
+  // maxBatchSize 1, a first resolution returned [1], a second (between the
+  // dry-run check and the real run) returned [1,2], and the real run acted
+  // on both — silently exceeding the limit.
+  async resolveUidsForBulkOp(
     folder: string,
     emailIds: string[] | undefined,
     match: BulkMatchCriteria | undefined,
@@ -2056,9 +2067,13 @@ export class SimpleIMAPService {
     folder?: string;
     permanent?: boolean;
     dryRun?: boolean;
+    // Pre-resolved UIDs from a single resolveUidsForBulkOp call (see its
+    // comment) — when provided, skips re-resolving `match` here so the
+    // dryRun preview and the real run act on the exact same set.
+    resolvedUids?: number[];
   }): Promise<BulkOperationResult> {
     const folder = input.folder?.trim() || "INBOX";
-    const uids = await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
+    const uids = input.resolvedUids ?? await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
 
     if (input.dryRun) {
       return {
@@ -2150,9 +2165,13 @@ export class SimpleIMAPService {
     flagsToAdd?: string[];
     flagsToRemove?: string[];
     dryRun?: boolean;
+    // Pre-resolved UIDs from a single resolveUidsForBulkOp call (see its
+    // comment) — when provided, skips re-resolving `match` here so the
+    // dryRun preview and the real run act on the exact same set.
+    resolvedUids?: number[];
   }): Promise<BulkOperationResult> {
     const folder = input.folder?.trim() || "INBOX";
-    const uids = await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
+    const uids = input.resolvedUids ?? await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
 
     if (input.dryRun) {
       return {
@@ -2234,9 +2253,13 @@ export class SimpleIMAPService {
     labelsToAdd?: string[];
     labelsToRemove?: string[];
     dryRun?: boolean;
+    // Pre-resolved UIDs from a single resolveUidsForBulkOp call (see its
+    // comment) — when provided, skips re-resolving `match` here so the
+    // dryRun preview and the real run act on the exact same set.
+    resolvedUids?: number[];
   }): Promise<BulkOperationResult> {
     const folder = input.folder?.trim() || "INBOX";
-    const uids = await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
+    const uids = input.resolvedUids ?? await this.resolveUidsForBulkOp(folder, input.emailIds, input.match);
 
     if (input.dryRun) {
       return {

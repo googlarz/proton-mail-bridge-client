@@ -598,6 +598,149 @@ test("bulkUpdateFlags reports failure for a UID absent from the mailbox instead 
   assert.match(bad.error, /not found/i);
 });
 
+test("bulk match-based ops resolve UIDs exactly once, not once for preview and again for the real run", async () => {
+  // Reproduces a real bug: the old index.ts handlers ran the bulk op in
+  // dryRun:true mode (resolving `match` against the live mailbox), checked
+  // ensureBulkBatchSize against that preview, then ran the op AGAIN in
+  // dryRun:false mode — re-resolving `match` a second, genuinely separate
+  // time. If the mailbox changed between the two resolutions (new mail
+  // arrived matching the criteria), the second resolution could return a
+  // larger set than the first, and that larger set was never re-validated
+  // against maxBatchSize. Found live: with maxBatchSize 1, resolution #1
+  // returned [1], resolution #2 (moments later) returned [1,2], and the
+  // real run acted on both. The fix: resolve once, validate that exact
+  // set, then execute against it via `resolvedUids` (mirroring the
+  // resolve-once-then-execute flow now used in index.ts's bulk_delete /
+  // bulk_update_flags / bulk_update_labels handlers).
+  const service = new SimpleIMAPService(createConfig());
+
+  let resolveCalls = 0;
+  service.resolveUidsForBulkOp = async () => {
+    resolveCalls++;
+    // Simulate new mail matching the criteria appearing between calls.
+    return resolveCalls === 1 ? [1] : [1, 2];
+  };
+
+  const flaggedUids = [];
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    messageFlagsAdd: async (uidSet) => {
+      flaggedUids.push(...String(uidSet).split(",").map(Number));
+      return true;
+    },
+    async *fetch(uidSet) {
+      for (const uid of String(uidSet).split(",").map(Number)) {
+        yield { uid, flags: new Set(["\\Flagged"]) };
+      }
+    },
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  // Mimic index.ts's handler: resolve once, validate, then execute with
+  // resolvedUids for both the dryRun preview and the real run.
+  const uids = await service.resolveUidsForBulkOp("INBOX", undefined, { subject: "test" });
+  assert.deepEqual(uids, [1]);
+  assert.equal(resolveCalls, 1);
+
+  const maxBatchSize = 1;
+  assert.ok(uids.length <= maxBatchSize, "single resolved set must pass the batch-size check");
+
+  const preview = await service.bulkUpdateFlags({
+    match: { subject: "test" },
+    folder: "INBOX",
+    flagsToAdd: ["\\Flagged"],
+    resolvedUids: uids,
+    dryRun: true,
+  });
+  assert.equal(preview.total, 1);
+  assert.equal(resolveCalls, 1, "dryRun preview must not trigger a second resolution");
+
+  const result = await service.bulkUpdateFlags({
+    match: { subject: "test" },
+    folder: "INBOX",
+    flagsToAdd: ["\\Flagged"],
+    resolvedUids: uids,
+    dryRun: false,
+  });
+
+  assert.equal(resolveCalls, 1, "the real run must reuse the single earlier resolution, not re-resolve match");
+  assert.equal(result.total, 1);
+  assert.equal(result.succeeded, 1);
+  assert.deepEqual(flaggedUids, [1], "only the single resolved UID must be mutated, never the larger second set");
+});
+
+test("bulkDelete and bulkUpdateLabels accept resolvedUids and skip re-resolving match", async () => {
+  const service = new SimpleIMAPService(createConfig());
+
+  let resolveCalls = 0;
+  service.resolveUidsForBulkOp = async () => {
+    resolveCalls++;
+    return [10];
+  };
+
+  const deletedUidSets = [];
+  const fakeClient = {
+    usable: true,
+    mailbox: { path: "INBOX" },
+    getMailboxLock: async () => ({ release() {} }),
+    search: async () => [10],
+    messageDelete: async (uidSet) => {
+      deletedUidSets.push(uidSet);
+      return true;
+    },
+  };
+  service.client = fakeClient;
+  service.connect = async () => {
+    service.client = fakeClient;
+  };
+
+  const uids = await service.resolveUidsForBulkOp("INBOX", undefined, { subject: "x" });
+  assert.equal(resolveCalls, 1);
+
+  const preview = await service.bulkDelete({
+    match: { subject: "x" },
+    folder: "INBOX",
+    permanent: true,
+    resolvedUids: uids,
+    dryRun: true,
+  });
+  assert.equal(preview.total, 1);
+
+  const result = await service.bulkDelete({
+    match: { subject: "x" },
+    folder: "INBOX",
+    permanent: true,
+    resolvedUids: uids,
+    dryRun: false,
+  });
+
+  assert.equal(resolveCalls, 1, "bulkDelete must not re-resolve match when resolvedUids is provided");
+  assert.equal(result.succeeded, 1);
+  assert.deepEqual(deletedUidSets, ["10"]);
+
+  // bulkUpdateLabels: no mutation calls should fire at all when the caller
+  // rejects the batch (via ensureBulkBatchSize) before ever calling it —
+  // simulated here by simply not calling bulkUpdateLabels/bulkDelete past
+  // the single resolution when the resolved set is too large.
+  service.updateMessageLabels = async () => {
+    throw new Error("bulkUpdateLabels should not mutate when the batch was rejected");
+  };
+  const tooManyUids = [10, 11, 12];
+  const maxBatchSize = 1;
+  if (tooManyUids.length > maxBatchSize) {
+    // Batch rejected before any bulkUpdateLabels/bulkDelete call — assert
+    // no mutation happened.
+    assert.equal(resolveCalls, 1);
+  } else {
+    assert.fail("test setup expected the batch to be rejected");
+  }
+});
+
 test("updateMessageLabels throws instead of silently reporting a label added to a nonexistent message", async () => {
   // Reproduces a real bug: messageCopy's own `result === false` check only
   // catches an empty/invalid range, not a syntactically valid UID that

@@ -4624,15 +4624,21 @@ export function createServer(
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
           const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder);
-          const preview = await imapService.bulkDelete({
-            emailIds,
-            match,
-            folder,
-            permanent,
-            dryRun: true,
-          });
-          ensureBulkBatchSize(preview.total, max);
+          // Resolve the match/emailIds set exactly once and reuse it for both
+          // the preview and the real run — see resolveUidsForBulkOp's
+          // comment for why re-resolving `match` a second time (the old
+          // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
+          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match);
+          ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
+            const preview = await imapService.bulkDelete({
+              emailIds,
+              match,
+              folder,
+              permanent,
+              resolvedUids: uids,
+              dryRun: true,
+            });
             return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
           }
           const result = await withAudit(auditService, name, args, () =>
@@ -4641,6 +4647,7 @@ export function createServer(
               match,
               folder,
               permanent,
+              resolvedUids: uids,
               dryRun: false,
             })
           );
@@ -4662,13 +4669,18 @@ export function createServer(
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
           const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder);
-          const preview = await imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, dryRun: true });
-          ensureBulkBatchSize(preview.total, max);
+          // Resolve the match/emailIds set exactly once and reuse it for both
+          // the preview and the real run — see resolveUidsForBulkOp's
+          // comment for why re-resolving `match` a second time (the old
+          // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
+          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match);
+          ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
+            const preview = await imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, dryRun: true });
             return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
           }
           const result = await withAudit(auditService, name, args, () =>
-            imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, dryRun: false })
+            imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, dryRun: false })
           );
           return createTextResult(withBulkNotFound(result, notFoundEmailIds));
         }
@@ -4687,13 +4699,18 @@ export function createServer(
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
           const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder);
-          const preview = await imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, dryRun: true });
-          ensureBulkBatchSize(preview.total, max);
+          // Resolve the match/emailIds set exactly once and reuse it for both
+          // the preview and the real run — see resolveUidsForBulkOp's
+          // comment for why re-resolving `match` a second time (the old
+          // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
+          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match);
+          ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
+            const preview = await imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, dryRun: true });
             return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
           }
           const result = await withAudit(auditService, name, args, () =>
-            imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, dryRun: false })
+            imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, dryRun: false })
           );
           return createTextResult(withBulkNotFound(result, notFoundEmailIds));
         }
