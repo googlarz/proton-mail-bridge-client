@@ -1242,3 +1242,137 @@ test("saveAttachments does not silently overwrite a file left over from a prior 
 
   await rm(dataDir, { recursive: true, force: true });
 });
+
+// --- searchEmails local-filter-after-newest-N-cutoff regression tests ----
+//
+// Reproduces a real bug: local-only filters (hasAttachment, attachmentName,
+// label, threadId, senderDomain, mailboxRole — none of which IMAP SEARCH can
+// express) were applied AFTER narrowing the raw IMAP-SEARCH candidate set to
+// the newest `limit` UIDs by date. A genuine match older than the newest
+// `limit` non-matching candidates was excluded by that cutoff before it was
+// ever fetched, so it never even reached the filter.
+
+function makeSearchFakeClient(messages) {
+  // messages: [{ uid, internalDate, hasAttachment }]
+  const byUid = new Map(messages.map((m) => [m.uid, m]));
+  const fetchCalls = [];
+
+  function toFetchMessage(m) {
+    return {
+      uid: m.uid,
+      seq: m.uid,
+      envelope: { subject: `Message ${m.uid}`, from: [], to: [], cc: [], bcc: [], replyTo: [] },
+      internalDate: m.internalDate,
+      flags: new Set(),
+      labels: [],
+      bodyStructure: m.hasAttachment
+        ? { disposition: "attachment", parameters: { filename: "invoice.pdf" } }
+        : {},
+    };
+  }
+
+  return {
+    fetchCalls,
+    client: {
+      usable: true,
+      mailbox: { path: "INBOX" },
+      getMailboxLock: async () => ({ release() {} }),
+      search: async () => messages.map((m) => m.uid),
+      async *fetch(uids, query) {
+        // FETCH_INDEX_QUERY (the cheap header-only pass used to sort candidates
+        // by date) never requests `labels`; the full summary/detail fetch does —
+        // use that to distinguish header-only calls from bounded full-detail
+        // fetch batches for the batching assertion below.
+        const isHeaderOnly = !query || query.labels !== true;
+        fetchCalls.push({ uids: [...uids], isHeaderOnly });
+        for (const uid of uids) {
+          const m = byUid.get(uid);
+          if (m) yield toFetchMessage(m);
+        }
+      },
+    },
+  };
+}
+
+function createServiceForSearchTest(messages) {
+  const service = new SimpleIMAPService(createConfig());
+  const { client, fetchCalls } = makeSearchFakeClient(messages);
+  service.client = client;
+  service.connect = async () => {
+    service.client = client;
+  };
+  service.withMailbox = async (folder, _readOnly, action) => {
+    client.mailbox = { path: folder };
+    return action(client);
+  };
+  return { service, fetchCalls };
+}
+
+test("searchEmails(hasAttachment:true, limit:1) finds an older genuine match instead of dropping it at the newest-N cutoff", async () => {
+  const { service } = createServiceForSearchTest([
+    { uid: 1, internalDate: new Date("2026-01-01T00:00:00Z"), hasAttachment: true },
+    { uid: 2, internalDate: new Date("2026-02-01T00:00:00Z"), hasAttachment: false },
+  ]);
+
+  const result = await service.searchEmails({ folder: "INBOX", hasAttachment: true, limit: 1 });
+
+  assert.deepEqual(result.emails.map((e) => e.uid), [1], "the older message with a real attachment must be returned, not dropped");
+
+  // limit:2 (no cutoff at all) already worked before the fix — confirm it still does.
+  const { service: service2 } = createServiceForSearchTest([
+    { uid: 1, internalDate: new Date("2026-01-01T00:00:00Z"), hasAttachment: true },
+    { uid: 2, internalDate: new Date("2026-02-01T00:00:00Z"), hasAttachment: false },
+  ]);
+  const result2 = await service2.searchEmails({ folder: "INBOX", hasAttachment: true, limit: 2 });
+  assert.deepEqual(result2.emails.map((e) => e.uid), [1]);
+});
+
+test("searchEmails with a local filter scans candidates in bounded limit-sized batches, newest-matching-first, without fetching everything up front", async () => {
+  // Six candidates, newest (uid 6) to oldest (uid 1); only uid 4 and uid 1
+  // genuinely have an attachment, spread across what would have been
+  // different newest-N batches under the old bug.
+  const messages = [
+    { uid: 1, internalDate: new Date("2026-01-01T00:00:00Z"), hasAttachment: true },
+    { uid: 2, internalDate: new Date("2026-01-02T00:00:00Z"), hasAttachment: false },
+    { uid: 3, internalDate: new Date("2026-01-03T00:00:00Z"), hasAttachment: false },
+    { uid: 4, internalDate: new Date("2026-01-04T00:00:00Z"), hasAttachment: true },
+    { uid: 5, internalDate: new Date("2026-01-05T00:00:00Z"), hasAttachment: false },
+    { uid: 6, internalDate: new Date("2026-01-06T00:00:00Z"), hasAttachment: false },
+  ];
+  const { service, fetchCalls } = createServiceForSearchTest(messages);
+
+  const result = await service.searchEmails({ folder: "INBOX", hasAttachment: true, limit: 2 });
+
+  assert.deepEqual(
+    result.emails.map((e) => e.uid),
+    [4, 1],
+    "both genuine matches within limit must be found, newest-matching-first",
+  );
+
+  const fullBatches = fetchCalls.filter((c) => !c.isHeaderOnly);
+  // Bounded batches of size <= limit (2), not one fetch of the entire candidate set.
+  for (const batch of fullBatches) {
+    assert.ok(batch.uids.length <= 2, `batch fetched ${batch.uids.length} uids, expected <= limit (2)`);
+  }
+  assert.ok(fullBatches.length >= 2, "must have scanned more than one batch to find both spread-out matches");
+  assert.ok(
+    !fullBatches.some((batch) => batch.uids.length === messages.length),
+    "must never fetch the entire candidate set in a single batch",
+  );
+});
+
+test("searchEmails hasMore/totalMatched are not misleading when a local filter is present", async () => {
+  const { service } = createServiceForSearchTest([
+    { uid: 1, internalDate: new Date("2026-01-01T00:00:00Z"), hasAttachment: true },
+    { uid: 2, internalDate: new Date("2026-02-01T00:00:00Z"), hasAttachment: false },
+  ]);
+
+  const result = await service.searchEmails({ folder: "INBOX", hasAttachment: true, limit: 1 });
+
+  // Only 1 message genuinely matches, and both candidates were fully examined
+  // (the whole 2-candidate folder was scanned to find it) — totalMatched must
+  // reflect the genuine match count, not the raw 2-candidate IMAP SEARCH count,
+  // and hasMore must be false since there is nothing further to find.
+  assert.equal(result.totalMatched, 1);
+  assert.equal(result.hasMore, false);
+});
