@@ -3,6 +3,7 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ProtonMailConfig, SnoozeRecord } from "../types/index.js";
+import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { isProcessAlive, withFileLock } from "../utils/file-lock.js";
 import { parseEmailId } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -50,6 +51,7 @@ export class SnoozeService {
   private _lock: Promise<void> = Promise.resolve();
   private timer?: NodeJS.Timeout;
   private started = false;
+  private identityChecked = false;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -421,6 +423,13 @@ export class SnoozeService {
   // Always reads from disk (no in-memory cache) — see the identical comment
   // in DeliveryQueueService.loadUnlocked for why.
   private async loadUnlocked(): Promise<SnoozeFile> {
+    // See DeliveryQueueService.loadUnlocked's identical guard: refuse to
+    // read/write this dataDir's store if it belongs to a different account.
+    if (!this.identityChecked) {
+      await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
+      this.identityChecked = true;
+    }
+
     await this.cleanOrphanedTempFiles();
 
     try {

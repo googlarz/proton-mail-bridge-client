@@ -3,6 +3,7 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { EmailTemplateRecord, ProtonMailConfig } from "../types/index.js";
+import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { logger, type Logger } from "../utils/logger.js";
 
@@ -40,6 +41,7 @@ export function renderTemplateText(text: string, variables: Record<string, strin
 export class TemplateService {
   private readonly storePath: string;
   private _lock: Promise<void> = Promise.resolve();
+  private identityChecked = false;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -136,6 +138,13 @@ export class TemplateService {
   // Always reads from disk (no in-memory cache) — see the identical comment
   // in DeliveryQueueService.loadUnlocked for why.
   private async loadUnlocked(): Promise<TemplateFile> {
+    // See DeliveryQueueService.loadUnlocked's identical guard: refuse to
+    // read/write this dataDir's store if it belongs to a different account.
+    if (!this.identityChecked) {
+      await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
+      this.identityChecked = true;
+    }
+
     await this.cleanOrphanedTempFiles();
 
     try {

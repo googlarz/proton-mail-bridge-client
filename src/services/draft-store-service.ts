@@ -9,6 +9,7 @@ import type {
   DraftSendResult,
   ProtonMailConfig,
 } from "../types/index.js";
+import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { extractDomain } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -39,6 +40,7 @@ function createEmptyStore(): DraftStoreFile {
 export class DraftStoreService {
   private readonly draftPath: string;
   private _lock: Promise<void> = Promise.resolve();
+  private identityChecked = false;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -317,6 +319,13 @@ export class DraftStoreService {
   // dataDir must never be invisible to this instance, and its write must
   // never be silently clobbered by a stale in-memory copy on the next save().
   private async loadUnlocked(): Promise<DraftStoreFile> {
+    // See DeliveryQueueService.loadUnlocked's identical guard: refuse to
+    // read/write this dataDir's store if it belongs to a different account.
+    if (!this.identityChecked) {
+      await ensureAccountIdentityMatches(this.config.dataDir, this.config.smtp.username);
+      this.identityChecked = true;
+    }
+
     // GAP-09: Clean up orphaned .tmp files left by a previous crashed write.
     await this.cleanOrphanedTempFiles();
 
