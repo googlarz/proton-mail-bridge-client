@@ -887,9 +887,16 @@ export class LocalIndexService {
 
     // Threads keyed off a References/In-Reply-To chain ("ref:...") or the
     // participant-signature fallback have no persisted thread_id to query by —
-    // resolving them needs the cross-message reference graph, so this path stays
-    // scoped to the capped snapshot as before.
-    const snapshot = await this.loadSnapshot();
+    // resolving them needs the cross-message reference graph. Read the full,
+    // uncapped message set here (not the DEFAULT_SNAPSHOT_LIMIT-capped snapshot
+    // loadSnapshot() would give us) so a fallback thread entirely outside the
+    // newest 5000 messages — or one whose id only comes out right when its
+    // complete membership is considered — still resolves instead of throwing
+    // "Thread not found".
+    const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
+    const syncCheckpoints = this.loadCheckpointsSync(db);
+    const messages = this.loadAllMessages(db);
+    const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
     const thread = this.buildThreads(snapshot, true).find((entry) => entry.id === threadId) as
       | ThreadDetail
       | undefined;
@@ -2121,14 +2128,11 @@ export class LocalIndexService {
       .all(...params)
       .map((row) => this.rowToEmailSummary(row as MessageRow));
 
+    const byId = new Map(candidates.map((email) => [email.id, email]));
+
     const threadIds = [...new Set(
       candidates.map((email) => email.threadId?.trim()).filter((id): id is string => Boolean(id)),
     )];
-    if (threadIds.length === 0) {
-      return candidates;
-    }
-
-    const byId = new Map(candidates.map((email) => [email.id, email]));
     const CHUNK_SIZE = 200;
     for (let i = 0; i < threadIds.length; i += CHUNK_SIZE) {
       const chunk = threadIds.slice(i, i + CHUNK_SIZE);
@@ -2141,7 +2145,38 @@ export class LocalIndexService {
       }
     }
 
+    // A candidate with no persisted thread_id but a References/In-Reply-To header
+    // is only a PARTIAL view of its (unpersisted) reference chain — the same chain
+    // assignResolvedThreadKeys() walks when buildThreads() runs on whatever we
+    // return. Handing back just the SQL-matched subset would make that walk
+    // compute a synthetic "ref:..." id from incomplete membership, different from
+    // the id an unfiltered getThreads() call would compute for the same thread
+    // (see Finding 1 in the thread-identity review). So whenever such a candidate
+    // is present, pull in the full, uncapped message set — the same source
+    // getThreadById() now uses for these threads — so the thread is always built
+    // from its complete membership, filtered query or not.
+    const hasUnresolvedReferenceCandidate = candidates.some(
+      (email) => !email.threadId?.trim() && (email.inReplyTo || (email.references?.length ?? 0) > 0),
+    );
+    if (hasUnresolvedReferenceCandidate) {
+      for (const email of this.loadAllMessages(db)) {
+        byId.set(email.id, email);
+      }
+    }
+
     return [...byId.values()];
+  }
+
+  // Uncapped message read, unlike loadMessages() (deliberately capped at
+  // DEFAULT_SNAPSHOT_LIMIT). Used only where correctness requires seeing every
+  // message regardless of index size — resolving a fallback/reference-chain
+  // thread's full membership (see loadThreadCandidateMessages() and
+  // getThreadById() above).
+  private loadAllMessages(db: Database.Database): EmailSummary[] {
+    return db
+      .prepare(`SELECT * FROM messages`)
+      .all()
+      .map((row) => this.rowToEmailSummary(row as MessageRow));
   }
 
   private async loadSnapshot(options: SnapshotLoadOptions = {}): Promise<SnapshotData> {
