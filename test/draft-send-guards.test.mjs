@@ -459,3 +459,97 @@ test("checkDue: SMTP and markSent both succeeding produces sent:1, failed:0 and 
     assert.equal(smtp.calls, 1);
   });
 });
+
+// P2: schedule_draft's duplicate-scheduling guard used to be a non-atomic
+// read-then-write (list() to check for an existing pending record, then
+// enqueue()) with no lock spanning both steps — two concurrent schedule_draft
+// calls for the same draft could both observe "no existing pending schedule"
+// and both enqueue(), producing two independent pending records for one
+// draft. The dedupe check now lives inside enqueue() itself, under the same
+// lock as the write, so it's atomic.
+test("enqueue: two concurrent scheduled_send enqueues for the same draft — only one succeeds, the other is rejected as already scheduled", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    const draftStore = new DraftStoreService(config);
+    const smtp = slowSmtp(5);
+    const queue = new DeliveryQueueService(config, smtp);
+    queue.setDraftStore(draftStore);
+
+    const draft = await draftStore.createDraft({ to: ["someone@example.com"], subject: "Hi", body: "body" });
+    const sendAt = new Date(Date.now() + 60_000).toISOString();
+
+    const [resultA, resultB] = await Promise.allSettled([
+      queue.enqueue({ to: draft.to, subject: draft.subject, body: draft.body }, sendAt, "scheduled_send", draft.id),
+      queue.enqueue({ to: draft.to, subject: draft.subject, body: draft.body }, sendAt, "scheduled_send", draft.id),
+    ]);
+
+    const fulfilled = [resultA, resultB].filter((r) => r.status === "fulfilled");
+    const rejected = [resultA, resultB].filter((r) => r.status === "rejected");
+
+    assert.equal(fulfilled.length, 1, "exactly one enqueue must succeed");
+    assert.equal(rejected.length, 1, "exactly one enqueue must be rejected, not silently duplicated");
+    assert.match(rejected[0].reason.message, /already has a pending scheduled send/i);
+
+    const pendingRecords = (await queue.list()).filter(
+      (record) => record.sourceDraftId === draft.id && record.status === "pending",
+    );
+    assert.equal(pendingRecords.length, 1, "exactly one pending DeliveryQueueRecord must exist for this draft");
+
+    // Confirm checkDue()'s misleading "likely a manual send_draft" message is
+    // no longer reachable for this race: the duplicate was rejected at
+    // schedule time and never queued, so when the single surviving record
+    // fires, its draft claim succeeds cleanly — no race, no skip message.
+    const outcome = await queue.checkDue();
+    assert.equal(outcome.sent, 0, "sendAt is in the future — nothing should fire yet");
+    const stillPending = (await queue.list()).filter(
+      (record) => record.sourceDraftId === draft.id && record.status === "pending",
+    );
+    assert.equal(stillPending.length, 1);
+  });
+});
+
+test("enqueue: no regression — scheduled_send for two different drafts, and an undo_send-kind enqueue, still both succeed", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    const draftStore = new DraftStoreService(config);
+    const smtp = slowSmtp(5);
+    const queue = new DeliveryQueueService(config, smtp);
+    queue.setDraftStore(draftStore);
+
+    const draftOne = await draftStore.createDraft({ to: ["one@example.com"], subject: "One", body: "body" });
+    const draftTwo = await draftStore.createDraft({ to: ["two@example.com"], subject: "Two", body: "body" });
+    const sendAt = new Date(Date.now() + 60_000).toISOString();
+
+    const recordOne = await queue.enqueue(
+      { to: draftOne.to, subject: draftOne.subject, body: draftOne.body },
+      sendAt,
+      "scheduled_send",
+      draftOne.id,
+    );
+    const recordTwo = await queue.enqueue(
+      { to: draftTwo.to, subject: draftTwo.subject, body: draftTwo.body },
+      sendAt,
+      "scheduled_send",
+      draftTwo.id,
+    );
+    assert.notEqual(recordOne.id, recordTwo.id);
+
+    // undo_send-kind enqueues carry no sourceDraftId and must be unaffected
+    // by this dedupe check — two of them (even with no sourceDraftId at all)
+    // must both succeed.
+    const undoOne = await queue.enqueue(
+      { to: ["undo@example.com"], subject: "Undo", body: "body" },
+      new Date(Date.now() + 5_000).toISOString(),
+      "undo_send",
+    );
+    const undoTwo = await queue.enqueue(
+      { to: ["undo@example.com"], subject: "Undo", body: "body" },
+      new Date(Date.now() + 5_000).toISOString(),
+      "undo_send",
+    );
+    assert.notEqual(undoOne.id, undoTwo.id);
+
+    const all = await queue.list();
+    assert.equal(all.filter((record) => record.status === "pending").length, 4);
+  });
+});

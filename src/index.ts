@@ -4384,6 +4384,15 @@ export function createServer(
           // after an ambiguous response) sailed past the status check above
           // and enqueued a second, independent delivery-queue record. Both
           // fire independently later, delivering the same email twice.
+          //
+          // Found live: this list()-then-check was itself a non-atomic
+          // TOCTOU race — two concurrent schedule_draft calls could both
+          // observe no pending record here and both enqueue. The real
+          // enforcement now lives inside deliveryQueueService.enqueue()
+          // itself, under its lock, which is what actually prevents the
+          // duplicate. This external check is kept only as an optional
+          // early-exit optimization to avoid a wasted round-trip to the lock
+          // in the common non-racing case.
           const alreadyPendingScheduled = (await deliveryQueueService.list()).find(
             (record) => record.sourceDraftId === draft.id && record.status === "pending",
           );
