@@ -52,7 +52,12 @@ export class DraftStoreService {
   async listDrafts(includeSent = false): Promise<DraftRecord[]> {
     const store = await this.load();
     return Object.values(store.drafts)
-      .filter((draft) => includeSent || draft.status === "draft")
+      // A draft stuck in "sending" (e.g. the process crashed between
+      // claimForSending() and markSent()) is not a completed record like
+      // "sent" — it still needs a human to notice and resolve it, so it's
+      // treated as active here rather than being hidden from the default
+      // (non-includeSent) listing.
+      .filter((draft) => includeSent || draft.status !== "sent")
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
@@ -186,6 +191,61 @@ export class DraftStoreService {
       store.drafts[id] = nextDraft;
       await this.save(store);
       return nextDraft;
+    });
+  }
+
+  // Atomically claims a draft for sending: only succeeds when the draft is
+  // still "draft", flipping it to "sending" under the same lock that reads
+  // it. Found live: two concurrent send_draft calls for the same draft id
+  // both read status "draft", both passed the old plain-getDraft check, and
+  // both called SMTP — a genuine duplicate send. Routing the read+write
+  // through withLock closes that window: whichever call wins the claim sees
+  // "draft" and flips it, and every other caller — a second concurrent
+  // send_draft, an already-completed send, or a scheduled send that already
+  // fired via DeliveryQueueService.checkDue() — sees a non-"draft" status
+  // and is rejected before ever reaching SMTP.
+  async claimForSending(id: string): Promise<DraftRecord> {
+    return this.withLock(async () => {
+      const store = await this.loadUnlocked();
+      const existing = store.drafts[id];
+      if (!existing) {
+        throw new Error(`Draft not found for id ${id}`);
+      }
+      if (existing.status !== "draft") {
+        throw new Error(`Draft ${id} is not sendable (status: ${existing.status})`);
+      }
+
+      const updatedAt = new Date().toISOString();
+      const nextDraft: DraftRecord = {
+        ...existing,
+        status: "sending",
+        updatedAt,
+      };
+
+      store.updatedAt = updatedAt;
+      store.drafts[id] = nextDraft;
+      await this.save(store);
+      return nextDraft;
+    });
+  }
+
+  // Reverts a failed send's claim back to "draft" so the draft can be
+  // retried, mirroring SnoozeService.wake()'s catch handler reverting
+  // "waking" back to "pending" on a failed moveEmail. Only writes if the
+  // record is still "sending" — if something else already moved it on
+  // (e.g. a concurrent finalize), this must not clobber that outcome.
+  async revertSending(id: string): Promise<void> {
+    await this.withLock(async () => {
+      const store = await this.loadUnlocked();
+      const existing = store.drafts[id];
+      if (!existing || existing.status !== "sending") {
+        return;
+      }
+
+      const updatedAt = new Date().toISOString();
+      store.drafts[id] = { ...existing, status: "draft", updatedAt };
+      store.updatedAt = updatedAt;
+      await this.save(store);
     });
   }
 

@@ -119,7 +119,7 @@ function printHelp(): void {
       "  send                   Send an email (--to --subject --body or stdin, --undo-window <s>, --wait)",
       "  reply <emailId>        Reply to an email (--body or stdin, --reply-all)",
       "  forward <emailId>      Forward an email (--to, optional --body or stdin)",
-      "  test-email <addr>      Send a test email to verify SMTP",
+      "  test-email <addr>      Send a test email to verify SMTP (--confirmed if required)",
       "  thread <id>            Fetch a full thread by id",
       "  thread-brief <id>      Summarise a thread (latest in/out, next action)",
       "  thread-action <id> <a> Apply action to all messages in a thread",
@@ -1560,7 +1560,11 @@ async function runTestEmail(parsed: ParsedCliArgs): Promise<void> {
   await withMcpClient(async (client) => {
     const result = await client.callTool({
       name: "send_test_email",
-      arguments: { to, customMessage: getStringFlag(parsed.flags, "message") },
+      arguments: {
+        to,
+        customMessage: getStringFlag(parsed.flags, "message"),
+        confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined,
+      },
     });
     printToolCallResult(result as Record<string, unknown>, wantJson);
   });
