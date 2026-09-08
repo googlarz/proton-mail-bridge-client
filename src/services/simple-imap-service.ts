@@ -137,7 +137,21 @@ const BULK_BATCH_TIMEOUT_MS = 60_000;
 // single-message fetch.
 const LABEL_RESOLVE_PER_FOLDER_TIMEOUT_MS = 5_000;
 const LABEL_RESOLVE_BUDGET_MS = 15_000;
-const UID_VALIDITY_MISMATCH_ERROR = "UID validity mismatch - local index is stale, run sync_emails to refresh";
+// Deliberately not phrased like a generic integrity/checksum failure (that's
+// EMAIL_ID_INVALID_MESSAGE's job in helpers.ts, for a genuinely corrupted
+// id) — this is a *different* failure mode: the id's folder+uid are
+// internally consistent and correctly formed, they just no longer identify
+// a real message, because the mailbox they were minted against was
+// recreated (full recreation, some migration scenarios) between then and
+// now. "Stale index, re-sync" undersold the risk here: re-syncing doesn't
+// make the *old* id valid again, it can only mint new, current ones — the
+// old one must never be silently honored against the new generation.
+// Exported so index.ts's bulk-operation resolution path (getBulkNotFoundEmailIds)
+// can report a stale-generation id with the exact same wording a single-message
+// mutation would raise via assertMailboxUidValidity, rather than drifting into
+// two subtly different phrasings for what is the same underlying failure.
+export const UID_VALIDITY_MISMATCH_ERROR =
+  "This email reference is from before the mailbox changed (folder was recreated or migrated) and no longer points to a valid message. Re-fetch the email (e.g. via search_emails or get_emails) to get a current reference.";
 
 function collectErrorText(error: unknown): string {
   const values: string[] = [];
@@ -1091,6 +1105,7 @@ export class SimpleIMAPService {
         return { folder, total, limit, offset, emails: [] };
       }
 
+      const uidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
       const emails: EmailSummary[] = [];
       const fetchQuery = input.includeSnippet ? FETCH_DETAIL_QUERY : FETCH_SUMMARY_QUERY;
 
@@ -1114,7 +1129,7 @@ export class SimpleIMAPService {
         }
         const uidSet = page.join(",");
         for await (const message of client.fetch(uidSet, fetchQuery, { uid: true })) {
-          const summary = this.toSummary(folder, message);
+          const summary = this.toSummary(folder, message, uidValidity);
           const enriched =
             input.includeSnippet && message.source
               ? await this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), false)
@@ -1143,7 +1158,7 @@ export class SimpleIMAPService {
         }
 
         for await (const message of client.fetch(`${startSeq}:${endSeq}`, fetchQuery)) {
-          const summary = this.toSummary(folder, message);
+          const summary = this.toSummary(folder, message, uidValidity);
           const enriched =
             input.includeSnippet && message.source
               ? await this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), false)
@@ -1211,6 +1226,7 @@ export class SimpleIMAPService {
         }
 
         const fetchQuery = input.includeSnippet ? FETCH_DETAIL_QUERY : FETCH_SUMMARY_QUERY;
+        const uidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
 
         if (!hasLocalOnlyFilters) {
           // UID order does not track date order (e.g. after a cross-provider import),
@@ -1229,7 +1245,7 @@ export class SimpleIMAPService {
 
           const results: EmailSummary[] = [];
           for await (const message of client.fetch(targetUids, fetchQuery, { uid: true })) {
-            const summary = this.toSummary(folder, message);
+            const summary = this.toSummary(folder, message, uidValidity);
             const enriched =
               input.includeSnippet && message.source
                 ? await this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), false)
@@ -1267,7 +1283,7 @@ export class SimpleIMAPService {
         for (let offset = 0; offset < orderedUids.length; offset += limit) {
           const batch = orderedUids.slice(offset, offset + limit);
           for await (const message of client.fetch(batch, fetchQuery, { uid: true })) {
-            const summary = this.toSummary(folder, message);
+            const summary = this.toSummary(folder, message, uidValidity);
             const enriched =
               input.includeSnippet && message.source
                 ? await this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), false)
@@ -1646,6 +1662,7 @@ export class SimpleIMAPService {
   }> {
     const { folder, uid } = parseEmailId(emailId);
     let targetUid: number | undefined;
+    let targetFolderUidValidity: string | undefined;
 
     await this.withTimeout(
       this.withMailbox(folder, false, async (client) => {
@@ -1670,6 +1687,21 @@ export class SimpleIMAPService {
         if (targetUid === undefined && client.capabilities.has("UIDPLUS")) {
           throw new Error(`Email not found for id ${emailId}`);
         }
+        // targetEmailId (below) must embed the *target* folder's own
+        // UIDVALIDITY, not the source folder's — they're different mailboxes
+        // and can carry unrelated values. STATUS works against a
+        // non-selected mailbox (same primitive getFolderStats already uses),
+        // so this doesn't require a second SELECT/lock on targetFolder.
+        // Best-effort: a failure here shouldn't fail an otherwise-successful
+        // move, it just means the returned targetEmailId falls back to the
+        // no-uidValidity (still fully valid, just not staleness-checkable)
+        // format, same as it always did before this field existed.
+        if (targetUid !== undefined) {
+          const targetStatus = await client
+            .status(targetFolder, { uidValidity: true })
+            .catch(() => undefined);
+          targetFolderUidValidity = targetStatus?.uidValidity?.toString();
+        }
       }),
       BULK_ITEM_TIMEOUT_MS,
       `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms moving email ${emailId} to ${targetFolder}`,
@@ -1677,7 +1709,7 @@ export class SimpleIMAPService {
 
     const cached = this.messageCache.get(emailId);
     this.messageCache.delete(emailId);
-    const targetEmailId = targetUid ? createEmailId(targetFolder, targetUid) : undefined;
+    const targetEmailId = targetUid ? createEmailId(targetFolder, targetUid, targetFolderUidValidity) : undefined;
     if (cached && targetUid && targetEmailId) {
       this.messageCache.set(targetEmailId, {
         ...cached,
@@ -1755,6 +1787,7 @@ export class SimpleIMAPService {
     emailId: string,
     labelsToAdd: string[],
     labelsToRemove: string[],
+    uidValidity?: string,
   ): Promise<{ emailId: string; added: string[]; removed: string[]; notFound: string[]; failedLabels?: string[] }> {
     const { folder, uid } = parseEmailId(emailId);
     const added: string[] = [];
@@ -1777,6 +1810,7 @@ export class SimpleIMAPService {
     let sourceExists = false;
     await this.withTimeout(
       this.withMailbox(folder, true, async (client) => {
+        this.assertMailboxUidValidity(client, uidValidity);
         const msg = await client.fetchOne(String(uid), { uid: true, envelope: true }, { uid: true });
         if (msg !== false) {
           sourceExists = true;
@@ -1940,13 +1974,29 @@ export class SimpleIMAPService {
     });
   }
 
+  // Lightweight, lock-free UIDVALIDITY lookup — IMAP STATUS works against a
+  // mailbox that isn't currently SELECTed, so this doesn't need (and
+  // deliberately avoids) taking a getMailboxLock the way withMailbox does.
+  // Used at bulk-operation resolution time (resolveUidsForBulkOp) to learn
+  // the folder's *current* generation once, up front, so every id in the
+  // batch can be checked against that single point-in-time value rather than
+  // each mutation discovering staleness independently and inconsistently
+  // partway through the batch.
+  async getMailboxUidValidity(folder: string): Promise<string | undefined> {
+    const client = await this.ensureConnected();
+    const status = await client.status(folder, { uidValidity: true });
+    return status?.uidValidity?.toString();
+  }
+
   async emptyFolder(folder: string): Promise<{ folder: string; deleted: number }> {
     if (folder.toUpperCase() === "INBOX") {
       throw new Error("emptyFolder cannot be used on INBOX. Move messages to Trash first.");
     }
 
+    let folderUidValidity: string | undefined;
     const uids: number[] = await this.withTimeout(
       this.withMailbox(folder, true, async (client) => {
+        folderUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
         const found = await client.search({ all: true }, { uid: true });
         return Array.isArray(found) ? found : [];
       }),
@@ -1967,9 +2017,11 @@ export class SimpleIMAPService {
       `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms emptying folder ${folder}`,
     );
 
-    // Purge from cache
+    // Purge from cache — must reconstruct the exact same id toSummary/etc.
+    // would have cached these messages under (including the folder's
+    // UIDVALIDITY at the time), or a stale cache entry survives this purge.
     for (const uid of uids) {
-      this.messageCache.delete(createEmailId(folder, uid));
+      this.messageCache.delete(createEmailId(folder, uid, folderUidValidity));
     }
     this.folderCache = undefined;
 
@@ -1991,6 +2043,17 @@ export class SimpleIMAPService {
     folder: string,
     emailIds: string[] | undefined,
     match: BulkMatchCriteria | undefined,
+    // Pre-fetched current UIDVALIDITY for `folder`, from a single shared
+    // getMailboxUidValidity call at the top of the caller's bulk handler
+    // (see index.ts's bulk_delete/bulk_update_flags/bulk_update_labels
+    // cases) — reused here instead of resolveUidsForBulkOp fetching its own,
+    // so the exact same point-in-time value backs both the uid resolution
+    // below and index.ts's own stale-id reporting (getBulkNotFoundEmailIds).
+    // Callers with no pre-fetched value (e.g. bulkMove's internal call,
+    // which has no resolve-once wiring of its own) leave this undefined and
+    // resolveUidsForBulkOp fetches it itself, so the staleness check below
+    // still applies uniformly to every bulk entry point.
+    currentUidValidity?: string,
   ): Promise<number[]> {
     if (emailIds !== undefined && match !== undefined) {
       throw new Error("Provide either emailIds or match, not both");
@@ -2000,6 +2063,7 @@ export class SimpleIMAPService {
     }
 
     if (emailIds !== undefined) {
+      const uidValidity = currentUidValidity ?? (await this.getMailboxUidValidity(folder));
       // parseEmailId throws on anything malformed. index.ts's
       // getBulkNotFoundEmailIds already expects a bad/wrong-folder id to be
       // silently excluded here and reported separately as notFound — but a
@@ -2007,6 +2071,16 @@ export class SimpleIMAPService {
       // live: bulk_move with 10 valid ids and one malformed one threw
       // "Invalid emailId" and moved none of the 10 valid ones, instead of
       // moving them and reporting just the bad one as notFound.
+      //
+      // Same exclude-not-throw treatment now applies to a *stale* id (one
+      // whose embedded uidValidity doesn't match the folder's current
+      // generation) — excluded from the uids this batch actually acts on,
+      // rather than either silently resolving against the wrong-generation
+      // UID or failing the whole batch over one stale entry. An id with no
+      // embedded uidValidity at all (pre-this-fix format) is unverifiable,
+      // not stale — same "can't check it, so don't block on it" stance
+      // assertMailboxUidValidity already takes for the single-message
+      // mutation path.
       return emailIds
         .map((id) => {
           try {
@@ -2015,7 +2089,12 @@ export class SimpleIMAPService {
             return undefined;
           }
         })
-        .filter((parsed): parsed is ReturnType<typeof parseEmailId> => parsed !== undefined && parsed.folder === folder)
+        .filter(
+          (parsed): parsed is ReturnType<typeof parseEmailId> =>
+            parsed !== undefined &&
+            parsed.folder === folder &&
+            (parsed.uidValidity === undefined || parsed.uidValidity === uidValidity),
+        )
         .map((parsed) => parsed.uid);
     }
 
@@ -2085,11 +2164,18 @@ export class SimpleIMAPService {
 
     if (uids.length > 0) {
       const uidSet = uids.join(",");
+      // Captured for the source-folder emailIds built below — these
+      // identify the *pre-move* message (source folder + uid), matching
+      // sourceEmailId's role in the single-email moveEmail, not a
+      // resolvable post-move reference, so the source folder's own
+      // UIDVALIDITY (not the target's) is the correct one to embed.
+      let sourceUidValidity: string | undefined;
       try {
         let uidMap: Map<number, number> | undefined;
         let hasUidPlus = false;
         await this.withTimeout(
           this.withMailbox(folder, false, async (client) => {
+            sourceUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
             const moved = await client.messageMove(uidSet, input.targetFolder, { uid: true });
             if (moved === false) {
               throw new Error(`Server did not move uid set ${uidSet}`);
@@ -2101,7 +2187,7 @@ export class SimpleIMAPService {
           `Timed out after ${BULK_BATCH_TIMEOUT_MS}ms moving uid set ${uidSet}`,
         );
         for (const uid of uids) {
-          const emailId = createEmailId(folder, uid);
+          const emailId = createEmailId(folder, uid, sourceUidValidity);
           // `moved === false` above only catches an empty/invalid range,
           // not a syntactically valid UID that doesn't match any message —
           // IMAP's MOVE silently succeeds with nothing moved in that case
@@ -2123,7 +2209,7 @@ export class SimpleIMAPService {
         }
       } catch (err) {
         for (const uid of uids) {
-          const emailId = createEmailId(folder, uid);
+          const emailId = createEmailId(folder, uid, sourceUidValidity);
           results.push({ uid, emailId, ok: false, error: String(err) });
           failed++;
         }
@@ -2175,6 +2261,7 @@ export class SimpleIMAPService {
 
     if (uids.length > 0) {
       const uidSet = uids.join(",");
+      let folderUidValidity: string | undefined;
       try {
         let existingUids: Set<number>;
         if (input.permanent || !trashFolder) {
@@ -2187,6 +2274,7 @@ export class SimpleIMAPService {
           // after the fact. Found live: bulk_delete with one real id and
           // one deliberately fake one reported ok:true for both.
           existingUids = await this.withMailbox(folder, true, async (client) => {
+            folderUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
             const found = await client.search({ uid: uidSet }, { uid: true });
             return new Set(Array.isArray(found) ? found : []);
           });
@@ -2198,6 +2286,7 @@ export class SimpleIMAPService {
           let uidMap: Map<number, number> | undefined;
           let hasUidPlus = false;
           await this.withMailbox(folder, false, async (client) => {
+            folderUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
             const moved = await client.messageMove(uidSet, trashFolder, { uid: true });
             if (moved === false) throw new Error(`Server did not move uid set ${uidSet} to trash`);
             uidMap = moved.uidMap;
@@ -2208,7 +2297,7 @@ export class SimpleIMAPService {
           existingUids = hasUidPlus && uidMap ? new Set(uidMap.keys()) : new Set(uids);
         }
         for (const uid of uids) {
-          const emailId = createEmailId(folder, uid);
+          const emailId = createEmailId(folder, uid, folderUidValidity);
           if (!existingUids.has(uid)) {
             results.push({ uid, emailId, ok: false, error: `Email not found for uid ${uid}` });
             failed++;
@@ -2220,7 +2309,7 @@ export class SimpleIMAPService {
         }
       } catch (err) {
         for (const uid of uids) {
-          const emailId = createEmailId(folder, uid);
+          const emailId = createEmailId(folder, uid, folderUidValidity);
           results.push({ uid, emailId, ok: false, error: String(err) });
           failed++;
         }
@@ -2271,9 +2360,11 @@ export class SimpleIMAPService {
 
     if (uids.length > 0) {
       const uidSet = uids.join(",");
+      let folderUidValidity: string | undefined;
       try {
         const notAppliedByUid = new Map<number, string[]>();
         await this.withMailbox(folder, false, async (client) => {
+          folderUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
           if (flagsToAdd.length > 0) {
             await client.messageFlagsAdd(uidSet, flagsToAdd, { uid: true });
           }
@@ -2290,7 +2381,7 @@ export class SimpleIMAPService {
           }
         });
         for (const uid of uids) {
-          const emailId = createEmailId(folder, uid);
+          const emailId = createEmailId(folder, uid, folderUidValidity);
           // A UID absent from the fetch loop above (never got a
           // notAppliedByUid entry) means the IMAP FETCH found no message
           // for it — the earlier STORE call already silently no-op'd for
@@ -2309,7 +2400,7 @@ export class SimpleIMAPService {
         }
       } catch (err) {
         for (const uid of uids) {
-          const emailId = createEmailId(folder, uid);
+          const emailId = createEmailId(folder, uid, folderUidValidity);
           results.push({ uid, emailId, ok: false, error: String(err) });
           failed++;
         }
@@ -2357,8 +2448,17 @@ export class SimpleIMAPService {
     let failed = 0;
     const results: BulkOperationResult["results"] = [];
 
+    // Fetched once for the whole batch rather than inside the per-uid loop
+    // below — resolveUidsForBulkOp already validated every uid against this
+    // exact generation at resolution time; re-passing that same value into
+    // each updateMessageLabels call below is a cheap, no-extra-round-trip
+    // defense-in-depth recheck (updateMessageLabels's own withMailbox call
+    // re-verifies it against the *live* mailbox at execution time), not a
+    // second independent resolution.
+    const folderUidValidity = await this.getMailboxUidValidity(folder).catch(() => undefined);
+
     for (const uid of uids) {
-      const emailId = createEmailId(folder, uid);
+      const emailId = createEmailId(folder, uid, folderUidValidity);
       try {
         // updateMessageLabels never throws for a failed COPY/removal — it
         // catches per-label and reports failures via its own return value
@@ -2371,7 +2471,7 @@ export class SimpleIMAPService {
         // folder was never actually created — get_folders afterward showed
         // no such folder at all.
         const result = await this.withTimeout(
-          this.updateMessageLabels(emailId, labelsToAdd, labelsToRemove),
+          this.updateMessageLabels(emailId, labelsToAdd, labelsToRemove, folderUidValidity),
           BULK_ITEM_TIMEOUT_MS,
           `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms updating labels for ${emailId}`,
         );
@@ -2491,8 +2591,10 @@ export class SimpleIMAPService {
 
     for (const folder of foldersToSearch) {
       try {
+        let folderUidValidity: string | undefined;
         const [byMsgId, byRefs] = await Promise.all([
           this.withMailbox(folder, true, async (client) => {
+            folderUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
             const found = await client.search({ header: { "Message-ID": messageId } }, { uid: true });
             return Array.isArray(found) ? found : [];
           }).catch(() => [] as number[]),
@@ -2505,7 +2607,7 @@ export class SimpleIMAPService {
         for (const uid of [...byMsgId, ...byRefs]) {
           if (!seen.has(uid)) {
             seen.add(uid);
-            results.push({ folder, uid, emailId: createEmailId(folder, uid) });
+            results.push({ folder, uid, emailId: createEmailId(folder, uid, folderUidValidity) });
           }
         }
       } catch { /* skip inaccessible folders */ }
@@ -2775,7 +2877,7 @@ export class SimpleIMAPService {
 
       const emails: EmailSummary[] = [];
       for await (const message of client.fetch(`${plan.startUid}:${plan.endUid}`, fetchQuery, { uid: true })) {
-        const summary = this.toSummary(folder, message);
+        const summary = this.toSummary(folder, message, uidValidity);
         const enriched = message.source
           ? this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), input.includeAttachmentText)
           : summary;
@@ -2824,7 +2926,7 @@ export class SimpleIMAPService {
     });
   }
 
-  async archiveEmail(emailId: string): Promise<{
+  async archiveEmail(emailId: string, uidValidity?: string): Promise<{
     emailId: string;
     sourceEmailId: string;
     fromFolder: string;
@@ -2834,10 +2936,10 @@ export class SimpleIMAPService {
     targetEmailId?: string;
   }> {
     const targetFolder = await this.resolveSpecialFolder("\\Archive", ["Archive", "All Mail"]);
-    return this.moveEmail(emailId, targetFolder);
+    return this.moveEmail(emailId, targetFolder, uidValidity);
   }
 
-  async trashEmail(emailId: string): Promise<{
+  async trashEmail(emailId: string, uidValidity?: string): Promise<{
     emailId: string;
     sourceEmailId: string;
     fromFolder: string;
@@ -2847,12 +2949,13 @@ export class SimpleIMAPService {
     targetEmailId?: string;
   }> {
     const targetFolder = await this.resolveSpecialFolder("\\Trash", ["Trash"]);
-    return this.moveEmail(emailId, targetFolder);
+    return this.moveEmail(emailId, targetFolder, uidValidity);
   }
 
   async restoreEmail(
     emailId: string,
     targetFolder?: string,
+    uidValidity?: string,
   ): Promise<{
     emailId: string;
     sourceEmailId: string;
@@ -2864,7 +2967,7 @@ export class SimpleIMAPService {
   }> {
     const destination =
       targetFolder?.trim() || (await this.resolveSpecialFolder("\\Inbox", ["INBOX"]));
-    return this.moveEmail(emailId, destination);
+    return this.moveEmail(emailId, destination, uidValidity);
   }
 
   async getAnalyticsSample(days = 30, limitPerFolder = 100): Promise<EmailSummary[]> {
@@ -2923,6 +3026,16 @@ export class SimpleIMAPService {
       uid = await this.findUidByHeader(folder, "message-id", input.messageId);
     }
 
+    // STATUS works against a mailbox that isn't currently SELECTed (same
+    // reasoning as getMailboxUidValidity/getFolderStats) — append() above
+    // doesn't guarantee `folder` is selected on this client, so this can't
+    // just read client.mailbox.uidValidity the way a withMailbox callback
+    // would. Best-effort: a failure here shouldn't fail an otherwise-
+    // successful append, it just means the returned emailId falls back to
+    // the no-uidValidity format, same as it always did before this field
+    // existed.
+    const uidValidity = uid ? await this.getMailboxUidValidity(folder).catch(() => undefined) : undefined;
+
     this.folderCache = undefined;
     this.lastSyncAt = new Date().toISOString();
 
@@ -2940,7 +3053,7 @@ export class SimpleIMAPService {
     const result: RemoteDraftRef = {
       folder,
       uid,
-      emailId: uid ? createEmailId(folder, uid) : undefined,
+      emailId: uid ? createEmailId(folder, uid, uidValidity) : undefined,
       messageId: input.messageId,
       syncedAt: this.lastSyncAt,
     };
@@ -3138,12 +3251,12 @@ export class SimpleIMAPService {
     });
   }
 
-  private toSummary(folder: string, message: FetchMessageObject): EmailSummary {
+  private toSummary(folder: string, message: FetchMessageObject, uidValidity?: string): EmailSummary {
     const flags = [...(message.flags ?? [])];
     const attachments = extractAttachments(message.bodyStructure);
 
     return {
-      id: createEmailId(folder, message.uid),
+      id: createEmailId(folder, message.uid, uidValidity),
       folder,
       uid: message.uid,
       seq: message.seq,
@@ -3223,7 +3336,7 @@ export class SimpleIMAPService {
           throw new Error(`Email not found for id ${emailId}`);
         }
 
-        const summary = this.toSummary(folder, message);
+        const summary = this.toSummary(folder, message, (client.mailbox || undefined)?.uidValidity?.toString());
         const parsed = await this.parseSource(message.source);
         const enriched = this.enrichSummaryFromParsed(summary, parsed, true);
         return { enriched, parsed };
@@ -3878,8 +3991,10 @@ export class SimpleIMAPService {
     }
 
     if (messageId) {
+      let existingFolderUidValidity: string | undefined;
       const existingUid = await this.withTimeout(
         this.withMailbox(folder, true, async (client) => {
+          existingFolderUidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
           const uids = await client.search({ header: { "Message-ID": messageId! } }, { uid: true });
           return Array.isArray(uids) && uids.length > 0 ? uids[uids.length - 1] : undefined;
         }),
@@ -3888,7 +4003,7 @@ export class SimpleIMAPService {
       ).catch(() => undefined);
 
       if (existingUid !== undefined) {
-        const existingEmailId = createEmailId(folder, existingUid);
+        const existingEmailId = createEmailId(folder, existingUid, existingFolderUidValidity);
         return { folder, uid: existingUid, emailId: existingEmailId, alreadyExists: true, existingEmailId };
       }
     }
@@ -3904,9 +4019,16 @@ export class SimpleIMAPService {
       uid = await this.findUidByHeader(folder, "message-id", messageId);
     }
 
+    // Best-effort, same reasoning as upsertRemoteDraft's identical lookup —
+    // append() doesn't guarantee `folder` stays selected on this client, so
+    // STATUS (works on a non-selected mailbox) is used instead of trusting
+    // client.mailbox here. A failure just falls back to the no-uidValidity
+    // format, same as before this field existed.
+    const uidValidity = uid ? await this.getMailboxUidValidity(folder).catch(() => undefined) : undefined;
+
     this.folderCache = undefined;
     this.lastSyncAt = new Date().toISOString();
 
-    return { folder, uid, emailId: uid ? createEmailId(folder, uid) : undefined };
+    return { folder, uid, emailId: uid ? createEmailId(folder, uid, uidValidity) : undefined };
   }
 }

@@ -24,7 +24,7 @@ import { BackgroundSyncService } from "./services/background-sync-service.js";
 import { DeliveryQueueService } from "./services/delivery-queue-service.js";
 import { DraftStoreService } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
-import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService } from "./services/simple-imap-service.js";
+import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService, UID_VALIDITY_MISMATCH_ERROR } from "./services/simple-imap-service.js";
 import { applySignature, SMTPService } from "./services/smtp-service.js";
 import { SnoozeService } from "./services/snooze-service.js";
 import { TemplateService } from "./services/template-service.js";
@@ -2602,26 +2602,31 @@ async function runEmailAction(
   action: EmailAction,
   targetFolder?: string,
 ): Promise<unknown> {
+  // undefined for an old-format id (no embedded UIDVALIDITY) — every method
+  // below's own assertMailboxUidValidity guard already treats that as
+  // "unverifiable, don't block on it", same as every direct single-message
+  // tool handler.
+  const uidValidity = parseEmailId(emailId).uidValidity;
   switch (action) {
     case "mark_read":
-      return imapService.markEmailRead(emailId, true);
+      return imapService.markEmailRead(emailId, true, uidValidity);
     case "mark_unread":
-      return imapService.markEmailRead(emailId, false);
+      return imapService.markEmailRead(emailId, false, uidValidity);
     case "star":
-      return imapService.starEmail(emailId, true);
+      return imapService.starEmail(emailId, true, uidValidity);
     case "unstar":
-      return imapService.starEmail(emailId, false);
+      return imapService.starEmail(emailId, false, uidValidity);
     case "archive":
-      return imapService.archiveEmail(emailId);
+      return imapService.archiveEmail(emailId, uidValidity);
     case "trash":
-      return imapService.trashEmail(emailId);
+      return imapService.trashEmail(emailId, uidValidity);
     case "restore":
-      return imapService.restoreEmail(emailId, targetFolder);
+      return imapService.restoreEmail(emailId, targetFolder, uidValidity);
     case "move":
       if (!targetFolder) throw new McpError(ErrorCode.InvalidParams, "targetFolder is required for action 'move'.");
-      return imapService.moveEmail(emailId, targetFolder);
+      return imapService.moveEmail(emailId, targetFolder, uidValidity);
     case "delete":
-      return imapService.deleteEmail(emailId);
+      return imapService.deleteEmail(emailId, uidValidity);
   }
 }
 
@@ -2770,12 +2775,29 @@ function ensureBulkBatchSize(uidsLength: number, max: number): void {
   }
 }
 
-function getBulkNotFoundEmailIds(emailIds: string[] | undefined, folder: string): string[] {
+interface BulkExcludedEmailId {
+  emailId: string;
+  error: string;
+}
+
+// `currentUidValidity` is optional and, when omitted, preserves the exact
+// original behavior (folder/format check only) — every caller that already
+// knows the folder's current UIDVALIDITY (the bulk_delete/bulk_update_flags/
+// bulk_update_labels handlers below, via a single shared getMailboxUidValidity
+// call reused for both this and resolveUidsForBulkOp) should pass it, so a
+// stale-generation id gets its own clear error instead of being lumped in
+// with a genuinely malformed one.
+function getBulkNotFoundEmailIds(
+  emailIds: string[] | undefined,
+  folder: string,
+  currentUidValidity?: string,
+): BulkExcludedEmailId[] {
   if (!emailIds) {
     return [];
   }
 
-  return emailIds.filter((emailId) => {
+  const excluded: BulkExcludedEmailId[] = [];
+  for (const emailId of emailIds) {
     // Found live: this compared the emailId's folder segment against
     // `folder` as raw, still-percent-encoded text — createEmailId encodes
     // it (Folders/MCP-Snoozed -> Folders%2FMCP-Snoozed) but `folder` here
@@ -2786,34 +2808,56 @@ function getBulkNotFoundEmailIds(emailIds: string[] | undefined, folder: string)
     // reported genuinely valid ids as notFound. parseEmailId already does
     // the matching decodeURIComponent correctly — reuse it instead of
     // hand-rolling the same parse a second, inconsistent way.
+    let parsed: ReturnType<typeof parseEmailId>;
     try {
-      const parsed = parseEmailId(emailId);
-      return parsed.folder !== folder;
+      parsed = parseEmailId(emailId);
     } catch {
-      return true;
+      excluded.push({ emailId, error: "Email ID could not be resolved to a UID." });
+      continue;
     }
-  });
+    if (parsed.folder !== folder) {
+      excluded.push({ emailId, error: "Email ID could not be resolved to a UID." });
+      continue;
+    }
+    // An id with no embedded uidValidity (pre-this-fix format) is
+    // unverifiable, not stale — same "can't check it, so don't block on
+    // it" stance assertMailboxUidValidity already takes for the
+    // single-message mutation path. Only a *checkable* mismatch is
+    // treated as a stale reference. resolveUidsForBulkOp applies this
+    // exact same exclusion (see its own comment) against the exact same
+    // currentUidValidity value, so the uid this method silently drops from
+    // execution and the id this method reports as excluded here always
+    // agree.
+    if (
+      currentUidValidity !== undefined &&
+      parsed.uidValidity !== undefined &&
+      parsed.uidValidity !== currentUidValidity
+    ) {
+      excluded.push({ emailId, error: UID_VALIDITY_MISMATCH_ERROR });
+    }
+  }
+  return excluded;
 }
 
 function withBulkNotFound(
   result: BulkOperationResult,
-  notFoundEmailIds: string[],
+  excludedEmailIds: BulkExcludedEmailId[],
 ): BulkOperationResult {
-  if (notFoundEmailIds.length === 0) {
+  if (excludedEmailIds.length === 0) {
     return result;
   }
 
   return {
     ...result,
-    total: result.total + notFoundEmailIds.length,
-    notFound: result.notFound + notFoundEmailIds.length,
+    total: result.total + excludedEmailIds.length,
+    notFound: result.notFound + excludedEmailIds.length,
     results: [
       ...result.results,
-      ...notFoundEmailIds.map((emailId) => ({
+      ...excludedEmailIds.map(({ emailId, error }) => ({
         uid: 0,
         emailId,
         ok: false,
-        error: "Email ID could not be resolved to a UID.",
+        error,
       })),
     ],
   };
@@ -4558,8 +4602,13 @@ export function createServer(
           if (labelsToAdd.length === 0 && labelsToRemove.length === 0) {
             throw new McpError(ErrorCode.InvalidParams, "Provide at least one label in labelsToAdd or labelsToRemove.");
           }
+          // undefined for an old-format id (no embedded UIDVALIDITY) —
+          // updateMessageLabels's own assertMailboxUidValidity guard already
+          // treats that as "unverifiable, don't block on it", same as every
+          // other mutation handler below.
+          const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.updateMessageLabels(emailId, labelsToAdd, labelsToRemove),
+            imapService.updateMessageLabels(emailId, labelsToAdd, labelsToRemove, uidValidity),
           );
           return createTextResult(result, false, [emailSource({ id: emailId } as Parameters<typeof emailSource>[0])]);
         }
@@ -4576,8 +4625,9 @@ export function createServer(
           if (flagsToAdd.length === 0 && flagsToRemove.length === 0) {
             throw new McpError(ErrorCode.InvalidParams, "Provide at least one flag in flagsToAdd or flagsToRemove.");
           }
+          const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.updateMessageFlags(emailId, flagsToAdd, flagsToRemove),
+            imapService.updateMessageFlags(emailId, flagsToAdd, flagsToRemove, uidValidity),
           );
           return createTextResult(result, false, [emailSource({ id: emailId } as Parameters<typeof emailSource>[0])]);
         }
@@ -4651,7 +4701,12 @@ export function createServer(
           const folder = optionalString(args, "folder") ?? "INBOX";
           const targetFolder = requireString(args, "targetFolder");
           const max = getBulkMaxBatchSize(args);
-          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder);
+          // Only fetched (an extra STATUS round trip) when there are ids to
+          // check against it — a match-only bulk_move has no ids that could
+          // be stale, since match resolves directly against the live
+          // mailbox each time.
+          const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
+          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
           const preview = await imapService.bulkMove({
             emailIds,
             match,
@@ -4688,12 +4743,22 @@ export function createServer(
           if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
-          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder);
+          // Fetched once, up front, and reused for both the notFound
+          // reporting below and resolveUidsForBulkOp's own filtering — a
+          // single shared point-in-time value, same "resolve once" spirit
+          // as the uids resolution itself, so the ids this call reports as
+          // excluded and the uids it actually acts on can never disagree
+          // about which generation was current. Only fetched when there are
+          // ids to check against it (a match-only call has none).
+          const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
+          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
           // Resolve the match/emailIds set exactly once and reuse it for both
           // the preview and the real run — see resolveUidsForBulkOp's
           // comment for why re-resolving `match` a second time (the old
           // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
-          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match);
+          // Also excludes any id whose embedded UIDVALIDITY is stale — see
+          // resolveUidsForBulkOp's comment.
+          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
           ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
             const preview = await imapService.bulkDelete({
@@ -4733,12 +4798,16 @@ export function createServer(
           if (flagsToAdd.length === 0 && flagsToRemove.length === 0) throw new McpError(ErrorCode.InvalidParams, "Provide flagsToAdd or flagsToRemove.");
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
-          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder);
+          // See the bulk_delete case above for why this is fetched once and
+          // shared between notFound reporting and uid resolution.
+          const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
+          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
           // Resolve the match/emailIds set exactly once and reuse it for both
           // the preview and the real run — see resolveUidsForBulkOp's
           // comment for why re-resolving `match` a second time (the old
           // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
-          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match);
+          // Also excludes any id whose embedded UIDVALIDITY is stale.
+          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
           ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
             const preview = await imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, dryRun: true });
@@ -4763,12 +4832,16 @@ export function createServer(
           const labelsToRemove = Array.isArray(args.labelsToRemove) ? (args.labelsToRemove as unknown[]).map(String) : [];
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
-          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder);
+          // See the bulk_delete case above for why this is fetched once and
+          // shared between notFound reporting and uid resolution.
+          const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
+          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
           // Resolve the match/emailIds set exactly once and reuse it for both
           // the preview and the real run — see resolveUidsForBulkOp's
           // comment for why re-resolving `match` a second time (the old
           // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
-          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match);
+          // Also excludes any id whose embedded UIDVALIDITY is stale.
+          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
           ensureBulkBatchSize(uids.length, max);
           if (normalizeBoolean(args.dryRun, false)) {
             const preview = await imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, dryRun: true });
@@ -4908,42 +4981,51 @@ export function createServer(
             ),
           );
 
-        case "mark_email_read":
+        case "mark_email_read": {
           ensureEmailActionAllowed(
             config.runtime,
             normalizeBoolean(args.isRead, true) ? "mark_read" : "mark_unread",
           );
+          const emailId = requireString(args, "emailId");
+          const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
             await withAudit(auditService, name, args, async () =>
               imapService.markEmailRead(
-                requireString(args, "emailId"),
+                emailId,
                 normalizeBoolean(args.isRead, true),
+                uidValidity,
               ),
             ),
           );
+        }
 
-        case "star_email":
+        case "star_email": {
           ensureEmailActionAllowed(
             config.runtime,
             normalizeBoolean(args.isStarred, true) ? "star" : "unstar",
           );
+          const emailId = requireString(args, "emailId");
+          const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
             await withAudit(auditService, name, args, async () =>
               imapService.starEmail(
-                requireString(args, "emailId"),
+                emailId,
                 normalizeBoolean(args.isStarred, true),
+                uidValidity,
               ),
             ),
           );
+        }
 
         case "move_email":
         {
           ensureEmailActionAllowed(config.runtime, "move");
           const emailId = requireString(args, "emailId");
           const targetFolder = requireString(args, "targetFolder");
+          const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () => {
             try {
-              return await imapService.moveEmail(emailId, targetFolder);
+              return await imapService.moveEmail(emailId, targetFolder, uidValidity);
             } catch (error) {
               if (isMissingTargetFolderError(error)) {
                 throw new McpError(
@@ -4971,8 +5053,10 @@ export function createServer(
         case "archive_email":
         {
           ensureEmailActionAllowed(config.runtime, "archive");
+          const emailId = requireString(args, "emailId");
+          const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.archiveEmail(requireString(args, "emailId")),
+            imapService.archiveEmail(emailId, uidValidity),
           );
           const sources = result.targetEmailId
             ? [
@@ -4991,8 +5075,10 @@ export function createServer(
         case "trash_email":
         {
           ensureEmailActionAllowed(config.runtime, "trash");
+          const emailId = requireString(args, "emailId");
+          const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.trashEmail(requireString(args, "emailId")),
+            imapService.trashEmail(emailId, uidValidity),
           );
           const sources = result.targetEmailId
             ? [
@@ -5011,10 +5097,13 @@ export function createServer(
         case "restore_email":
         {
           ensureEmailActionAllowed(config.runtime, "restore");
+          const emailId = requireString(args, "emailId");
+          const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
             imapService.restoreEmail(
-              requireString(args, "emailId"),
+              emailId,
               optionalString(args, "targetFolder"),
+              uidValidity,
             ),
           );
           const sources = result.targetEmailId
@@ -5110,14 +5199,17 @@ export function createServer(
           return createTextResult(result);
         }
 
-        case "delete_email":
+        case "delete_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${String(args.emailId ?? "?")} (cannot be recovered)`);
           ensureMailboxWriteAllowed(config.runtime);
+          const emailId = requireString(args, "emailId");
+          const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
             await withAudit(auditService, name, args, async () =>
-              imapService.deleteEmail(requireString(args, "emailId")),
+              imapService.deleteEmail(emailId, uidValidity),
             ),
           );
+        }
 
         case "batch_email_action":
         {
