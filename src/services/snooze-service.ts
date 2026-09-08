@@ -129,24 +129,38 @@ export class SnoozeService {
   // process, silently reintroducing the exact lost-update race that lock
   // exists to prevent.
   private async wake(id: string, status: "woken" | "canceled"): Promise<SnoozeRecord> {
-    const claimed = await this.withLock(async () => {
+    // The locked callback reports whether THIS call is the one that flipped
+    // pending -> waking, not just the record's resulting status — a status of
+    // "waking" alone doesn't say who put it there, and treating any "waking"
+    // record as "my own claim" is exactly the race that let a timer-driven
+    // wake and a user-initiated cancel both call moveEmail for the same
+    // record.
+    const claim = await this.withLock(async () => {
       const store = await this.loadUnlocked();
       const record = store.items[id];
       if (!record) {
         throw new Error(`Snoozed email not found for id ${id}`);
       }
       if (record.status !== "pending") {
-        return record;
+        return { record, claimedByMe: false };
       }
       record.status = "waking";
       await this.save(store);
-      return record;
+      return { record, claimedByMe: true };
     });
 
-    if (claimed.status !== "waking") {
-      // Already resolved by another wake() call, or nothing to do.
-      return claimed;
+    if (!claim.claimedByMe) {
+      // Someone else already claimed this record — either it's already
+      // terminal (nothing to do), or another wake() call is mid-move. Never
+      // call moveEmail from this path; wait for the winning caller's outcome
+      // instead.
+      if (claim.record.status !== "waking") {
+        return claim.record;
+      }
+      return this.awaitWakeOutcome(id);
     }
+
+    const claimed = claim.record;
 
     let moved: Awaited<ReturnType<SimpleIMAPService["moveEmail"]>>;
     try {
@@ -209,6 +223,21 @@ export class SnoozeService {
 
   async cancel(id: string): Promise<SnoozeRecord> {
     return this.wake(id, "canceled");
+  }
+
+  // Polls for the winning wake() caller's outcome instead of issuing a second
+  // moveEmail for a record this call didn't claim. Bounded by
+  // SNOOZE_WAKE_TIMEOUT_MS — the same ceiling the winning caller's moveEmail
+  // is already held to via imapService.withTimeout — so a non-claiming caller
+  // can never be left waiting past that caller's own worst case.
+  private async awaitWakeOutcome(id: string): Promise<SnoozeRecord> {
+    const deadline = Date.now() + SNOOZE_WAKE_TIMEOUT_MS;
+    let record = await this.get(id);
+    while (record.status === "waking" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      record = await this.get(id);
+    }
+    return record;
   }
 
   async get(id: string): Promise<SnoozeRecord> {
