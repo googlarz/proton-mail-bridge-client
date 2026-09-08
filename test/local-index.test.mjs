@@ -1379,6 +1379,93 @@ test("getFollowUpCandidates, getActionableThreads and getLabels find/count beyon
   }
 });
 
+test("getFollowUpCandidates does not treat one-way automated senders as pending on you", async () => {
+  // Regression test for a real-mailbox finding: pendingOn:"you" only ever checked whether
+  // the latest message was outgoing, so every never-replied-to automated notification
+  // (auction/shipping/no-reply senders) counted as "awaiting your reply" forever, since it
+  // never ages out and is never replied to. Reproduced live against a 57k-message mailbox
+  // where this inflated pendingOn:"you" to ~49000 of ~57000 threads.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-automated-sender-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const emails = [
+      {
+        id: "INBOX::1",
+        folder: "INBOX",
+        uid: 1,
+        seq: 1,
+        messageId: "<auto-1@example.com>",
+        threadId: "automated-thread",
+        subject: "Your auction has ended",
+        from: [{ address: "notifications@auctions.example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: tenDaysAgo,
+        internalDate: tenDaysAgo,
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: "Your auction has ended",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      },
+      {
+        id: "INBOX::2",
+        folder: "INBOX",
+        uid: 2,
+        seq: 2,
+        messageId: "<human-1@example.com>",
+        threadId: "human-thread",
+        subject: "Can you review this?",
+        from: [{ address: "colleague@example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: tenDaysAgo,
+        internalDate: tenDaysAgo,
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: "Can you review this?",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      },
+    ];
+
+    await service.recordSnapshot({
+      syncedAt: new Date().toISOString(),
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: emails.length,
+          unseen: 0,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: emails.length, total: emails.length, strategy: "full" }],
+      emails,
+    });
+
+    const followUps = await service.getFollowUpCandidates({ minAgeHours: 24 });
+    assert.equal(followUps.total, 1, "only the real human thread should be pending on you");
+    assert.equal(followUps.threads[0].id, "imap:human-thread");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("getSyncCheckpointMap reads sync_state directly without touching the messages table", async () => {
   // Regression test for the Performance finding: getSyncCheckpointMap() used to call
   // loadSnapshot(), which also fetched and deserialized up to 5000 message rows via

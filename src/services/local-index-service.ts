@@ -438,6 +438,18 @@ function isOutgoingMessage(message: Pick<EmailSummary, "from">, ownerEmail?: str
   return message.from.some((address) => lowerCaseAddress(address.address) === owner);
 }
 
+// ponytail: cheap local-part heuristic, no schema change (no stored List-Unsubscribe/Precedence
+// header). Catches the bulk of automated senders (auction/shipping/billing notifications, etc.)
+// that were otherwise all counted as threads "pending on you" forever, since a one-way automated
+// message is never replied to and never ages out. Upgrade path: store List-Unsubscribe/Precedence
+// at index time and use that instead if this substring heuristic proves too coarse in practice.
+const AUTOMATED_SENDER_PATTERN =
+  /(^|[._-])(no-?reply|donotreply|do-not-reply|notification|powiadomien|mailer-daemon|postmaster|bounce)/i;
+
+function isLikelyAutomatedSender(message: Pick<EmailSummary, "from">): boolean {
+  return message.from.some((address) => AUTOMATED_SENDER_PATTERN.test(address.address ?? ""));
+}
+
 function actionableThreadScore(
   thread: ThreadDetail,
   ownerEmail?: string,
@@ -450,7 +462,9 @@ function actionableThreadScore(
   const pendingOn: ActionableThreadSummary["pendingOn"] = latestMessage
     ? latestIsOutgoing
       ? "them"
-      : "you"
+      : isLikelyAutomatedSender(latestMessage)
+        ? "unknown"
+        : "you"
     : "unknown";
 
   let score = 0;
