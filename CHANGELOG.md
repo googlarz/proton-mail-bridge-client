@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.6] — 2026-09-08
+
+Real-mailbox verification of v2.0.5 against a live 57k-message, 4.6k-thread Proton account (rather than mocks).
+
+### Fixed
+- **`get_follow_up_candidates`/`get_actionable_threads`/`get_inbox_digest`'s staleAwaitingYou classified nearly every automated notification as "pending on you" forever.** `actionableThreadScore()` decided `pendingOn` purely from whether the latest message was outgoing — a one-way automated message (auction/shipping/no-reply notifications) is never replied to and never ages out, so it counted as awaiting-your-reply indefinitely. Reproduced live: 49,026 of ~57,000 threads (including 20-year-old Allegro auction notifications) were flagged `pendingOn: "you"`, making the feature's output effectively noise. Added a local-part heuristic (no-reply/notification/mailer-daemon/etc. senders) to classify these as `"unknown"` instead of `"you"`.
+
 ## [2.0.5] — 2026-09-08
 
 A self-initiated adversarial review round, matching the methodology of the four external reviews that preceded it (real reproductions against compiled code, not code reading): 5 parallel audits each writing and running actual exploit scripts against `dist/`, covering claim/lock state machines, UIDVALIDITY and account-identity call-site completeness, bulk/batch operation consistency, local-index migration/capping, and a fresh sweep of previously-unreviewed files. Ten confirmed findings, fixed and verified with new regression tests (264 → 294).
