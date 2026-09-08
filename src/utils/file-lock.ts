@@ -35,7 +35,15 @@ function lockPathFor(storePath: string): string {
 // could — so this never touches the other process, it only inspects the
 // error: ESRCH means no such process (dead), EPERM means it exists but we
 // lack permission to signal it (still alive), anything else is inconclusive.
-function isProcessAlive(pid: number): boolean | undefined {
+//
+// Exported so DeliveryQueueService/SnoozeService's startup recovery can reuse
+// this exact mechanism to decide whether a record's *owning process* (not
+// just a lock file) is still alive — see the "ownerPid" handling in their
+// recoverInterruptedSends()/recoverInterruptedWakes(). Same rationale as the
+// stale-lock fix below: a transient status alone can't tell "owner crashed"
+// apart from "owner still working", only a liveness check on the recorded
+// PID can.
+export function isProcessAlive(pid: number): boolean | undefined {
   try {
     process.kill(pid, 0);
     return true;

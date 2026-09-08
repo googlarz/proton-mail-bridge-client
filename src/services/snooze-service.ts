@@ -3,7 +3,7 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ProtonMailConfig, SnoozeRecord } from "../types/index.js";
-import { withFileLock } from "../utils/file-lock.js";
+import { isProcessAlive, withFileLock } from "../utils/file-lock.js";
 import { parseEmailId } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
@@ -27,6 +27,14 @@ const SNOOZE_WAKE_TIMEOUT_MS = 30_000;
 // checkDue() prunes it — otherwise this JSON file grows without bound for
 // the lifetime of the account, since nothing else ever removes a record.
 const TERMINAL_RECORD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+// How stale a "waking" record's claim must be before recoverInterruptedWakes
+// will reclaim it even though its owner PID looks alive (or can't be
+// determined) — guards against PID reuse: the original owner exited and,
+// after enough time, the OS handed that same PID to an unrelated process
+// (see file-lock.ts's isStale for the identical reasoning). Generous relative
+// to SNOOZE_WAKE_TIMEOUT_MS, since a live owner should resolve "waking"
+// within that bound.
+const RECOVERY_STALE_MS = 5 * 60 * 1000;
 
 interface SnoozeFile {
   version: number;
@@ -145,6 +153,12 @@ export class SnoozeService {
         return { record, claimedByMe: false };
       }
       record.status = "waking";
+      // Tag the claim with this process's identity — see the ownerPid
+      // comment on SnoozeRecord and recoverInterruptedWakes() below for why
+      // a second process's startup recovery needs this to avoid stomping on
+      // a still-live wake.
+      record.ownerPid = process.pid;
+      record.claimedAt = new Date().toISOString();
       await this.save(store);
       return { record, claimedByMe: true };
     });
@@ -318,17 +332,57 @@ export class SnoozeService {
     return changed;
   }
 
+  // A "waking" record does NOT necessarily mean the previous process died
+  // mid-wake — this dataDir can be, and regularly is, shared by more than one
+  // live server process (see withLock's comment), and that other process may
+  // still be in the middle of a perfectly healthy wake right now. Blindly
+  // reverting every "waking" record found here would let a second instance's
+  // startup stomp on a first instance's live, in-flight wake. Instead, only
+  // reclaim a record whose owning process is demonstrably gone — see
+  // isAbandonedClaim below — mirroring file-lock.ts's PID-liveness check for
+  // stale locks.
   private async recoverInterruptedWakes(): Promise<void> {
     await this.withLock(async () => {
       const store = await this.loadUnlocked();
+      const now = Date.now();
       let changed = false;
       for (const record of Object.values(store.items)) {
         if (record.status !== "waking") continue;
+        if (!this.isAbandonedClaim(record.ownerPid, record.claimedAt ?? record.createdAt, now)) continue;
         record.status = "pending";
         changed = true;
       }
       if (changed) await this.save(store);
     });
+  }
+
+  // Decides whether a "waking" claim belongs to a process that's actually
+  // gone, rather than just "in a transient status" — the two used to be
+  // treated as the same thing, which is the bug this exists to fix. Reuses
+  // file-lock.ts's exact PID-liveness mechanism (process.kill(pid, 0)) rather
+  // than reimplementing it.
+  //
+  // - ownerPid missing entirely (a record written before this field
+  //   existed): there's no PID to check, so fall back to this module's
+  //   original unconditional-recovery behavior rather than leave a genuinely
+  //   crashed pre-fix record stuck in "waking" forever.
+  // - ownerPid confirmed dead (ESRCH): abandoned, reclaim now regardless of
+  //   age.
+  // - ownerPid alive, or the liveness probe was inconclusive: a live owner
+  //   is actively working this record, so leave it alone — UNLESS the claim
+  //   is older than RECOVERY_STALE_MS, which is treated as abandoned anyway
+  //   to guard against PID reuse (the original owner exited and the OS later
+  //   handed that same PID to an unrelated process). A live owner's wake
+  //   should resolve well within that window.
+  private isAbandonedClaim(ownerPid: number | undefined, referenceTimestamp: string, now: number): boolean {
+    if (ownerPid === undefined) {
+      return true;
+    }
+    if (isProcessAlive(ownerPid) === false) {
+      return true;
+    }
+    const ageMs = now - new Date(referenceTimestamp).getTime();
+    return ageMs > RECOVERY_STALE_MS;
   }
 
   private async ensureSnoozeFolder(): Promise<void> {

@@ -386,3 +386,96 @@ test("checkDue stops retrying a permanently-failing wake and marks it terminally
     assert.equal(result.failed, 0, "a terminally-failed item is no longer 'due' for retry");
   });
 });
+
+test("startup recovery leaves a 'waking' record alone when its owner PID is still alive (second instance, same dataDir)", async () => {
+  // Regression for: a second server process starting against a shared
+  // dataDir must not stomp on a first process's live, in-flight wake just
+  // because it finds a "waking" record — that record's owner (this test
+  // process itself, via process.pid) is demonstrably alive.
+  await withTempDir(async (dataDir) => {
+    const imap = fakeImap();
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const liveId = "live-owner-snooze-1";
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, "snoozed.json"),
+      JSON.stringify({
+        version: 1,
+        items: {
+          [liveId]: {
+            id: liveId,
+            createdAt: new Date(Date.now() - 5_000).toISOString(),
+            wakeAt: new Date(Date.now() - 1_000).toISOString(),
+            status: "waking",
+            originalFolder: "INBOX",
+            currentEmailId: "Folders/MCP-Snoozed::7",
+            ownerPid: process.pid,
+            claimedAt: new Date(Date.now() - 5_000).toISOString(),
+          },
+        },
+      }, null, 2),
+      "utf8",
+    );
+
+    const service = new SnoozeService(createConfig(dataDir), imap);
+    service.start();
+    service.stop();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(imap.moves.length, 0, "a second instance must never move an email owned by a live process's wake");
+    const after = await service.get(liveId);
+    assert.equal(after.status, "waking", "recovery must leave a live owner's record untouched");
+  });
+});
+
+test("startup recovery still reverts a 'waking' record to pending when its owner PID is dead or absent", async () => {
+  await withTempDir(async (dataDir) => {
+    const imap = fakeImap();
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const deadPidId = "dead-owner-snooze-1";
+    const noOwnerId = "no-owner-snooze-1";
+    // A PID this large is extremely unlikely to correspond to a running
+    // process on any real system.
+    const fakeDeadPid = 999_999;
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, "snoozed.json"),
+      JSON.stringify({
+        version: 1,
+        items: {
+          [deadPidId]: {
+            id: deadPidId,
+            createdAt: new Date(Date.now() - 5_000).toISOString(),
+            wakeAt: new Date(Date.now() - 1_000).toISOString(),
+            status: "waking",
+            originalFolder: "INBOX",
+            currentEmailId: "Folders/MCP-Snoozed::8",
+            ownerPid: fakeDeadPid,
+            claimedAt: new Date(Date.now() - 5_000).toISOString(),
+          },
+          // No ownerPid at all — a record written before this fix existed.
+          [noOwnerId]: {
+            id: noOwnerId,
+            createdAt: new Date(Date.now() - 5_000).toISOString(),
+            wakeAt: new Date(Date.now() - 1_000).toISOString(),
+            status: "waking",
+            originalFolder: "INBOX",
+            currentEmailId: "Folders/MCP-Snoozed::9",
+          },
+        },
+      }, null, 2),
+      "utf8",
+    );
+
+    const service = new SnoozeService(createConfig(dataDir), imap);
+    // Call recoverInterruptedWakes directly (TypeScript `private` is
+    // compile-time only; the compiled method is a normal, callable method)
+    // so this test isolates recovery's own status flip from the
+    // fired-and-forgotten checkDue() catch-up pass that start() also kicks
+    // off, which would otherwise race to move the now-"pending" email.
+    await service.recoverInterruptedWakes();
+
+    assert.equal((await service.get(deadPidId)).status, "pending");
+    assert.equal((await service.get(noOwnerId)).status, "pending");
+  });
+});
