@@ -283,6 +283,95 @@ test("a 'sending' record left over from a crashed process is never auto-resent o
   });
 });
 
+test("startup recovery leaves a 'sending' record alone when its owner PID is still alive (second instance, same dataDir)", async () => {
+  // Regression for: a second server process starting against a shared
+  // dataDir must not stomp on a first process's live, in-flight send just
+  // because it finds a "sending" record — that record's owner (this test
+  // process itself, via process.pid) is demonstrably alive.
+  await withTempDir(async (dataDir) => {
+    await mkdir(dataDir, { recursive: true });
+    const liveId = "live-owner-item-1";
+    await writeFile(
+      join(dataDir, "delivery-queue.json"),
+      JSON.stringify({
+        version: 1,
+        items: {
+          [liveId]: {
+            id: liveId,
+            kind: "undo_send",
+            createdAt: new Date(Date.now() - 5_000).toISOString(),
+            sendAt: new Date(Date.now() - 1_000).toISOString(),
+            status: "sending",
+            ownerPid: process.pid,
+            claimedAt: new Date(Date.now() - 5_000).toISOString(),
+            payload,
+          },
+        },
+      }, null, 2),
+      "utf8",
+    );
+
+    const smtp = fakeSmtp();
+    const queue = new DeliveryQueueService(createConfig(dataDir), smtp);
+    await queue.start();
+    queue.stop();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(smtp.sent.length, 0, "a second instance must never resend an item owned by a live process");
+    const after = await queue.get(liveId);
+    assert.equal(after.status, "sending", "recovery must leave a live owner's record untouched");
+  });
+});
+
+test("startup recovery still marks a 'sending' record failed when its owner PID is dead or absent", async () => {
+  await withTempDir(async (dataDir) => {
+    await mkdir(dataDir, { recursive: true });
+    const deadPidId = "dead-owner-item-1";
+    const noOwnerId = "no-owner-item-1";
+    // A PID this large is extremely unlikely to correspond to a running
+    // process on any real system.
+    const fakeDeadPid = 999_999;
+    await writeFile(
+      join(dataDir, "delivery-queue.json"),
+      JSON.stringify({
+        version: 1,
+        items: {
+          [deadPidId]: {
+            id: deadPidId,
+            kind: "undo_send",
+            createdAt: new Date(Date.now() - 5_000).toISOString(),
+            sendAt: new Date(Date.now() - 1_000).toISOString(),
+            status: "sending",
+            ownerPid: fakeDeadPid,
+            claimedAt: new Date(Date.now() - 5_000).toISOString(),
+            payload,
+          },
+          // No ownerPid at all — a record written before this fix existed.
+          [noOwnerId]: {
+            id: noOwnerId,
+            kind: "undo_send",
+            createdAt: new Date(Date.now() - 5_000).toISOString(),
+            sendAt: new Date(Date.now() - 1_000).toISOString(),
+            status: "sending",
+            payload,
+          },
+        },
+      }, null, 2),
+      "utf8",
+    );
+
+    const smtp = fakeSmtp();
+    const queue = new DeliveryQueueService(createConfig(dataDir), smtp);
+    await queue.start();
+    queue.stop();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(smtp.sent.length, 0);
+    assert.equal((await queue.get(deadPidId)).status, "failed");
+    assert.equal((await queue.get(noOwnerId)).status, "failed");
+  });
+});
+
 test("enqueue stores an optional sourceDraftId, used by send_draft to detect a still-pending scheduled send", async () => {
   // schedule_draft passes the draft's id here so send_draft can refuse to
   // fire a second, independent send for the same draft — found live: a

@@ -50,6 +50,14 @@ export interface SnoozeRecord {
   // Consecutive failed wake attempts. After MAX_WAKE_FAILURES, status flips
   // to the terminal "failed" instead of retrying every 15s forever.
   failureCount?: number;
+  // The PID that claimed this record into "waking" (see wake()) and when —
+  // lets a second process's startup recovery tell "owner crashed" apart from
+  // "owner is still alive and mid-wake" instead of assuming any "waking"
+  // record found at startup is abandoned. Absent on records written before
+  // this field existed; see SnoozeService.recoverInterruptedWakes for how
+  // that's handled conservatively.
+  ownerPid?: number;
+  claimedAt?: string;
 }
 
 export interface EmailTemplateRecord {
@@ -85,6 +93,15 @@ export interface DeliveryQueueRecord {
   // same draft, instead of firing a second, independent send. See the
   // schedule_draft/send_draft handlers.
   sourceDraftId?: string;
+  // The PID that claimed this record into "sending" (see checkDue()) and
+  // when — lets a second process's startup recovery tell "owner crashed"
+  // apart from "owner is still alive and mid-send" instead of assuming any
+  // "sending" record found at startup is abandoned. Absent on records
+  // written before this field existed; see
+  // DeliveryQueueService.recoverInterruptedSends for how that's handled
+  // conservatively.
+  ownerPid?: number;
+  claimedAt?: string;
 }
 
 export interface SendEmailInput {

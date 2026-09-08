@@ -3,7 +3,7 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DeliveryQueueKind, DeliveryQueueRecord, ProtonMailConfig, SendEmailInput } from "../types/index.js";
-import { withFileLock } from "../utils/file-lock.js";
+import { isProcessAlive, withFileLock } from "../utils/file-lock.js";
 import { ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { withTimeout } from "../utils/helpers.js";
@@ -14,6 +14,14 @@ const SEND_ITEM_TIMEOUT_MS = 30_000;
 // it — otherwise this JSON file grows without bound for the lifetime of the
 // account, since nothing else ever removes a record.
 const TERMINAL_RECORD_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+// How stale a "sending" record's claim must be before recoverInterruptedSends
+// will reclaim it even though its owner PID looks alive (or can't be
+// determined) — guards against PID reuse: the original owner exited and,
+// after enough time, the OS handed that same PID to an unrelated process
+// (see file-lock.ts's isStale for the identical reasoning). Generous relative
+// to SEND_ITEM_TIMEOUT_MS, since a live owner should resolve "sending" within
+// that bound.
+const RECOVERY_STALE_MS = 5 * 60 * 1000;
 
 // Local, persistent send queue shared by undo-send (seconds-long hold) and
 // scheduled-send (minutes/hours/days out). Mirrors DraftStoreService's
@@ -165,6 +173,12 @@ export class DeliveryQueueService {
         const record = store.items[id];
         if (!record || record.status !== "pending") return undefined;
         record.status = "sending";
+        // Tag the claim with this process's identity — see the ownerPid
+        // comment on DeliveryQueueRecord and recoverInterruptedSends() below
+        // for why a second process's startup recovery needs this to avoid
+        // stomping on a still-live send.
+        record.ownerPid = process.pid;
+        record.claimedAt = new Date().toISOString();
         await this.save(store);
         return record;
       });
@@ -259,23 +273,61 @@ export class DeliveryQueueService {
     return changed;
   }
 
-  // Runs once at start(), before the catch-up checkDue() pass. A record
-  // stuck in "sending" means the previous process died between claiming the
-  // item and recording the outcome — whether the SMTP call actually
-  // completed is unknown, so it is never auto-resent. It is marked "failed"
-  // with a reason that says so explicitly, for the caller to verify by hand.
+  // Runs once at start(), before the catch-up checkDue() pass. A "sending"
+  // record does NOT necessarily mean the previous process died mid-send —
+  // this dataDir can be, and regularly is, shared by more than one live
+  // server process (see withLock's comment), and that other process may
+  // still be in the middle of a perfectly healthy send right now. Blindly
+  // "recovering" every "sending" record found here would let a second
+  // instance's startup stomp on a first instance's live, in-flight send.
+  // Instead, only reclaim a record whose owning process is demonstrably gone
+  // — see isAbandonedClaim below — mirroring file-lock.ts's PID-liveness
+  // check for stale locks. Only then is the outcome truly unknown, so it is
+  // never auto-resent; it's marked "failed" with a reason that says so
+  // explicitly, for the caller to verify by hand.
   private async recoverInterruptedSends(): Promise<void> {
     await this.withLock(async () => {
       const store = await this.loadUnlocked();
+      const now = Date.now();
       let changed = false;
       for (const record of Object.values(store.items)) {
         if (record.status !== "sending") continue;
+        if (!this.isAbandonedClaim(record.ownerPid, record.claimedAt ?? record.createdAt, now)) continue;
         record.status = "failed";
         record.failureReason = "Interrupted by a server restart while sending — delivery outcome is unknown. Not auto-resent; check the mailbox's Sent folder to confirm whether it actually went out before resending manually.";
         changed = true;
       }
       if (changed) await this.save(store);
     });
+  }
+
+  // Decides whether a "sending" claim belongs to a process that's actually
+  // gone, rather than just "in a transient status" — the two used to be
+  // treated as the same thing, which is the bug this exists to fix. Reuses
+  // file-lock.ts's exact PID-liveness mechanism (process.kill(pid, 0)) rather
+  // than reimplementing it.
+  //
+  // - ownerPid missing entirely (a record written before this field
+  //   existed): there's no PID to check, so fall back to this module's
+  //   original unconditional-recovery behavior rather than leave a genuinely
+  //   crashed pre-fix record stuck in "sending" forever.
+  // - ownerPid confirmed dead (ESRCH): abandoned, reclaim now regardless of
+  //   age.
+  // - ownerPid alive, or the liveness probe was inconclusive: a live owner
+  //   is actively working this record, so leave it alone — UNLESS the claim
+  //   is older than RECOVERY_STALE_MS, which is treated as abandoned anyway
+  //   to guard against PID reuse (the original owner exited and the OS later
+  //   handed that same PID to an unrelated process). A live owner's send
+  //   should resolve well within that window.
+  private isAbandonedClaim(ownerPid: number | undefined, referenceTimestamp: string, now: number): boolean {
+    if (ownerPid === undefined) {
+      return true;
+    }
+    if (isProcessAlive(ownerPid) === false) {
+      return true;
+    }
+    const ageMs = now - new Date(referenceTimestamp).getTime();
+    return ageMs > RECOVERY_STALE_MS;
   }
 
   // In-process chain (cheap, no I/O) still serializes calls within this
