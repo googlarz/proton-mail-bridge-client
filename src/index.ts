@@ -1198,6 +1198,7 @@ const TOOLS = [
           description: "Preview the impact without mutating the mailbox.",
           default: false,
         },
+        maxBatchSize: { type: "number", description: "Maximum number of messages to process. Defaults to 500. Use to prevent runaway operations." },
       },
       required: ["emailIds", "action"],
     },
@@ -1239,6 +1240,7 @@ const TOOLS = [
           description: "Refresh the local mailbox index from IMAP before resolving the thread.",
           default: false,
         },
+        maxBatchSize: { type: "number", description: "Maximum number of messages to process. Defaults to 500. Use to prevent runaway operations." },
       },
       required: ["threadId", "action"],
     },
@@ -2762,11 +2764,11 @@ async function verifySentCopy(
   return imapService.sentCopyVerify(messageId, "Sent", 8_000);
 }
 
-function getBulkMaxBatchSize(args: Record<string, unknown>): number {
+export function getBulkMaxBatchSize(args: Record<string, unknown>): number {
   return typeof args.maxBatchSize === "number" ? Math.min(args.maxBatchSize, 2000) : 500;
 }
 
-function ensureBulkBatchSize(uidsLength: number, max: number): void {
+export function ensureBulkBatchSize(uidsLength: number, max: number): void {
   if (uidsLength > max) {
     throw new McpError(
       ErrorCode.InvalidParams,
@@ -5228,6 +5230,10 @@ export function createServer(
           if (emailIds.length === 0) {
             throw new McpError(ErrorCode.InvalidParams, "emailIds must contain at least one email id.");
           }
+          // Same safety rail as the bulk_* tools (bulk_delete etc.) — without
+          // it, an arbitrarily large emailIds array would be processed in
+          // full with no size limit at all.
+          ensureBulkBatchSize(emailIds.length, getBulkMaxBatchSize(args));
           const action = requireEmailAction(args);
           ensureEmailActionAllowed(config.runtime, action);
           if (action === "delete") {
@@ -5943,6 +5949,10 @@ export function createServer(
               .filter((message) => !unreadOnly || !message.isRead)
               .map((message) => message.primaryEmailId),
           )];
+          // Same safety rail as the bulk_* tools (bulk_delete etc.) — without
+          // it, a thread with an arbitrarily large message count would be
+          // processed in full with no size limit at all.
+          ensureBulkBatchSize(emailIds.length, getBulkMaxBatchSize(args));
           if (action === "delete") {
             ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${emailIds.length} email(s) in thread (cannot be recovered)`);
           }
