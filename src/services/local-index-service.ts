@@ -1582,9 +1582,27 @@ export class LocalIndexService {
         // the server's UIDVALIDITY no longer matches what was stored, so any
         // old-format row still found at this point is guaranteed to be the
         // same generation, not a stale one.
+        //
+        // parseEmailId documents a THIRD, even older shape on top of the
+        // 3-field one above: <encodedFolder>::<uid>, no checksum at all —
+        // from before the checksum suffix existed. A row can still be
+        // sitting under that shape (an index that predates the checksum
+        // feature and was never fully re-synced for this folder), and it
+        // needs the exact same reconcile-then-delete treatment, or it's
+        // never found and a duplicate row appears alongside it. Mirror
+        // createEmailId's folder encoding but without a checksum suffix —
+        // this is exactly what parseEmailId's legacy (no-checksum) branch
+        // expects to parse back apart.
         let legacyPreview: string | null = null;
         let legacyAttachmentText: string | null = null;
         const legacyEmailId = createEmailId(email.folder, email.uid);
+        const legacyEmailId2Field = `${encodeURIComponent(email.folder)}::${email.uid}`;
+        // Check the more-recent (3-field) shape first, then the older
+        // (2-field) one — a partially-migrated-through-both-stages index is
+        // a genuinely degenerate case, but checking newest-first and
+        // deleting whichever legacy rows are actually found still converges
+        // to exactly one surviving row, never a crash or a lingering
+        // duplicate, regardless of which (or both) exist.
         if (legacyEmailId !== email.id) {
           const legacyRow = findLegacyRow.get(legacyEmailId) as
             | { preview: string | null; attachment_text: string | null }
@@ -1594,6 +1612,17 @@ export class LocalIndexService {
             legacyAttachmentText = legacyRow.attachment_text;
             deleteLegacyRow.run(legacyEmailId);
             deleteFts.run(legacyEmailId);
+          }
+        }
+        if (legacyEmailId2Field !== email.id) {
+          const legacyRow2Field = findLegacyRow.get(legacyEmailId2Field) as
+            | { preview: string | null; attachment_text: string | null }
+            | undefined;
+          if (legacyRow2Field) {
+            legacyPreview = legacyPreview ?? legacyRow2Field.preview;
+            legacyAttachmentText = legacyAttachmentText ?? legacyRow2Field.attachment_text;
+            deleteLegacyRow.run(legacyEmailId2Field);
+            deleteFts.run(legacyEmailId2Field);
           }
         }
 

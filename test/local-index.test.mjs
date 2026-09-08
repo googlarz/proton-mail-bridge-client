@@ -1801,6 +1801,148 @@ test("recordSnapshot reconciles an old-format id row into the new UIDVALIDITY-em
   }
 });
 
+test("recordSnapshot reconciles an old 2-field (pre-checksum) id row into the new UIDVALIDITY-embedding id for the same physical message", async () => {
+  // Reproduces the P2 bug: a row is STILL stored under the oldest 2-field id
+  // shape (folder::uid, no checksum at all — from before the checksum was
+  // introduced), e.g. an index that predates the checksum feature and was
+  // never fully re-synced for this folder. The 3-field migration check alone
+  // never finds this row, so a genuine duplicate appears: the ancient
+  // 2-field row plus a new 4-field row for the same physical message.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-2field-id-migration-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const oldFormatId2Field = "INBOX::42"; // legacy 2-field id, no checksum, no uidValidity
+  const newFormatId = createEmailId("INBOX", 42, "2000000002"); // current 4-field id, same message
+
+  try {
+    // Prime the schema, then manually insert a row under the 2-field id —
+    // simulating a pre-checksum index that was never re-synced for this UID.
+    await service.recordSnapshot({
+      syncedAt: "2026-04-05T09:00:00.000Z",
+      folders: [uidMigrationFolderInfo()],
+      folderStats: [{ folder: "INBOX", fetched: 0, total: 0, strategy: "recent" }],
+      emails: [],
+    });
+
+    const raw = new Database(join(dataDir, "mail-index.sqlite"));
+    raw
+      .prepare(
+        `INSERT INTO messages (
+          email_id, folder, uid, seq, references_json, subject, from_json, to_json, cc_json, bcc_json,
+          reply_to_json, is_read, is_starred, flags_json, preview, has_attachments, attachments_json, labels_json
+        ) VALUES (?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', '[]', ?, 0, '[]', ?, 0, '[]', '[]')`,
+      )
+      .run(oldFormatId2Field, "INBOX", 42, 42, "Hello", 0, "body contains oldsecret");
+    raw.close();
+
+    let status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 1);
+
+    // A later sync — same folder, same uid, same generation — now mints the
+    // current 4-field id, as a metadata-only refresh (isRead flips, no body
+    // re-fetched).
+    status = await service.recordSnapshot({
+      syncedAt: "2026-04-05T10:05:00.000Z",
+      folders: [uidMigrationFolderInfo()],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "incremental_window" }],
+      emails: [{ ...uidMigrationBaseEmail(newFormatId), isRead: true, preview: undefined }],
+    });
+
+    assert.equal(status.storedMessageCount, 1, "the 2-field id-format upgrade must not create a duplicate row");
+
+    const result = await service.search({ query: undefined, folder: "INBOX", limit: 10 });
+    const rows = result.emails.filter((email) => email.uid === 42);
+    assert.equal(rows.length, 1, "exactly one row should exist for this physical message");
+    assert.equal(rows[0].id, newFormatId, "the surviving row should be keyed by the new-format id");
+    assert.equal(rows[0].isRead, true, "the metadata refresh must be reflected");
+    assert.equal(
+      rows[0].preview,
+      "body contains oldsecret",
+      "body content captured under the old 2-field id must not be lost by the migration",
+    );
+
+    const ftsResult = await service.search({ query: "oldsecret", folder: "INBOX", limit: 10 });
+    assert.equal(ftsResult.emails.length, 1, "full-text search must return exactly one match, not two");
+    assert.equal(ftsResult.emails[0].id, newFormatId, "full-text search must find the message under its new id");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("recordSnapshot converges to one row when BOTH a 2-field and a 3-field legacy row exist for the same physical message", async () => {
+  // Genuinely degenerate case: an index partially migrated through both
+  // legacy stages (e.g. it upgraded 2-field -> 3-field for some other UID
+  // range, or the checksum feature landed then UIDVALIDITY-embedding landed
+  // before this exact UID was ever re-synced under either). Both the
+  // 2-field and 3-field rows exist simultaneously for the same (folder, uid).
+  // This must still converge to exactly one surviving row under the new
+  // 4-field id, not crash and not leave a triple-duplicate.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-both-legacy-formats-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const oldFormatId2Field = "INBOX::42";
+  const oldFormatId3Field = createEmailId("INBOX", 42); // legacy 3-field id, no uidValidity
+  const newFormatId = createEmailId("INBOX", 42, "2000000002");
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-04-05T09:00:00.000Z",
+      folders: [uidMigrationFolderInfo()],
+      folderStats: [{ folder: "INBOX", fetched: 0, total: 0, strategy: "recent" }],
+      emails: [],
+    });
+
+    const raw = new Database(join(dataDir, "mail-index.sqlite"));
+    raw
+      .prepare(
+        `INSERT INTO messages (
+          email_id, folder, uid, seq, references_json, subject, from_json, to_json, cc_json, bcc_json,
+          reply_to_json, is_read, is_starred, flags_json, preview, has_attachments, attachments_json, labels_json
+        ) VALUES (?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', '[]', ?, 0, '[]', ?, 0, '[]', '[]')`,
+      )
+      .run(oldFormatId2Field, "INBOX", 42, 42, "Hello", 0, "oldest 2-field content");
+    raw
+      .prepare(
+        `INSERT INTO messages (
+          email_id, folder, uid, seq, references_json, subject, from_json, to_json, cc_json, bcc_json,
+          reply_to_json, is_read, is_starred, flags_json, preview, has_attachments, attachments_json, labels_json
+        ) VALUES (?, ?, ?, ?, '[]', ?, '[]', '[]', '[]', '[]', '[]', ?, 0, '[]', ?, 0, '[]', '[]')`,
+      )
+      .run(oldFormatId3Field, "INBOX", 42, 42, "Hello", 0, "3-field content");
+    raw.close();
+
+    let status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 2, "sanity: both degenerate legacy rows exist before the fixing sync");
+
+    status = await service.recordSnapshot({
+      syncedAt: "2026-04-05T10:05:00.000Z",
+      folders: [uidMigrationFolderInfo()],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "incremental_window" }],
+      emails: [{ ...uidMigrationBaseEmail(newFormatId), isRead: true, preview: undefined }],
+    });
+
+    assert.equal(
+      status.storedMessageCount,
+      1,
+      "both legacy rows must be reconciled away, converging to exactly one row",
+    );
+
+    const result = await service.search({ query: undefined, folder: "INBOX", limit: 10 });
+    const rows = result.emails.filter((email) => email.uid === 42);
+    assert.equal(rows.length, 1, "exactly one row should exist for this physical message");
+    assert.equal(rows[0].id, newFormatId, "the surviving row should be keyed by the new-format id");
+    // 3-field is checked first (documented as the more likely/recent state),
+    // so its content wins when both legacy rows carry content.
+    assert.equal(
+      rows[0].preview,
+      "3-field content",
+      "the more-recent legacy format's content should win when both exist",
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("recordSnapshot does not merge a genuine UIDVALIDITY change that reuses a UID for a different message", async () => {
   // A real UIDVALIDITY change means the server's UID numbering restarted —
   // uid 42 in the new generation is NOT the same physical message as uid 42
