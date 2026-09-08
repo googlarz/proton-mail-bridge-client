@@ -303,3 +303,159 @@ test("scheduled send that fires marks the source draft sent, and a later manual 
     assert.equal(smtp.calls, 1, "the manual send_draft attempt must not reach SMTP a second time");
   });
 });
+
+// P1 (4th review): a draft-store markSent() failure AFTER SMTP and the queue
+// record already succeeded used to fall into checkDue()'s SMTP-failure catch
+// block, which unconditionally reverted the draft claim and double-counted
+// the item as both sent and failed — re-enabling a genuine duplicate
+// delivery via a later send_draft. These tests exercise the fixed
+// checkDue() directly (not the sendDraft()/sendDraftWithAudit() test
+// helpers above, which model index.ts's separate send_draft handler).
+
+test("checkDue: a markSent() failure that recovers on retry still counts as sent, does not revert the draft, and does not enable a duplicate send", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    const draftStore = new DraftStoreService(config);
+    const smtp = slowSmtp(5);
+    const queue = new DeliveryQueueService(config, smtp);
+    queue.setDraftStore(draftStore);
+
+    const draft = await draftStore.createDraft({ to: ["someone@example.com"], subject: "Hi", body: "body" });
+    await queue.enqueue(
+      { to: draft.to, subject: draft.subject, body: draft.body },
+      new Date(Date.now() - 1000).toISOString(),
+      "scheduled_send",
+      draft.id,
+    );
+
+    const originalMarkSent = draftStore.markSent.bind(draftStore);
+    let markSentCalls = 0;
+    let revertCalls = 0;
+    const originalRevertSending = draftStore.revertSending.bind(draftStore);
+    draftStore.revertSending = async (...args) => {
+      revertCalls += 1;
+      return originalRevertSending(...args);
+    };
+    draftStore.markSent = async (...args) => {
+      markSentCalls += 1;
+      if (markSentCalls === 1) {
+        throw new Error("ENOSPC: no space left on device");
+      }
+      return originalMarkSent(...args);
+    };
+
+    const outcome = await queue.checkDue();
+
+    assert.equal(outcome.sent, 1, "the queue item's own send succeeded and must be counted as sent");
+    assert.equal(outcome.failed, 0, "a draft-finalization failure is not a delivery failure and must not be counted as failed");
+    assert.equal(revertCalls, 0, "revertSending must never be called once SMTP and the queue write already succeeded");
+    assert.ok(markSentCalls > 1, "markSent must have been retried");
+
+    const finalDraft = await draftStore.getDraft(draft.id);
+    assert.notEqual(finalDraft.status, "draft", "the draft must never end up back in resendable draft status");
+
+    await assert.rejects(
+      () => sendDraft(draftStore, smtp, draft.id),
+      /not sendable|already sent/i,
+      "a subsequent send_draft on the same draft must be rejected, not allowed to send again",
+    );
+    assert.equal(smtp.calls, 1, "SMTP must have been called exactly once total — no duplicate delivery");
+  });
+});
+
+test("checkDue: markSent() failing on every retry leaves the draft stuck in sending (not reverted to draft), still counted as sent", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    const draftStore = new DraftStoreService(config);
+    const smtp = slowSmtp(5);
+    const queue = new DeliveryQueueService(config, smtp);
+    queue.setDraftStore(draftStore);
+
+    const draft = await draftStore.createDraft({ to: ["someone@example.com"], subject: "Hi", body: "body" });
+    await queue.enqueue(
+      { to: draft.to, subject: draft.subject, body: draft.body },
+      new Date(Date.now() - 1000).toISOString(),
+      "scheduled_send",
+      draft.id,
+    );
+
+    let revertCalls = 0;
+    const originalRevertSending = draftStore.revertSending.bind(draftStore);
+    draftStore.revertSending = async (...args) => {
+      revertCalls += 1;
+      return originalRevertSending(...args);
+    };
+    draftStore.markSent = async () => {
+      throw new Error("ENOSPC: no space left on device");
+    };
+
+    const outcome = await queue.checkDue();
+
+    assert.equal(outcome.sent, 1, "SMTP and the queue write both succeeded, so this still counts as sent");
+    assert.equal(outcome.failed, 0, "a draft-finalization failure is not a delivery failure and must not be counted as failed");
+    assert.equal(revertCalls, 0, "revertSending must never be called once SMTP and the queue write already succeeded");
+
+    const finalDraft = await draftStore.getDraft(draft.id);
+    assert.equal(finalDraft.status, "sending", "the draft is left stuck in sending rather than reverted to a resendable state");
+
+    await assert.rejects(
+      () => sendDraft(draftStore, smtp, draft.id),
+      /not sendable/i,
+      "a subsequent send_draft on the same draft must be rejected, not allowed to send again",
+    );
+    assert.equal(smtp.calls, 1, "SMTP must have been called exactly once total — no duplicate delivery");
+  });
+});
+
+test("checkDue: SMTP failure still reverts the draft and is counted as failed (no regression)", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    const draftStore = new DraftStoreService(config);
+    const smtp = slowSmtp(5, "fail");
+    const queue = new DeliveryQueueService(config, smtp);
+    queue.setDraftStore(draftStore);
+
+    const draft = await draftStore.createDraft({ to: ["someone@example.com"], subject: "Hi", body: "body" });
+    await queue.enqueue(
+      { to: draft.to, subject: draft.subject, body: draft.body },
+      new Date(Date.now() - 1000).toISOString(),
+      "scheduled_send",
+      draft.id,
+    );
+
+    const outcome = await queue.checkDue();
+
+    assert.equal(outcome.sent, 0);
+    assert.equal(outcome.failed, 1);
+
+    const finalDraft = await draftStore.getDraft(draft.id);
+    assert.equal(finalDraft.status, "draft", "an actual SMTP failure must still revert the draft to a resendable state");
+  });
+});
+
+test("checkDue: SMTP and markSent both succeeding produces sent:1, failed:0 and a fully finalized draft (no regression)", async () => {
+  await withTempDir(async (dataDir) => {
+    const config = createConfig(dataDir);
+    const draftStore = new DraftStoreService(config);
+    const smtp = slowSmtp(5);
+    const queue = new DeliveryQueueService(config, smtp);
+    queue.setDraftStore(draftStore);
+
+    const draft = await draftStore.createDraft({ to: ["someone@example.com"], subject: "Hi", body: "body" });
+    await queue.enqueue(
+      { to: draft.to, subject: draft.subject, body: draft.body },
+      new Date(Date.now() - 1000).toISOString(),
+      "scheduled_send",
+      draft.id,
+    );
+
+    const outcome = await queue.checkDue();
+
+    assert.equal(outcome.sent, 1);
+    assert.equal(outcome.failed, 0);
+
+    const finalDraft = await draftStore.getDraft(draft.id);
+    assert.equal(finalDraft.status, "sent");
+    assert.equal(smtp.calls, 1);
+  });
+});
