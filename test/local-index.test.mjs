@@ -1347,3 +1347,360 @@ test("getSyncCheckpointMap reads sync_state directly without touching the messag
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+function referenceLinkedThreadEmails() {
+  return [
+    {
+      id: "INBOX::1",
+      folder: "INBOX",
+      uid: 1,
+      seq: 1,
+      messageId: "<root@example.com>",
+      subject: "Thread topic",
+      from: [{ address: "alice@example.com" }],
+      to: [{ address: "owner@example.com" }],
+      cc: [],
+      bcc: [],
+      replyTo: [],
+      date: "2026-03-24T11:00:00.000Z",
+      internalDate: "2026-03-24T11:00:00.000Z",
+      isRead: false,
+      isStarred: false,
+      flags: [],
+      preview: "First note",
+      hasAttachments: false,
+      attachments: [],
+      labels: [],
+    },
+    {
+      id: "INBOX::2",
+      folder: "INBOX",
+      uid: 2,
+      seq: 2,
+      messageId: "<reply@example.com>",
+      inReplyTo: "<root@example.com>",
+      references: ["<root@example.com>"],
+      subject: "Re: Thread topic",
+      from: [{ address: "bob@example.com" }],
+      to: [{ address: "owner@example.com" }],
+      cc: [],
+      bcc: [],
+      replyTo: [],
+      date: "2026-03-24T11:05:00.000Z",
+      internalDate: "2026-03-24T11:05:00.000Z",
+      isRead: false,
+      isStarred: false,
+      flags: [],
+      preview: "Reply from bob",
+      hasAttachments: false,
+      attachments: [],
+      labels: [],
+    },
+  ];
+}
+
+test("filtering a References-linked thread does not change its id or drop messages (Finding 1)", async () => {
+  // Regression test for the P2 finding: loadThreadCandidateMessages() expanded
+  // native thread_id membership unbounded, but did nothing for a thread grouped
+  // only via References/In-Reply-To (no persisted thread_id) — a filtered query
+  // matching only SOME of that thread's messages built an INCOMPLETE thread with
+  // a DIFFERENT synthetic id than an unfiltered build, and getThreadById() for
+  // that divergent id then threw "Thread not found".
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-thread-ref-filter-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-03-24T12:00:00.000Z",
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: 2,
+          unseen: 2,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: 2, total: 2, strategy: "recent" }],
+      emails: referenceLinkedThreadEmails(),
+    });
+
+    const unfiltered = await service.getThreads({ limit: 10 });
+    assert.equal(unfiltered.total, 1);
+    assert.equal(unfiltered.threads[0].messageCount, 2);
+    const unfilteredId = unfiltered.threads[0].id;
+
+    // Only INBOX::2 (bob's reply) matches this query — the SQL candidate set is
+    // an incomplete view of the thread.
+    const filtered = await service.getThreads({ query: "bob@example.com", limit: 10 });
+    assert.equal(filtered.total, 1);
+    assert.equal(filtered.threads[0].id, unfilteredId, "filtering must not change the thread's id");
+    assert.equal(filtered.threads[0].messageCount, 2, "filtering must not drop the thread's other messages");
+
+    const detail = await service.getThreadById(filtered.threads[0].id);
+    assert.deepEqual(
+      detail.messages.map((message) => message.primaryEmailId).sort(),
+      ["INBOX::1", "INBOX::2"],
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("getThreadById resolves a References-linked thread beyond the DEFAULT_SNAPSHOT_LIMIT cap (Finding 2)", async () => {
+  // Regression test for the P2 finding: the imap:<thread_id> path was already
+  // fixed to query messages.thread_id directly (unbounded), but the fallback
+  // path for References/In-Reply-To-based ids still resolved threads from the
+  // DEFAULT_SNAPSHOT_LIMIT-capped snapshot, so a fallback thread entirely
+  // outside the newest 5000 messages stayed unreachable via getThreadById().
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-thread-ref-cap-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    const oldPair = [
+      {
+        id: "INBOX::old-root",
+        folder: "INBOX",
+        uid: 1,
+        seq: 1,
+        messageId: "<old-root@example.com>",
+        subject: "oldrefneedle report",
+        from: [{ address: "alice@example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: "2026-01-01T00:00:01.000Z",
+        internalDate: new Date(2026, 0, 1, 0, 0, 1).toISOString(),
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: "Contains oldrefneedle for regression coverage",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      },
+      {
+        id: "INBOX::old-reply",
+        folder: "INBOX",
+        uid: 2,
+        seq: 2,
+        messageId: "<old-reply@example.com>",
+        inReplyTo: "<old-root@example.com>",
+        references: ["<old-root@example.com>"],
+        subject: "Re: oldrefneedle report",
+        from: [{ address: "bob@example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: "2026-01-01T00:00:02.000Z",
+        internalDate: new Date(2026, 0, 1, 0, 0, 2).toISOString(),
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: "Reply to oldrefneedle",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      },
+    ];
+
+    // 5000 unrelated, natively-threaded, more-recent messages so the reference-
+    // linked pair above sorts dead last under the capped snapshot's `ORDER BY
+    // internal_date DESC, uid DESC` and is fully excluded from it.
+    const recentEmails = Array.from({ length: 5000 }, (_, i) => {
+      const uid = i + 3;
+      return {
+        id: `INBOX::${uid}`,
+        folder: "INBOX",
+        uid,
+        seq: uid,
+        messageId: `<msg-${uid}@example.com>`,
+        threadId: `thread-${uid}`,
+        subject: `Routine update ${uid}`,
+        from: [{ address: "sender@example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: `2026-02-01T00:${String(uid % 60).padStart(2, "0")}:00.000Z`,
+        internalDate: new Date(2026, 1, 1, 0, 0, uid).toISOString(),
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: "Body",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      };
+    });
+
+    const emails = [...oldPair, ...recentEmails];
+
+    await service.recordSnapshot({
+      syncedAt: "2026-09-08T00:00:00.000Z",
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: emails.length,
+          unseen: 0,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: emails.length, total: emails.length, strategy: "full" }],
+      emails,
+    });
+
+    const searchResult = await service.getThreads({ query: "oldrefneedle", limit: 10 });
+    assert.equal(searchResult.total, 1, "getThreads() should find the reference-linked thread beyond the cap");
+    assert.equal(searchResult.threads[0].messageCount, 2);
+    const referenceThreadId = searchResult.threads[0].id;
+
+    // getThreadById() for that id must resolve without throwing, even though both
+    // of its messages are entirely outside the newest 5000.
+    const detail = await service.getThreadById(referenceThreadId);
+    assert.deepEqual(
+      detail.messages.map((message) => message.primaryEmailId).sort(),
+      ["INBOX::old-reply", "INBOX::old-root"],
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("getThreads() and getThreadById() agree on thread identity for a mix of native and fallback threads", async () => {
+  // Round-trip regression test: for a mix of natively-threaded and
+  // References-linked threads, every id getThreads() returns (filtered or not)
+  // must resolve via getThreadById() to the same complete membership.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-thread-roundtrip-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    const nativeThread = [
+      {
+        id: "INBOX::native-1",
+        folder: "INBOX",
+        uid: 101,
+        seq: 101,
+        messageId: "<native-a@example.com>",
+        threadId: "native-thread",
+        subject: "Native topic",
+        from: [{ address: "carol@example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: "2026-04-01T10:00:00.000Z",
+        internalDate: "2026-04-01T10:00:00.000Z",
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: "Native first",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      },
+      {
+        id: "INBOX::native-2",
+        folder: "INBOX",
+        uid: 102,
+        seq: 102,
+        messageId: "<native-b@example.com>",
+        threadId: "native-thread",
+        subject: "Re: Native topic",
+        from: [{ address: "owner@example.com" }],
+        to: [{ address: "carol@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: "2026-04-01T10:05:00.000Z",
+        internalDate: "2026-04-01T10:05:00.000Z",
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: "Native second",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      },
+    ];
+
+    const standaloneMessage = [
+      {
+        id: "INBOX::solo",
+        folder: "INBOX",
+        uid: 103,
+        seq: 103,
+        messageId: "<solo@example.com>",
+        subject: "Standalone note",
+        from: [{ address: "dave@example.com" }],
+        to: [{ address: "owner@example.com" }],
+        cc: [],
+        bcc: [],
+        replyTo: [],
+        date: "2026-04-01T10:10:00.000Z",
+        internalDate: "2026-04-01T10:10:00.000Z",
+        isRead: true,
+        isStarred: false,
+        flags: [],
+        preview: "No relations",
+        hasAttachments: false,
+        attachments: [],
+        labels: [],
+      },
+    ];
+
+    const emails = [...referenceLinkedThreadEmails(), ...nativeThread, ...standaloneMessage];
+
+    await service.recordSnapshot({
+      syncedAt: "2026-04-01T12:00:00.000Z",
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: emails.length,
+          unseen: 0,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: emails.length, total: emails.length, strategy: "full" }],
+      emails,
+    });
+
+    const unfiltered = await service.getThreads({ limit: 50 });
+    assert.equal(unfiltered.total, 3);
+    const completeCountsById = new Map(unfiltered.threads.map((thread) => [thread.id, thread.messageCount]));
+
+    // Filter down to a query that only SQL-matches one message from the
+    // reference-linked thread and one message from the native thread.
+    const filtered = await service.getThreads({ query: "bob@example.com", limit: 50 });
+    assert.equal(filtered.total, 1);
+
+    for (const roundTripped of [unfiltered, filtered]) {
+      for (const thread of roundTripped.threads) {
+        const detail = await service.getThreadById(thread.id);
+        assert.equal(
+          detail.messageCount,
+          completeCountsById.get(thread.id),
+          `getThreadById(${thread.id}) should return the same complete membership as the unfiltered view`,
+        );
+      }
+    }
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
