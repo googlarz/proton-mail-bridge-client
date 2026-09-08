@@ -281,6 +281,7 @@ export interface FolderSyncPlan {
   endUid?: number;
   highestKnownUid: number;
   backfilledToUid?: number;
+  folderObservedEmpty?: boolean;
 }
 
 export function planFolderSync(input: {
@@ -301,6 +302,10 @@ export function planFolderSync(input: {
       strategy: "empty",
       changed: false,
       highestKnownUid,
+      // Only a genuine server-reported exists === 0 means the mailbox is
+      // actually empty — highestKnownUid === 0 alone (uidNext missing/1)
+      // isn't proof of that, so it must not trigger index cleanup on its own.
+      folderObservedEmpty: input.exists === 0,
     };
   }
 
@@ -2585,6 +2590,7 @@ export class SimpleIMAPService {
             fetched: 0,
             total: exists,
             backfilledToUid: plan.backfilledToUid,
+            folderObservedEmpty: plan.folderObservedEmpty,
           },
           emails: [],
         };

@@ -122,6 +122,35 @@ test("planFolderSync treats mailbox count drift as a changed incremental window"
   assert.equal(plan.endUid, 150);
 });
 
+test("planFolderSync marks folderObservedEmpty when the server genuinely reports exists === 0", () => {
+  const plan = planFolderSync({
+    folder: "INBOX",
+    exists: 0,
+    uidNext: 1,
+    full: false,
+    limit: 50,
+  });
+
+  assert.equal(plan.strategy, "empty");
+  assert.equal(plan.folderObservedEmpty, true, "a real exists === 0 must be flagged so the local index can purge stale messages");
+});
+
+test("planFolderSync does not mark folderObservedEmpty when only highestKnownUid is 0", () => {
+  // highestKnownUid === 0 (uidNext missing/1) also reaches strategy:"empty",
+  // but without exists === 0 it isn't proof the mailbox is actually empty —
+  // it must not trigger destructive index cleanup.
+  const plan = planFolderSync({
+    folder: "INBOX",
+    exists: 5,
+    uidNext: undefined,
+    full: false,
+    limit: 50,
+  });
+
+  assert.equal(plan.strategy, "empty");
+  assert.equal(plan.folderObservedEmpty, false, "no genuine exists === 0 observation means cleanup must not be signaled");
+});
+
 test("planFolderSync full:true with no prior backfill starts at the newest window", () => {
   const plan = planFolderSync({
     folder: "Archive",

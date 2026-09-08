@@ -1411,6 +1411,20 @@ export class LocalIndexService {
         }
       }
 
+      // The "empty" strategy carries no UID range at all, so the range-scoped
+      // expunge-detection below (cleanupExpunged) never runs for it — a folder
+      // genuinely emptied on the server would otherwise keep its previously-
+      // indexed messages forever. folderObservedEmpty is only set when the
+      // server reported exists === 0 on a successful SELECT, never on a
+      // failed/interrupted fetch, so this purge only fires on a real
+      // observation. Scoped strictly to that one folder.
+      for (const folderStat of input.folderStats) {
+        if (folderStat.folderObservedEmpty) {
+          deleteFtsForFolder.run(folderStat.folder);
+          deleteMessagesForFolder.run(folderStat.folder);
+        }
+      }
+
       for (const folder of input.folders) {
         const folderStat = input.folderStats.find((entry) => entry.folder === folder.path);
         upsertFolder.run({

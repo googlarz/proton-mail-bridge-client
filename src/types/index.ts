@@ -429,6 +429,11 @@ export interface MailboxSyncCheckpoint {
   // further back in history instead of re-fetching the same newest window
   // forever.
   backfilledToUid?: number;
+  // True when this sync's "empty" strategy came from the server genuinely
+  // reporting exists === 0 on a successful SELECT (not from a missing/failed
+  // uidNext) — tells the local index it's safe to purge every previously-
+  // indexed message for this folder, since the mailbox is confirmed empty.
+  folderObservedEmpty?: boolean;
 }
 
 export interface LocalIndexStatus {
