@@ -49,6 +49,41 @@ test("parseEmailId still accepts the legacy pre-checksum format (folder::uid) fo
   assert.deepEqual(parseEmailId("Folders%2FMCP-Snoozed::7"), { folder: "Folders/MCP-Snoozed", uid: 7 });
 });
 
+test("createEmailId/parseEmailId round-trip the newest 4-field format (folder + uid + uidValidity)", () => {
+  const id = createEmailId("INBOX", 42, "1000000001");
+  assert.match(id, /^INBOX::1000000001::42::[0-9a-f]{8}$/);
+  assert.deepEqual(parseEmailId(id), { folder: "INBOX", uid: 42, uidValidity: "1000000001" });
+});
+
+test("createEmailId/parseEmailId round-trip the 4-field format with a folder path containing special characters", () => {
+  const id = createEmailId("Folders/MCP-Snoozed", 7, "999");
+  assert.deepEqual(parseEmailId(id), { folder: "Folders/MCP-Snoozed", uid: 7, uidValidity: "999" });
+});
+
+test("parseEmailId rejects a 4-field id with a tampered checksum instead of silently resolving it", () => {
+  const id = createEmailId("INBOX", 42, "1000000001");
+  const tampered = id.slice(0, -1) + (id.endsWith("0") ? "1" : "0");
+  assert.throws(() => parseEmailId(tampered), /Invalid emailId/);
+});
+
+test("parseEmailId rejects a 4-field id with a tampered uidValidity instead of silently resolving it against the wrong generation", () => {
+  // This is the actual attack/failure shape the UIDVALIDITY field exists to
+  // catch: folder+uid+checksum alone would still validate, but the checksum
+  // now covers uidValidity too, so mutating just that field must fail
+  // closed rather than resolving against a different generation.
+  const id = createEmailId("INBOX", 42, "1000000001");
+  const [folder, , uid, checksum] = id.split("::");
+  const tampered = [folder, "2000000002", uid, checksum].join("::");
+  assert.throws(() => parseEmailId(tampered), /Invalid emailId/);
+});
+
+test("parseEmailId still accepts a pre-UIDVALIDITY 3-field id, with uidValidity coming back undefined (not present as a key at all)", () => {
+  const id = createEmailId("INBOX", 42); // no uidValidity passed — old 3-field format
+  const parsed = parseEmailId(id);
+  assert.deepEqual(parsed, { folder: "INBOX", uid: 42 });
+  assert.equal("uidValidity" in parsed, false);
+});
+
 test("parseEmailId rejects garbage that isn't either the new or legacy shape", () => {
   assert.throws(() => parseEmailId("not-an-email-id"), /Invalid emailId/);
   assert.throws(() => parseEmailId("INBOX::not-a-number"), /Invalid emailId/);

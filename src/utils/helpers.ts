@@ -49,17 +49,57 @@ const EMAIL_ID_INVALID_MESSAGE =
 // name, so the checksum also catches a folder segment tampered with after
 // encoding (encodeURIComponent output never contains "::" itself, since it
 // escapes ":", so this can't collide with the separator).
-function computeEmailIdChecksum(encodedFolder: string, uid: number): string {
-  return createHash("sha256").update(`${encodedFolder}${EMAIL_ID_SEPARATOR}${uid}`).digest("hex").slice(0, 8);
+//
+// `uidValidity` is optional and, when present, is folded into the hash too
+// — this is what lets parseEmailId tell a same-generation id from a
+// stale one (see the format comment on parseEmailId below) rather than just
+// an id whose folder+uid happen to still look plausible. Omitted entirely
+// (not just empty-string) when the caller has no uidValidity to offer, so
+// the hash input for the no-uidValidity case is byte-for-byte identical to
+// what it always was — an id minted without a uidValidity is indistinguishable
+// from one minted before this field existed, which is exactly the point.
+function computeEmailIdChecksum(encodedFolder: string, uid: number, uidValidity?: string): string {
+  const payload =
+    uidValidity !== undefined
+      ? `${encodedFolder}${EMAIL_ID_SEPARATOR}${uidValidity}${EMAIL_ID_SEPARATOR}${uid}`
+      : `${encodedFolder}${EMAIL_ID_SEPARATOR}${uid}`;
+  return createHash("sha256").update(payload).digest("hex").slice(0, 8);
 }
 
-export function createEmailId(folder: string, uid: number): string {
+// `uidValidity` is optional: every caller that has one available (i.e. is
+// inside a withMailbox callback, or otherwise knows the mailbox's current
+// UIDVALIDITY) should pass it, since it's what lets a stale, pre-generation-
+// change id be told apart from a current one (see assertMailboxUidValidity).
+// A caller with no uidValidity available still gets a fully working id back
+// — just one that (like every id minted before this field existed) can't be
+// checked for staleness later, same as the legacy 3-field format already
+// tolerated before this.
+export function createEmailId(folder: string, uid: number, uidValidity?: string): string {
   const encodedFolder = encodeURIComponent(folder);
-  const checksum = computeEmailIdChecksum(encodedFolder, uid);
-  return `${encodedFolder}${EMAIL_ID_SEPARATOR}${uid}${EMAIL_ID_SEPARATOR}${checksum}`;
+  const checksum = computeEmailIdChecksum(encodedFolder, uid, uidValidity);
+  return uidValidity !== undefined
+    ? `${encodedFolder}${EMAIL_ID_SEPARATOR}${uidValidity}${EMAIL_ID_SEPARATOR}${uid}${EMAIL_ID_SEPARATOR}${checksum}`
+    : `${encodedFolder}${EMAIL_ID_SEPARATOR}${uid}${EMAIL_ID_SEPARATOR}${checksum}`;
 }
 
-export function parseEmailId(emailId: string): { folder: string; uid: number } {
+// Three formats, newest first, each one falling through to the next on
+// non-match rather than raising early — an older-format id must keep
+// resolving exactly as it always did:
+//
+//   1. <encodedFolder>::<uidValidity>::<uid>::<checksum>  (current)
+//   2. <encodedFolder>::<uid>::<checksum>                 (pre-UIDVALIDITY)
+//   3. <encodedFolder>::<uid>                              (pre-checksum, legacy)
+//
+// `uidValidity` comes back undefined for formats 2 and 3 — there is no
+// integrity-checked value to hand back, and callers (assertMailboxUidValidity
+// via its `if (!expectedUidValidity) return;` guard) already treat "no
+// uidValidity on this id" as "unverifiable, don't block on it", not as an
+// error. That's deliberate: ids in this legacy shape can live indefinitely in
+// drafts.json/snoozed.json/delivery-queue.json, written long before this
+// field existed and resolved long after — refusing to parse them, or
+// refusing to act on them for lacking a field they predate, would be a
+// regression these ids never had a chance to avoid.
+export function parseEmailId(emailId: string): { folder: string; uid: number; uidValidity?: string } {
   const lastSep = emailId.lastIndexOf(EMAIL_ID_SEPARATOR);
   if (lastSep === -1) {
     throw new Error(EMAIL_ID_INVALID_MESSAGE);
@@ -69,11 +109,32 @@ export function parseEmailId(emailId: string): { folder: string; uid: number } {
   const payload = emailId.slice(0, lastSep);
   const midSep = payload.lastIndexOf(EMAIL_ID_SEPARATOR);
 
-  // New format: <encodedFolder>::<uid>::<checksum> — verify before trusting.
   if (midSep !== -1) {
-    const encodedFolder = payload.slice(0, midSep);
+    const beforeUid = payload.slice(0, midSep);
     const uidPart = payload.slice(midSep + EMAIL_ID_SEPARATOR.length);
     const uid = Number(uidPart);
+
+    // Newest format: <encodedFolder>::<uidValidity>::<uid>::<checksum> —
+    // try this first. `beforeUid` only splits further into folder+uidValidity
+    // when it itself contains a "::" — encodeURIComponent output never
+    // contains "::" (it escapes ":"), so a genuine 3-field id's `beforeUid`
+    // (just the encoded folder) never has one, and this branch cleanly
+    // falls through to the 3-field check below for it instead of
+    // misparsing it.
+    const uidValiditySep = beforeUid.lastIndexOf(EMAIL_ID_SEPARATOR);
+    if (uidValiditySep !== -1 && Number.isInteger(uid) && uid > 0) {
+      const encodedFolder = beforeUid.slice(0, uidValiditySep);
+      const uidValidity = beforeUid.slice(uidValiditySep + EMAIL_ID_SEPARATOR.length);
+      if (
+        /^\d+$/.test(uidValidity) &&
+        computeEmailIdChecksum(encodedFolder, uid, uidValidity) === trailing
+      ) {
+        return { folder: decodeURIComponent(encodedFolder), uid, uidValidity };
+      }
+    }
+
+    // New(er) format: <encodedFolder>::<uid>::<checksum> — verify before trusting.
+    const encodedFolder = beforeUid;
     if (Number.isInteger(uid) && uid > 0 && computeEmailIdChecksum(encodedFolder, uid) === trailing) {
       // The checksum already proves encodedFolder+uid are exactly what
       // createEmailId originally encoded — a truthy-check on the decoded
