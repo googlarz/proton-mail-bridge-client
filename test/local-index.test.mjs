@@ -540,6 +540,109 @@ test("a windowed full sync only prunes expunged messages within its own scanned 
   }
 });
 
+test("a folder observed genuinely empty on the server has its indexed messages purged", async () => {
+  // planFolderSync returns strategy:"empty" with no UID range at all when a
+  // mailbox is observed with exists === 0 — the range-scoped expunge-detection
+  // in applySnapshot only ever runs against a fetched range, so it never fired
+  // for "empty" and a folder emptied on the server kept its stale messages
+  // forever. folderObservedEmpty is the signal that closes that gap.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-empty-folder-purge-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const makeEmail = (folder, uid) => ({
+    id: `${folder}::${uid}`, folder, uid, seq: uid,
+    messageId: `<msg-${folder}-${uid}@example.com>`, subject: `Message ${uid}`,
+    from: [{ address: "sender@example.com" }], to: [{ address: "owner@example.com" }],
+    cc: [], bcc: [], replyTo: [],
+    date: "2026-01-01T00:00:00.000Z", internalDate: "2026-01-01T00:00:00.000Z",
+    isRead: false, isStarred: false, flags: [],
+    preview: "Body", hasAttachments: false, attachments: [], labels: [],
+  });
+
+  try {
+    // Seed two folders with indexed messages.
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:00:00.000Z",
+      folders: [
+        { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 2, unseen: 0 },
+        { path: "Archive", name: "Archive", delimiter: "/", specialUse: "\\Archive", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 },
+      ],
+      folderStats: [
+        { folder: "INBOX", fetched: 2, total: 2, strategy: "full", rangeStartUid: 1, rangeEndUid: 2 },
+        { folder: "Archive", fetched: 1, total: 1, strategy: "full", rangeStartUid: 1, rangeEndUid: 1 },
+      ],
+      emails: [makeEmail("INBOX", 1), makeEmail("INBOX", 2), makeEmail("Archive", 1)],
+    });
+
+    let status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 3, "both folders should be indexed before the emptying");
+
+    // INBOX is now observed genuinely empty on the server (exists === 0);
+    // Archive is untouched by this sync.
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:01:00.000Z",
+      folders: [
+        { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 0, unseen: 0 },
+      ],
+      folderStats: [
+        { folder: "INBOX", fetched: 0, total: 0, strategy: "empty", changed: false, folderObservedEmpty: true },
+      ],
+      emails: [],
+    });
+
+    status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 1, "INBOX's stale messages must be purged, leaving only Archive's");
+
+    const inboxSearch = await service.search({ folder: "INBOX", limit: 10 });
+    assert.equal(inboxSearch.total, 0, "search must no longer return INBOX's stale messages");
+
+    const archiveSearch = await service.search({ folder: "Archive", limit: 10 });
+    assert.equal(archiveSearch.total, 1, "Archive's messages must be untouched by INBOX's emptying");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("an empty strategy without a confirmed folderObservedEmpty signal does not purge the index", async () => {
+  // strategy:"empty" is also reached when highestKnownUid === 0 (uidNext
+  // missing/1) without the server having actually reported exists === 0.
+  // That case must NOT trigger cleanup — only a genuine, successful
+  // exists === 0 observation (folderObservedEmpty: true) may wipe a folder.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-empty-strategy-no-signal-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const makeEmail = (uid) => ({
+    id: `INBOX::${uid}`, folder: "INBOX", uid, seq: uid,
+    messageId: `<msg-${uid}@example.com>`, subject: `Message ${uid}`,
+    from: [{ address: "sender@example.com" }], to: [{ address: "owner@example.com" }],
+    cc: [], bcc: [], replyTo: [],
+    date: "2026-01-01T00:00:00.000Z", internalDate: "2026-01-01T00:00:00.000Z",
+    isRead: false, isStarred: false, flags: [],
+    preview: "Body", hasAttachments: false, attachments: [], labels: [],
+  });
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:00:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "full", rangeStartUid: 1, rangeEndUid: 1 }],
+      emails: [makeEmail(1)],
+    });
+
+    await service.recordSnapshot({
+      syncedAt: "2026-09-07T00:01:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+      folderStats: [{ folder: "INBOX", fetched: 0, total: 1, strategy: "empty", changed: false }],
+      emails: [],
+    });
+
+    const status = await service.getStatus();
+    assert.equal(status.storedMessageCount, 1, "without folderObservedEmpty, the previously-indexed message must survive");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("getSyncCheckpointMap returns backfilledToUid as undefined, not null, when never set", async () => {
   // SQLite returns null (not undefined) for an unset column. planFolderSync
   // distinguishes "no prior backfill" (undefined) from a real floor value —
