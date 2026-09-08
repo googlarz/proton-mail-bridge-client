@@ -18,6 +18,7 @@ import type {
 } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import {
+  createEmailId,
   dedupeEmails,
   extractDomain,
   extractMessageIdList,
@@ -1451,6 +1452,20 @@ export class LocalIndexService {
         email_id, subject, preview, folder, labels, participants, attachment_names
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
+    // The UIDVALIDITY-embedding id format is optional per-caller (createEmailId):
+    // a message indexed before that fix lives here under the old 3-field id
+    // (<folder>::<uid>::<checksum>, no uidValidity), while a sync running the
+    // current code now mints a 4-field id (<folder>::<uidValidity>::<uid>::
+    // <checksum>) for the exact same physical message. ON CONFLICT(email_id)
+    // in upsertMessage never sees this — the id STRING changed even though
+    // the message didn't — so left alone, the old row is never touched and a
+    // second, disjoint row appears for one physical message (see the
+    // migration loop below). This is a targeted single-row lookup by the
+    // exact old-format id (computed directly from folder+uid, not searched
+    // for), so it's a cheap indexed PK read on every sync and, once the old
+    // row is migrated away below, a cheap negative lookup forever after.
+    const findLegacyRow = db.prepare(`SELECT preview, attachment_text FROM messages WHERE email_id = ?`);
+    const deleteLegacyRow = db.prepare(`DELETE FROM messages WHERE email_id = ?`);
     const setMetadata = db.prepare(`
       INSERT INTO metadata (key, value) VALUES (?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -1547,6 +1562,34 @@ export class LocalIndexService {
       }
 
       for (const email of input.emails) {
+        // Migration: reconcile an old-format row for this same physical
+        // message (same folder+uid) before inserting under the incoming id.
+        // createEmailId(folder, uid) with no uidValidity always reconstructs
+        // what the pre-UIDVALIDITY-fix id for this folder+uid would have
+        // been — no search required. When email.id itself is already that
+        // old format (legacyEmailId === email.id), there's nothing to
+        // migrate: the row below is written under that same id as always.
+        // A genuine UIDVALIDITY change (different generation reusing this
+        // UID) can't be misdetected here: the folder-wipe above already
+        // deleted every row for this folder before this loop runs whenever
+        // the server's UIDVALIDITY no longer matches what was stored, so any
+        // old-format row still found at this point is guaranteed to be the
+        // same generation, not a stale one.
+        let legacyPreview: string | null = null;
+        let legacyAttachmentText: string | null = null;
+        const legacyEmailId = createEmailId(email.folder, email.uid);
+        if (legacyEmailId !== email.id) {
+          const legacyRow = findLegacyRow.get(legacyEmailId) as
+            | { preview: string | null; attachment_text: string | null }
+            | undefined;
+          if (legacyRow) {
+            legacyPreview = legacyRow.preview;
+            legacyAttachmentText = legacyRow.attachment_text;
+            deleteLegacyRow.run(legacyEmailId);
+            deleteFts.run(legacyEmailId);
+          }
+        }
+
         // RETURNING gives back the post-COALESCE stored values, not the raw
         // incoming ones — a flags-only sync omits source/preview, and the
         // messages table upsert already preserves the prior indexed preview/
@@ -1554,6 +1597,10 @@ export class LocalIndexService {
         // immutable). Without this, the FTS row below would be rebuilt from
         // the incoming (empty) values and lose body-text searchability on
         // every metadata-only refresh, even though the stored row is intact.
+        // The same COALESCE-style preservation applies to a migrated legacy
+        // row above: this is an INSERT under a brand-new id, so
+        // ON CONFLICT's COALESCE never fires for it — legacyPreview/
+        // legacyAttachmentText fill that role instead.
         const persisted = upsertMessage.get({
           email_id: email.id,
           folder: email.folder,
@@ -1575,10 +1622,10 @@ export class LocalIndexService {
           is_starred: email.isStarred ? 1 : 0,
           flags_json: JSON.stringify(email.flags),
           size: email.size ?? null,
-          preview: email.preview ?? null,
+          preview: email.preview ?? legacyPreview,
           has_attachments: email.hasAttachments ? 1 : 0,
           attachments_json: JSON.stringify(email.attachments),
-          attachment_text: email.attachmentText ?? null,
+          attachment_text: email.attachmentText ?? legacyAttachmentText,
           labels_json: JSON.stringify(email.labels),
         }) as { preview: string | null; attachment_text: string | null };
 
