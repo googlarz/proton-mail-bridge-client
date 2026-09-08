@@ -19,7 +19,7 @@ function createConfig(dataDir) {
       readOnly: false,
       allowSend: true,
       allowRemoteDraftSync: true,
-      allowedActions: [],
+      allowedActions: ["archive"],
       startupSync: false,
       autoSyncFolder: "INBOX",
       autoSyncFull: false,

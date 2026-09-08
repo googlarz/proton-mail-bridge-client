@@ -35,7 +35,8 @@ function lockPathFor(storePath: string): string {
 // could — so this never touches the other process, it only inspects the
 // error: ESRCH means no such process (dead), EPERM means it exists but we
 // lack permission to signal it (still alive), anything else is inconclusive.
-function isProcessAlive(pid: number): boolean | undefined {
+export function isProcessAlive(pid: number): boolean | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
   try {
     process.kill(pid, 0);
     return true;

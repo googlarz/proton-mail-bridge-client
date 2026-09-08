@@ -3,6 +3,8 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ProtonMailConfig, SnoozeRecord } from "../types/index.js";
+import { createOperationClaim, isAbandonedClaim } from "../utils/operation-claim.js";
+import { ensureEmailActionAllowed } from "../utils/runtime-policy.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { parseEmailId } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -53,15 +55,7 @@ export class SnoozeService {
   start(): void {
     if (this.started) return;
     this.started = true;
-    // A record stuck in "waking" means the previous process died between
-    // claiming it and recording the outcome — mirrors
-    // DeliveryQueueService.recoverInterruptedSends(). Unlike a queued send,
-    // retrying a move is safe (worst case: "not found" if it already moved),
-    // so this reverts to "pending" for a normal retry on the next
-    // checkDue() pass, rather than a terminal "failed".
-    // Fire-and-forget, but guarded: an unhandled rejection here (e.g. a
-    // file-lock acquisition timeout) would otherwise propagate to index.ts's
-    // global handler and take down the whole server over one bad tick.
+    // Recover abandoned owners before the catch-up pass; live owners keep their claims.
     void this.recoverInterruptedWakes()
       .then(() => this.checkDue())
       .catch((error) => this.log.error("Startup recovery/checkDue failed", "SnoozeService", error));
@@ -90,6 +84,7 @@ export class SnoozeService {
   }
 
   async snooze(emailId: string, wakeAt: string): Promise<SnoozeRecord> {
+    ensureEmailActionAllowed(this.config.runtime, "archive");
     const { folder: originalFolder } = parseEmailId(emailId);
     await this.ensureSnoozeFolder();
     const moved = await this.imapService.moveEmail(emailId, SNOOZE_FOLDER);
@@ -113,21 +108,11 @@ export class SnoozeService {
     return record;
   }
 
-  // Wakes a snooze immediately (used by both cancel and the timer). Moves the
-  // email back to its original folder and marks the record accordingly.
-  //
-  // Two-phase, mirroring DeliveryQueueService.checkDue()'s claim pattern:
-  // claim under a brief lock (flip pending -> waking, so a second wake()
-  // racing the same id — e.g. the 15s timer firing while a manual cancel is
-  // in flight — sees "waking" and backs off instead of double-moving), do
-  // the real network IMAP move OUTSIDE any lock, then re-lock briefly to
-  // record the outcome. Doing the move *inside* the lock held the new
-  // cross-process file lock (file-lock.ts) for a real network round trip —
-  // long enough, under real degraded network conditions, to exceed its
-  // stale-lock timeout and have the lock stolen mid-move by another
-  // process, silently reintroducing the exact lost-update race that lock
-  // exists to prevent.
+  // Claim under the file lock, move outside it, then finalize only if the
+  // same claim still owns the record. Competing cancels return its live status.
   private async wake(id: string, status: "woken" | "canceled"): Promise<SnoozeRecord> {
+    ensureEmailActionAllowed(this.config.runtime, "archive");
+    const claim = createOperationClaim();
     const claimed = await this.withLock(async () => {
       const store = await this.loadUnlocked();
       const record = store.items[id];
@@ -138,11 +123,13 @@ export class SnoozeService {
         return record;
       }
       record.status = "waking";
+      record.claim = claim;
+      delete record.pausedReason;
       await this.save(store);
       return record;
     });
 
-    if (claimed.status !== "waking") {
+    if (claimed.status !== "waking" || claimed.claim?.token !== claim.token) {
       // Already resolved by another wake() call, or nothing to do.
       return claimed;
     }
@@ -160,15 +147,17 @@ export class SnoozeService {
         `Timed out after ${SNOOZE_WAKE_TIMEOUT_MS}ms waking snooze ${id}`,
       );
     } catch (error) {
-      // Revert the claim so checkDue()'s existing failure-counting catch
-      // handler (which only updates a record still "pending") still finds
-      // it there, and the item gets retried on the next checkDue() pass
-      // instead of getting stuck in "waking" forever.
+      // Retry definite failures; a timeout has an unknown move outcome.
       await this.withLock(async () => {
         const store = await this.loadUnlocked();
         const record = store.items[id];
-        if (record && record.status === "waking") {
-          record.status = "pending";
+        if (record && record.status === "waking" && record.claim?.token === claim.token) {
+          const message = error instanceof Error ? error.message : String(error);
+          record.status = message.startsWith("Timed out after") ? "failed" : "pending";
+          if (record.status === "failed") {
+            record.failureReason = `${message} — move outcome is unknown. Check both folders before retrying manually.`;
+          }
+          delete record.claim;
           await this.save(store);
         }
       });
@@ -181,19 +170,16 @@ export class SnoozeService {
       if (!record) {
         throw new Error(`Snoozed email not found for id ${id}`);
       }
-      // Re-check the status fresh under this lock, mirroring
-      // DeliveryQueueService.checkDue()'s finalize (only writes if the
-      // record is still "sending"): a concurrent process's
-      // recoverInterruptedWakes() may have already reverted this record to
-      // "pending" (e.g. this process died between the claim above and here),
-      // and a second wake() could already be in flight for it. Skip the
-      // write rather than clobbering whatever that other path recorded.
-      if (record.status !== "waking") {
+      // Only the owner of this particular claim may finalize it.
+      if (record.status !== "waking" || record.claim?.token !== claim.token) {
         this.log.warn("Skipped duplicate snooze finalize — record no longer \"waking\"", "SnoozeService", { id, status: record.status });
         return record;
       }
       record.currentEmailId = moved.targetEmailId ?? record.currentEmailId;
       record.status = status;
+      delete record.claim;
+      delete record.failureReason;
+      record.failureCount = 0;
       record.wokenAt = new Date().toISOString();
       await this.save(store);
       return record;
@@ -219,6 +205,24 @@ export class SnoozeService {
   }
 
   async checkDue(): Promise<{ woken: number; failed: number }> {
+    await this.recoverInterruptedWakes();
+    try {
+      ensureEmailActionAllowed(this.config.runtime, "archive");
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await this.withLock(async () => {
+        const store = await this.loadUnlocked();
+        let changed = false;
+        for (const record of Object.values(store.items)) {
+          if (record.status === "pending" && record.pausedReason !== reason) {
+            record.pausedReason = reason;
+            changed = true;
+          }
+        }
+        if (changed) await this.save(store);
+      });
+      return { woken: 0, failed: 0 };
+    }
     const now = Date.now();
     const due = (await this.list()).filter(
       (item) => item.status === "pending" && new Date(item.wakeAt).getTime() <= now,
@@ -228,8 +232,8 @@ export class SnoozeService {
     let failed = 0;
     for (const item of due) {
       try {
-        await this.wake(item.id, "woken");
-        woken += 1;
+        const result = await this.wake(item.id, "woken");
+        if (result.status === "woken") woken += 1;
       } catch (error) {
         this.log.warn("Snooze wake failed", "SnoozeService", { id: item.id, error });
         await this.withLock(async () => {
@@ -287,8 +291,10 @@ export class SnoozeService {
       const store = await this.loadUnlocked();
       let changed = false;
       for (const record of Object.values(store.items)) {
-        if (record.status !== "waking") continue;
-        record.status = "pending";
+        if (record.status !== "waking" || !isAbandonedClaim(record.claim)) continue;
+        record.status = "failed";
+        delete record.claim;
+        record.failureReason = "Interrupted while waking — move outcome is unknown. Check the original and snooze folders before moving the email manually.";
         changed = true;
       }
       if (changed) await this.save(store);
@@ -371,8 +377,7 @@ export class SnoozeService {
     }
   }
 
-  // ponytail: same cross-process race as DeliveryQueueService.save — see that
-  // comment for why it's left unlocked and the real upgrade path (SQLite).
+  // Called while holding the cross-process file lock. Rename is atomic.
   private async save(store: SnoozeFile): Promise<void> {
     await mkdir(dirname(this.storePath), { recursive: true, mode: 0o700 });
     const tempPath = `${this.storePath}.tmp`;

@@ -36,7 +36,14 @@ export interface EmailAttachmentInput {
 // two writes that set and clear it.
 export type SnoozeStatus = "pending" | "waking" | "woken" | "canceled" | "failed";
 
+export interface OperationClaim {
+  pid: number;
+  token: string;
+}
+
 export interface SnoozeRecord {
+  claim?: OperationClaim;
+  pausedReason?: string;
   id: string;
   createdAt: string;
   wakeAt: string;
@@ -65,12 +72,12 @@ export interface EmailTemplateRecord {
 export type DeliveryQueueKind = "undo_send" | "scheduled_send";
 // "sending" is a short-lived claim state: set under the lock right before the
 // SMTP call so cancel() and overlapping checkDue() passes can never act on an
-// item that's already in flight. A "sending" record found at startup means
-// the previous process died mid-send; it is never auto-resent (outcome
-// unknown) — see DeliveryQueueService.recoverInterruptedSends.
+// item that's already in flight. Only a dead owner is recovered; uncertain
+// SMTP outcomes are never auto-resent.
 export type DeliveryQueueStatus = "pending" | "sending" | "sent" | "canceled" | "failed";
 
 export interface DeliveryQueueRecord {
+  claim?: OperationClaim;
   id: string;
   kind: DeliveryQueueKind;
   createdAt: string;

@@ -3,6 +3,7 @@ import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DeliveryQueueKind, DeliveryQueueRecord, ProtonMailConfig, SendEmailInput } from "../types/index.js";
+import { createOperationClaim, isAbandonedClaim } from "../utils/operation-claim.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -60,7 +61,12 @@ export class DeliveryQueueService {
     // A "sending" record left over from a process that died mid-send has an
     // unknown outcome — resolve those before the catch-up pass can touch
     // anything, so we never guess and double-send.
-    await this.recoverInterruptedSends();
+    try {
+      await this.recoverInterruptedSends();
+    } catch (error) {
+      this.started = false;
+      throw error;
+    }
     // Catch-up pass immediately, then check periodically. Fire-and-forget,
     // but guarded: an unhandled rejection here (e.g. a file-lock acquisition
     // timeout) would otherwise propagate to index.ts's global handler and
@@ -152,6 +158,7 @@ export class DeliveryQueueService {
   // so a send already in flight can no longer be reported as canceled while
   // it actually goes out, and no item can be sent twice.
   async checkDue(): Promise<{ sent: number; failed: number }> {
+    await this.recoverInterruptedSends();
     const now = Date.now();
     const dueIds = (await this.list())
       .filter((item) => item.status === "pending" && new Date(item.sendAt).getTime() <= now)
@@ -165,6 +172,7 @@ export class DeliveryQueueService {
         const record = store.items[id];
         if (!record || record.status !== "pending") return undefined;
         record.status = "sending";
+        record.claim = createOperationClaim();
         await this.save(store);
         return record;
       });
@@ -195,8 +203,9 @@ export class DeliveryQueueService {
         await this.withLock(async () => {
           const store = await this.loadUnlocked();
           const record = store.items[id];
-          if (record && record.status === "sending") {
+          if (record && record.status === "sending" && record.claim?.token === claimed.claim?.token) {
             record.status = "sent";
+            delete record.claim;
             record.sentAt = new Date().toISOString();
             record.sentMessageId = result.messageId;
             await this.save(store);
@@ -220,8 +229,9 @@ export class DeliveryQueueService {
         await this.withLock(async () => {
           const store = await this.loadUnlocked();
           const record = store.items[id];
-          if (record && record.status === "sending") {
+          if (record && record.status === "sending" && record.claim?.token === claimed.claim?.token) {
             record.status = "failed";
+            delete record.claim;
             record.failureReason = message;
             await this.save(store);
           }
@@ -259,18 +269,16 @@ export class DeliveryQueueService {
     return changed;
   }
 
-  // Runs once at start(), before the catch-up checkDue() pass. A record
-  // stuck in "sending" means the previous process died between claiming the
-  // item and recording the outcome — whether the SMTP call actually
-  // completed is unknown, so it is never auto-resent. It is marked "failed"
-  // with a reason that says so explicitly, for the caller to verify by hand.
+  // Recover only abandoned owners, at startup and on subsequent ticks.
+  // SMTP outcomes after a crash are unknown, so these items are never resent.
   private async recoverInterruptedSends(): Promise<void> {
     await this.withLock(async () => {
       const store = await this.loadUnlocked();
       let changed = false;
       for (const record of Object.values(store.items)) {
-        if (record.status !== "sending") continue;
+        if (record.status !== "sending" || !isAbandonedClaim(record.claim)) continue;
         record.status = "failed";
+        delete record.claim;
         record.failureReason = "Interrupted by a server restart while sending — delivery outcome is unknown. Not auto-resent; check the mailbox's Sent folder to confirm whether it actually went out before resending manually.";
         changed = true;
       }
@@ -342,15 +350,7 @@ export class DeliveryQueueService {
     }
   }
 
-  // ponytail: withLock only serializes calls within this process — two
-  // separate processes sharing this dataDir (e.g. a CLI `cancel-send` racing
-  // this server's own checkDue()) can still interleave load-modify-save and
-  // lose one side's update. No OS-level lock (flock/lockfile) is taken. A
-  // bespoke cross-process lockfile trades a rare millisecond-window lost
-  // update for a worse failure mode (a crash mid-lock leaves a stale lockfile
-  // that blocks every future send). Real upgrade path if this ever matters:
-  // move this JSON store into the SQLite index already used elsewhere
-  // (better-sqlite3), which has real cross-process locking for free.
+  // Called while holding the cross-process file lock. Rename is atomic.
   private async save(store: DeliveryQueueFile): Promise<void> {
     await mkdir(dirname(this.queuePath), { recursive: true, mode: 0o700 });
     const tempPath = `${this.queuePath}.tmp`;
