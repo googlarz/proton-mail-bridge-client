@@ -35,6 +35,19 @@ export interface ParsedCliArgs {
   flags: CliFlags;
 }
 
+// Every flag this CLI reads via isTruthyFlag() below — none of them ever takes a value in
+// practice (no command documents `--json false`). Without this set, the parser had no notion
+// of which flags are boolean, so a boolean flag placed before a positional argument silently
+// swallowed it as that flag's "value": `search --json invoice` set flags.json = "invoice"
+// (truthy check fails => plain text, not JSON) and searched with no query at all, matching
+// every message instead of the one intended. Listing them here makes such a flag always
+// boolean regardless of what follows it, so the next token is correctly left as a positional.
+const BOOLEAN_FLAGS = new Set([
+  "all", "confirmed", "dry-run", "full", "html", "json", "live", "no-attachment-text",
+  "permanent", "read", "reply-all", "sent", "starred", "sync", "unread", "unread-only",
+  "unstar", "unstarred", "wait",
+]);
+
 export function parseCliArgs(argv: string[]): ParsedCliArgs {
   const positionals: string[] = [];
   const flags: CliFlags = {};
@@ -48,7 +61,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
 
     const key = token.slice(2);
     const next = argv[index + 1];
-    if (!next || next.startsWith("--")) {
+    if (BOOLEAN_FLAGS.has(key) || !next || next.startsWith("--")) {
       flags[key] = true;
       continue;
     }
