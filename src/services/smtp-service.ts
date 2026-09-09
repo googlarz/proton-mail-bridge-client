@@ -3,6 +3,7 @@ import nodemailer, { type SentMessageInfo, type Transporter } from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import sanitizeHtml from "sanitize-html";
 import type { ProtonMailConfig, SendEmailInput } from "../types/index.js";
+import { htmlToMarkdown } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
 export function sanitizeHeader(value: string): string {
@@ -222,13 +223,24 @@ export class SMTPService {
 
     const { body: finalBody, htmlBody: finalHtml } = applySignature(input.body, sanitizedHtml, input.appendSignature);
 
+    // When isHtml is true and the caller didn't supply a separate htmlBody, input.body IS the
+    // HTML source — the normal send_email/reply/forward/send_draft shape when an agent
+    // supplies HTML. finalBody is that same raw, PRE-sanitization HTML (applySignature only
+    // appends a signature; it doesn't sanitize), so using it as the text/plain part put
+    // whatever sanitizeHtmlContent had just stripped (script tags, javascript: URIs) back into
+    // the message verbatim, and showed literal HTML markup to any plain-text-preferring
+    // client. Only this case needs a real conversion; when htmlBody was supplied separately,
+    // input.body is genuine author-provided plain text and must be left exactly as before.
+    const isRawHtmlBody = Boolean(input.isHtml) && input.htmlBody === undefined;
+    const textBody = isRawHtmlBody ? htmlToMarkdown(finalHtml) : finalBody;
+
     return {
       from,
       to: input.to.join(", "),
       cc: input.cc?.join(", "),
       bcc: input.bcc?.join(", "),
       subject,
-      text: finalHtml ? finalBody : (input.isHtml ? undefined : finalBody),
+      text: finalHtml ? textBody : (input.isHtml ? undefined : finalBody),
       html: finalHtml,
       replyTo,
       inReplyTo,

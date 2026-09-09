@@ -85,6 +85,49 @@ test("buildRawMessage sanitizes script tags out of HTML bodies by default", asyn
   assert.ok(message.includes("hello"));
 });
 
+// Regression test: when isHtml is true and the caller does NOT supply a separate
+// htmlBody, `body` IS the HTML source (the normal send_email/reply/forward/send_draft
+// shape). buildMailOptions used to pass that raw, PRE-sanitization body straight through
+// as the text/plain alternative part — so a script tag or javascript: link the HTML
+// sanitizer had just stripped out of the html part still reached any plain-text-preferring
+// client (or a quoted reply, or an MCP consumer reading `text`) completely intact, and
+// every plain-text recipient saw literal HTML markup instead of readable text.
+test("buildRawMessage does not leak raw pre-sanitization HTML into the text/plain part", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "HTML test",
+    body: '<p>Hi</p><script>alert(1)</script><a href="javascript:evil()">x</a>',
+    isHtml: true,
+    // no htmlBody — body itself is the HTML source.
+  });
+  const message = raw.toString("utf8");
+
+  assert.ok(!message.includes("<script>"), "the disallowed script tag must not appear anywhere in the raw message");
+  assert.ok(!message.includes("javascript:"), "the disallowed javascript: URI must not appear anywhere in the raw message");
+  // "<p>Hi</p>" legitimately appears once, inside the html part — the bug was the text/plain
+  // part carrying it too (twice total). A single occurrence proves the text part converted it.
+  const pTagOccurrences = message.split("<p>Hi</p>").length - 1;
+  assert.equal(pTagOccurrences, 1, "literal HTML tags must appear only in the html part, not duplicated into text/plain");
+  assert.ok(message.includes("Hi"), "the readable text content must survive the conversion");
+});
+
+test("buildRawMessage still uses the caller's real plain text when htmlBody is supplied separately", async () => {
+  // No-regression check for the sibling case the fix must NOT touch: when htmlBody is
+  // explicit, `body` is genuine author-provided plain text and must pass through unchanged.
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "Separate plain text",
+    body: "Plain text fallback, unrelated to the HTML below.",
+    isHtml: true,
+    htmlBody: "<p>Hello</p>",
+  });
+  const message = raw.toString("utf8");
+
+  assert.ok(message.includes("Plain text fallback, unrelated to the HTML below."));
+});
+
 // Regression test for the "buildMailOptions can silently send a completely
 // empty-body email" bug: when isHtml is true and sanitization strips the body
 // down to nothing, the send must fail loudly rather than deliver a blank email
