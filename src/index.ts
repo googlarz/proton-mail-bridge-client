@@ -447,7 +447,7 @@ const TOOLS = [
   },
   {
     name: "list_drafts",
-    description: "List all locally saved drafts with their status, subject, and timestamps. Use to review in-progress or unsent messages. Does NOT list drafts stored only on the Proton server — use list_remote_drafts for those. Prefer get_draft when you already have a draftId and need the full content.",
+    description: "List all locally saved drafts with their status, subject, and timestamps. Attachment content is omitted here (filename/type/size only) to keep this unbounded listing from blowing up on large attachments — use get_draft for the full attachment content of one draft. Use to review in-progress or unsent messages. Does NOT list drafts stored only on the Proton server — use list_remote_drafts for those. Prefer get_draft when you already have a draftId and need the full content.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -2285,6 +2285,32 @@ function threadSource(thread: {
   };
 }
 
+// list_drafts has no filter and returns every draft unconditionally — unlike get_draft/create_draft,
+// which each touch exactly one draft the caller already knows the content of. DraftRecord.attachments
+// carries full base64 `content`, and createTextResult() serializes the whole payload TWICE (once into
+// content[0].text, again into structuredContent). A single draft with a few-MB attachment already
+// roughly doubles in response size; list_drafts sums every draft's attachments into one response with
+// no cap, so one large attachment on any draft makes list_drafts exceed the MCP stdio client's read
+// buffer on every call — including the very next session's startup listing — permanently bricking the
+// tool until that draft is deleted out-of-band. Redact attachment content here the same way emails
+// already do (EmailAttachmentSummary carries no content; see get_attachment_content for the real bytes).
+// No explicit return-type annotation: the `size` field isn't part of EmailAttachmentInput, and this
+// value is only ever handed to createTextResult() (which takes `unknown`), so nothing needs the exact
+// DraftRecord shape here.
+export function redactDraftAttachmentsForListing(draft: DraftRecord) {
+  return {
+    ...draft,
+    attachments: draft.attachments.map((attachment) => ({
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      cid: attachment.cid,
+      contentDisposition: attachment.contentDisposition,
+      content: "",
+      size: Buffer.byteLength(attachment.content, "base64"),
+    })),
+  };
+}
+
 function draftSource(draft: DraftRecord): CitationSource {
   return {
     uri: buildDraftResourceUri(draft.id),
@@ -4039,7 +4065,7 @@ export function createServer(
           return createTextResult(
             {
               total: drafts.length,
-              drafts,
+              drafts: drafts.map(redactDraftAttachmentsForListing),
             },
             false,
             drafts.map(draftSource),
