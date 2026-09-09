@@ -2274,8 +2274,14 @@ export class LocalIndexService {
       params.push(filters.threadId);
     }
     if (filters.dateFrom) {
+      // Same bug class as dateTo below: dateFrom used to be pushed raw and compared as a
+      // string against full ISO timestamps ("internal_date" is always a full ISO string).
+      // A caller-supplied value that isn't already exactly that shape (a bare date, a value
+      // with a timezone offset, an English date like "March 24, 2026") does a wrong
+      // lexicographic comparison instead of a real date comparison, silently dropping
+      // matching messages with no error. Normalize the same way dateTo already does.
       conditions.push(`COALESCE(internal_date, date) >= ?`);
-      params.push(filters.dateFrom);
+      params.push(new Date(filters.dateFrom).toISOString());
     }
     if (filters.dateTo) {
       // dateTo is commonly a bare date ("2026-09-02") without a time
@@ -2451,8 +2457,11 @@ export class LocalIndexService {
       messageParams.push(options.isRead ? 1 : 0);
     }
     if (options.since) {
+      // Same normalization as the dateFrom fix in loadCandidateEmails() above — options.since
+      // is fed straight from a caller's dateFrom (see the threadId search path), so it needs
+      // the identical ISO normalization to avoid a wrong string comparison.
       messageConditions.push(`COALESCE(internal_date, date) >= ?`);
-      messageParams.push(options.since);
+      messageParams.push(new Date(options.since).toISOString());
     }
 
     if (messageConditions.length > 0) {

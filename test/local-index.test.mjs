@@ -803,6 +803,17 @@ test("dateFrom/dateTo set to the same day includes that day's messages instead o
     const dateToYesterdayResult = await service.search({ dateTo: "2026-09-01", limit: 10 });
     assert.equal(dateToYesterdayResult.total, 1);
     assert.equal(dateToYesterdayResult.emails[0].id, "INBOX::41", "dateTo boundary must still exclude the next day");
+
+    // Regression: dateFrom used to be pushed into the SQL candidate pre-filter raw and
+    // compared as a STRING against the full ISO internal_date. A dateFrom with an explicit
+    // timezone offset sorts differently than the stored UTC string even when it names an
+    // earlier real instant, so today's 17:14 UTC message was wrongly excluded by a dateFrom
+    // of "2026-09-02T18:00:00+02:00" (= 16:00 UTC, genuinely before it) purely because
+    // "...+02:00" sorts after "...Z" as a string. Normalizing to a real Date comparison fixes
+    // this the same way the dateTo fix above did for its own bound.
+    const tzOffsetDateFrom = await service.search({ dateFrom: "2026-09-02T18:00:00+02:00", limit: 10 });
+    assert.equal(tzOffsetDateFrom.total, 1, "a timezone-offset dateFrom naming an earlier real instant must still include the message");
+    assert.equal(tzOffsetDateFrom.emails[0].id, "INBOX::40");
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
