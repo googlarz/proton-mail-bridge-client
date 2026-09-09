@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.7] — 2026-09-09
+
+Sixth adversarial review round, following up on real-mailbox testing of v2.0.6. Eight confirmed findings, fixed and verified with new regression tests (299 → 310).
+
+### Fixed
+- **`list_drafts` could permanently brick the MCP session on a large attachment.** It has no filter and returns every draft unconditionally; `DraftRecord.attachments` carries full base64 content, and the response serializes the whole payload twice (text and structuredContent), so one large attachment on any draft could exceed the MCP stdio client's read buffer on every call — including the next session's startup listing. Attachment content is now redacted (filename/type/size only) in `list_drafts`; `get_draft` is unaffected.
+- **An unparseable `Date` header crashed `toSummary()` for the whole folder.** imapflow leaves `envelope.date` as the raw header string (not an `Invalid Date`) when it can't parse it; calling `.toISOString()` on that unconditionally threw, aborting `getEmails`/`searchEmails`/`sync`/`getEmailById` for every message in the folder over one bad message.
+- **Multi-word indexed search returned 0 results when the words weren't adjacent.** The SQL/FTS5 layer correctly ANDs each word as its own term, but the post-filter required the entire query as one literal substring — dropping any match whose words were merely out of order or separated by other words.
+- **`dateFrom` was compared as a raw string in the SQL candidate pre-filter**, unlike `dateTo` which was already normalized — a `dateFrom` with a timezone offset, a bare date, or an English date string could silently exclude matching messages via a wrong lexicographic comparison.
+- **`isHtml:true` sent raw, pre-sanitization HTML as the text/plain part** of the message — content the HTML sanitizer had just stripped (script tags, `javascript:` URIs) still reached plain-text-preferring clients intact.
+- **A CLI boolean flag placed before a positional argument swallowed it** (`search --json invoice` dropped the query entirely) — the parser had no notion of which flags are boolean.
+- **`getThreads({query})` built partial or wrongly-excluded threads.** A query matching only a reference chain's root (which has no persisted thread_id and no reference headers of its own) built a thread from the root alone; fixing that then surfaced that the outer filter checked only the thread's latest-message subject, wrongly excluding threads whose matching message wasn't the most recent one.
+- **Folder names containing `%` or `,` broke indexing and folder resolution.** A bare `%` in a folder/label name crashed `decodeURIComponent()` inside `recordSnapshot()`, rolling back the entire index snapshot; a folder name containing a comma was always split as a multi-folder list instead of resolving to itself.
+
 ## [2.0.6] — 2026-09-08
 
 Real-mailbox verification of v2.0.5 against a live 57k-message, 4.6k-thread Proton account (rather than mocks).
