@@ -243,8 +243,16 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
     .join("\n")
     .toLowerCase();
 
-  if (normalizedFilters.query && !haystacks.includes(normalizedFilters.query.toLowerCase())) {
-    return false;
+  // searchFtsIds() ANDs every whitespace-separated query token as its own quoted FTS5 term
+  // (so "invoice payment" matches a preview like "payment for the invoice is overdue"), but
+  // this post-filter used to require the ENTIRE joined query as one literal substring —
+  // rejecting anything FTS already matched whose words were merely out of order or separated
+  // by other words. Match FTS's own AND-of-terms semantics instead of a single-phrase substring.
+  if (normalizedFilters.query) {
+    const terms = normalizedFilters.query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (terms.length > 0 && !terms.every((term) => haystacks.includes(term))) {
+      return false;
+    }
   }
 
   if (

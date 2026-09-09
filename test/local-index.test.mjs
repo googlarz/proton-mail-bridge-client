@@ -949,6 +949,73 @@ test("search treats a query of only FTS5-keyword/hyphen tokens as a real (zero-m
   }
 });
 
+test("search matches a multi-word query whose words are present but out of order or non-adjacent", async () => {
+  // Regression test: searchFtsIds() ANDs every whitespace token as its own quoted FTS5 term,
+  // so "invoice payment" correctly matches a preview of "payment for the invoice is overdue"
+  // at the SQL level — but matchesIndexedSearch()'s post-filter used to require the ENTIRE
+  // joined query as one literal substring, silently dropping every FTS match whose words
+  // were merely out of order or separated by other words, and returning total:0 with no
+  // warning at all.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-search-multiword-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-03-25T10:00:00.000Z",
+      folders: [
+        {
+          path: "INBOX",
+          name: "INBOX",
+          delimiter: "/",
+          specialUse: "\\Inbox",
+          listed: true,
+          subscribed: true,
+          flags: [],
+          messages: 1,
+          unseen: 0,
+        },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "recent" }],
+      emails: [
+        {
+          id: "INBOX::1",
+          folder: "INBOX",
+          uid: 1,
+          seq: 1,
+          messageId: "<a@example.com>",
+          subject: "Reminder",
+          from: [{ address: "billing@example.com" }],
+          to: [{ address: "owner@example.com" }],
+          cc: [],
+          bcc: [],
+          replyTo: [],
+          date: "2026-03-25T09:00:00.000Z",
+          internalDate: "2026-03-25T09:00:00.000Z",
+          isRead: false,
+          isStarred: false,
+          flags: [],
+          preview: "payment for the invoice is overdue",
+          hasAttachments: false,
+          attachments: [],
+          labels: [],
+        },
+      ],
+    });
+
+    const outOfOrder = await service.search({ query: "invoice payment", limit: 10 });
+    assert.equal(outOfOrder.total, 1, "words present but out of order/non-adjacent must still match");
+    assert.equal(outOfOrder.emails[0].id, "INBOX::1");
+
+    const adjacent = await service.search({ query: "payment for", limit: 10 });
+    assert.equal(adjacent.total, 1, "the previously-working adjacent-phrase case must still match (no regression)");
+
+    const noMatch = await service.search({ query: "invoice zebra", limit: 10 });
+    assert.equal(noMatch.total, 0, "a term that genuinely isn't present must still exclude the message");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("search treats FTS5-keyword and leading-hyphen terms as literal words instead of dropping them", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "protonmail-search-fts5-keyword-test-"));
   const service = new LocalIndexService(createConfig(dataDir));
