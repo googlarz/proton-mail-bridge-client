@@ -209,6 +209,70 @@ test("local index groups siblings by References when the parent message is missi
   }
 });
 
+test("getThreads({query}) reports full membership for a reference-chain thread even when the query only matches its root", async () => {
+  // Regression test: loadThreadCandidateMessages()'s hasUnresolvedReferenceCandidate check
+  // only widened to the full uncapped message set when the SQL-matched CANDIDATE ITSELF had
+  // inReplyTo/references. A candidate that IS THE ROOT of a reference chain has neither (it
+  // started the thread) and has no persisted thread_id either, so a query matching only the
+  // root (not any of its replies) built a thread from the root alone — a different, smaller
+  // view than an unfiltered getThreads() call computes for the exact same thread.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-thread-root-query-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-03-24T12:00:00.000Z",
+      folders: [
+        { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 2, unseen: 1 },
+      ],
+      folderStats: [{ folder: "INBOX", fetched: 2, total: 2, strategy: "recent" }],
+      emails: [
+        {
+          id: "INBOX::1", folder: "INBOX", uid: 1, seq: 1,
+          messageId: "<root@example.com>",
+          subject: "Invoice 03/2026",
+          from: [{ address: "alice@example.com" }], to: [{ address: "owner@example.com" }],
+          cc: [], bcc: [], replyTo: [],
+          date: "2026-03-01T09:00:00.000Z", internalDate: "2026-03-01T09:00:00.000Z",
+          isRead: true, isStarred: false, flags: ["\\Seen"],
+          preview: "Please find the attached invoice", hasAttachments: false, attachments: [], labels: [],
+        },
+        {
+          id: "INBOX::2", folder: "INBOX", uid: 2, seq: 2,
+          messageId: "<reply@example.com>",
+          inReplyTo: "<root@example.com>",
+          references: ["<root@example.com>"],
+          subject: "Question about VAT",
+          from: [{ address: "owner@example.com" }], to: [{ address: "alice@example.com" }],
+          cc: [], bcc: [], replyTo: [],
+          date: "2026-03-03T09:00:00.000Z", internalDate: "2026-03-03T09:00:00.000Z",
+          isRead: false, isStarred: false, flags: [],
+          preview: "One question about the VAT line", hasAttachments: false, attachments: [], labels: [],
+        },
+      ],
+    });
+
+    const unfiltered = await service.getThreads({ limit: 10 });
+    assert.equal(unfiltered.total, 1);
+    assert.equal(unfiltered.threads[0].messageCount, 2, "sanity check: the two messages form one thread");
+    const fullThreadId = unfiltered.threads[0].id;
+
+    // "invoice" matches only INBOX::1's subject/preview — INBOX::2 has neither word anywhere.
+    const filtered = await service.getThreads({ query: "invoice", limit: 10 });
+    assert.equal(filtered.total, 1);
+    assert.equal(filtered.threads[0].id, fullThreadId, "must resolve to the SAME thread id as the unfiltered call");
+    assert.equal(filtered.threads[0].messageCount, 2, "must report full membership, not just the root that matched the query");
+
+    const detail = await service.getThreadById(fullThreadId);
+    assert.deepEqual(
+      detail.messages.map((message) => message.primaryEmailId).sort(),
+      ["INBOX::1", "INBOX::2"],
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("local index imports a legacy JSON snapshot into SQLite once", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "protonmail-legacy-index-test-"));
   const legacyPath = join(dataDir, "mail-index.json");

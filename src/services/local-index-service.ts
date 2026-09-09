@@ -939,7 +939,17 @@ export class LocalIndexService {
     }
 
     const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
-    const threads = this.buildThreads(snapshot).filter((thread) => {
+    // includeMessages:true so the query check below can look at EVERY message's subject, not
+    // just thread.subject (which buildThreads derives from the single LATEST message). Found
+    // live via the fix above: once loadThreadCandidateMessages() correctly pulls in a
+    // reference-chain thread's full membership even when the query only matched its root, this
+    // filter's old `thread.subject` check started wrongly excluding that thread entirely — the
+    // root's subject may share nothing with the thread's most recent reply (e.g. root "Invoice
+    // 03/2026" vs. latest reply "Question about VAT"). Checking every message means a thread
+    // the SQL prefilter already proved relevant is never re-excluded by which message happened
+    // to be newest. `messages` is stripped back off in the final return below — callers still
+    // get plain ThreadSummary shapes, not the full per-message detail.
+    const threads = (this.buildThreads(snapshot, true) as ThreadDetail[]).filter((thread) => {
       if (input.label) {
         const labelNeedle = input.label.toLowerCase();
         if (!thread.normalizedLabels.some((label) => label.toLowerCase() === labelNeedle)) {
@@ -948,14 +958,17 @@ export class LocalIndexService {
       }
 
       if (input.query) {
-        const haystack = [
-          thread.subject,
+        const queryNeedle = input.query.toLowerCase();
+        const threadLevelHaystack = [
           ...thread.participants.map((participant) => `${participant.name ?? ""} ${participant.address ?? ""}`),
           ...thread.normalizedLabels,
         ]
           .join("\n")
           .toLowerCase();
-        if (!haystack.includes(input.query.toLowerCase())) {
+        const matchesAnyMessage = thread.messages.some((message) =>
+          message.subject.toLowerCase().includes(queryNeedle),
+        );
+        if (!matchesAnyMessage && !threadLevelHaystack.includes(queryNeedle)) {
           return false;
         }
       }
@@ -966,10 +979,11 @@ export class LocalIndexService {
     const limit = input.limit ?? 100;
     const offset = 0;
     const totalCount = threads.length;
+    const summaries: ThreadSummary[] = threads.map(({ messages: _messages, ...summary }) => summary);
     return {
       total: totalCount,
       hasMore: totalCount > offset + limit,
-      threads: threads.slice(offset, offset + limit),
+      threads: summaries.slice(offset, offset + limit),
       ...this.indexFreshnessFields(snapshot.updatedAt),
       ...(messagesCapped ? { messagesCapped: true } : {}),
     };
@@ -2543,16 +2557,44 @@ export class LocalIndexService {
     // is present, pull in the full, uncapped message set — the same source
     // getThreadById() now uses for these threads — so the thread is always built
     // from its complete membership, filtered query or not.
-    const hasUnresolvedReferenceCandidate = candidates.some(
-      (email) => !email.threadId?.trim() && (email.inReplyTo || (email.references?.length ?? 0) > 0),
-    );
-    if (hasUnresolvedReferenceCandidate) {
+    if (this.hasUnresolvedReferenceCandidate(db, candidates)) {
       for (const email of this.loadAllMessages(db)) {
         byId.set(email.id, email);
       }
     }
 
     return [...byId.values()];
+  }
+
+  // The check above only looked at the candidate's OWN inReplyTo/references — but a
+  // candidate that IS the root of a reference chain has neither (it started the thread),
+  // while a reply elsewhere in the mailbox points AT it via In-Reply-To. Found live: a
+  // getThreads({query}) match on the root message alone built a 1-message thread instead of
+  // the real 3-message thread, because the root has no headers to trip the original check and
+  // no persisted thread_id to expand through. A candidate lacking a persisted thread_id is
+  // genuinely resolved by full-membership-via-references in exactly two cases: it references
+  // something else (the original check), or something else references IT. The in_reply_to
+  // column is indexed (idx_messages_in_reply_to), so this stays a targeted lookup per
+  // reference-less candidate rather than paying for the full scan on the common case where
+  // every candidate already has a native thread_id.
+  private hasUnresolvedReferenceCandidate(db: Database.Database, candidates: EmailSummary[]): boolean {
+    return candidates.some((email) => {
+      if (email.threadId?.trim()) {
+        return false;
+      }
+      if (email.inReplyTo || (email.references?.length ?? 0) > 0) {
+        return true;
+      }
+      if (email.messageId) {
+        const referencedByOther = db
+          .prepare(`SELECT 1 FROM messages WHERE in_reply_to = ? LIMIT 1`)
+          .get(email.messageId);
+        if (referencedByOther) {
+          return true;
+        }
+      }
+      return false;
+    });
   }
 
   // Uncapped message read, unlike loadMessages() (deliberately capped at
@@ -2596,10 +2638,10 @@ export class LocalIndexService {
       }
     }
 
-    const hasUnresolvedReferenceCandidate = candidates.some(
-      (email) => !email.threadId?.trim() && (email.inReplyTo || (email.references?.length ?? 0) > 0),
-    );
-    if (hasUnresolvedReferenceCandidate) {
+    // See hasUnresolvedReferenceCandidate()'s comment above (loadThreadCandidateMessages) for
+    // why this must also check whether some OTHER message's In-Reply-To points at a
+    // header-less candidate, not just the candidate's own inReplyTo/references.
+    if (this.hasUnresolvedReferenceCandidate(db, candidates)) {
       for (const email of this.loadAllMessages(db)) {
         byId.set(email.id, email);
       }
