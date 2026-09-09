@@ -4,6 +4,7 @@ import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   describeImapError,
+  detectAutomatedFromHeaders,
   isLikelyAuthenticationError,
   isLikelyConnectionError,
   mapHeaderValue,
@@ -1464,4 +1465,61 @@ test("searchEmails' local-filter batch size is decoupled from a small `limit` fo
   // one — never 121 one-per-candidate fetches, and never a single batch covering
   // everything regardless of the small `limit`.
   assert.equal(fullDetailBatches.length, 3);
+});
+
+test("detectAutomatedFromHeaders flags each bulk/automated header signal and clears plain human mail", () => {
+  // Found live: the local-part regex fallback (no-reply/notification/...) cannot see
+  // transactional senders like an order-confirmation address with a plain local part, so
+  // ~68% of a 57k-message mailbox's threads still counted as "pending on you". The real
+  // signal is in the headers, fetched via HEADER.FIELDS in the same FETCH as the index query.
+  const headers = (lines) => Buffer.from([...lines, ""].join("\r\n"));
+
+  assert.equal(detectAutomatedFromHeaders(undefined), undefined, "no header data must stay unknown, not 'human'");
+  assert.equal(detectAutomatedFromHeaders(headers([])), false);
+  assert.equal(
+    detectAutomatedFromHeaders(headers(["From: alice@example.com", "Subject: lunch?", "Precedence: first-class"])),
+    false,
+    "a non-bulk Precedence value is not an automation signal",
+  );
+  assert.equal(detectAutomatedFromHeaders(headers(["Auto-Submitted: no"])), false);
+
+  assert.equal(detectAutomatedFromHeaders(headers(["List-Unsubscribe: <mailto:unsub@shop.example>"])), true);
+  assert.equal(detectAutomatedFromHeaders(headers(["List-ID: Orders <orders.shop.example>"])), true);
+  assert.equal(detectAutomatedFromHeaders(headers(["precedence: BULK"])), true, "Precedence is case-insensitive");
+  assert.equal(detectAutomatedFromHeaders(headers(["Precedence: list"])), true);
+  assert.equal(detectAutomatedFromHeaders(headers(["Precedence: junk"])), true);
+  assert.equal(detectAutomatedFromHeaders(headers(["Auto-Submitted: auto-generated"])), true);
+  assert.equal(detectAutomatedFromHeaders(headers(["X-Auto-Response-Suppress: All"])), true);
+  assert.equal(
+    detectAutomatedFromHeaders(headers(["List-Unsubscribe: <https://shop.example/u?x=1>,", "\t<mailto:unsub@shop.example>"])),
+    true,
+    "folded header continuation lines must still be recognised",
+  );
+});
+
+test("toSummary carries the header-derived isAutomated verdict and leaves it undefined without header data", () => {
+  const service = new SimpleIMAPService(createConfig());
+  const base = {
+    uid: 1,
+    seq: 1,
+    flags: new Set(),
+    envelope: {
+      subject: "Order 123",
+      from: [{ address: "domeny@netart.pl", name: "NetArt" }],
+      to: [],
+      cc: [],
+      bcc: [],
+      replyTo: [],
+    },
+    bodyStructure: {},
+  };
+
+  const automated = service.toSummary("INBOX", { ...base, headers: Buffer.from("List-Unsubscribe: <mailto:u@netart.pl>\r\n") });
+  assert.equal(automated.isAutomated, true);
+
+  const human = service.toSummary("INBOX", { ...base, headers: Buffer.from("Precedence: first-class\r\n") });
+  assert.equal(human.isAutomated, false);
+
+  const unknown = service.toSummary("INBOX", base);
+  assert.equal(unknown.isAutomated, undefined, "a fetch path without headers must not guess");
 });

@@ -84,6 +84,7 @@ type MessageRow = {
   attachments_json: string;
   attachment_text: string | null;
   labels_json: string;
+  is_automated: number | null;
 };
 
 const DB_SCHEMA_VERSION = 3;
@@ -438,15 +439,20 @@ function isOutgoingMessage(message: Pick<EmailSummary, "from">, ownerEmail?: str
   return message.from.some((address) => lowerCaseAddress(address.address) === owner);
 }
 
-// ponytail: cheap local-part heuristic, no schema change (no stored List-Unsubscribe/Precedence
-// header). Catches the bulk of automated senders (auction/shipping/billing notifications, etc.)
-// that were otherwise all counted as threads "pending on you" forever, since a one-way automated
-// message is never replied to and never ages out. Upgrade path: store List-Unsubscribe/Precedence
-// at index time and use that instead if this substring heuristic proves too coarse in practice.
+// ponytail: the upgrade path has been taken — messages.is_automated now stores the real
+// List-Unsubscribe/List-Id/Precedence/Auto-Submitted verdict captured at index time
+// (EmailSummary.isAutomated), and it wins whenever present. This local-part heuristic is kept
+// only as the fallback for rows indexed before that column existed (is_automated NULL), which
+// stay on the heuristic until a full re-sync backfills them. It proved too coarse live: it cut
+// "pending on you" from 49,026 to 38,532 of ~57k threads, but transactional senders like an
+// order-confirmation address with no no-reply marker are invisible to it.
 const AUTOMATED_SENDER_PATTERN =
   /(^|[._-])(no-?reply|donotreply|do-not-reply|notification|powiadomien|mailer-daemon|postmaster|bounce)/i;
 
-function isLikelyAutomatedSender(message: Pick<EmailSummary, "from">): boolean {
+function isLikelyAutomatedSender(message: Pick<EmailSummary, "from" | "isAutomated">): boolean {
+  if (message.isAutomated !== undefined) {
+    return message.isAutomated;
+  }
   return message.from.some((address) => AUTOMATED_SENDER_PATTERN.test(address.address ?? ""));
 }
 
@@ -1665,11 +1671,13 @@ export class LocalIndexService {
       INSERT INTO messages (
         email_id, folder, uid, seq, message_id, in_reply_to, references_json, thread_id, subject,
         from_json, to_json, cc_json, bcc_json, reply_to_json, date, internal_date,
-        is_read, is_starred, flags_json, size, preview, has_attachments, attachments_json, attachment_text, labels_json
+        is_read, is_starred, flags_json, size, preview, has_attachments, attachments_json, attachment_text, labels_json,
+        is_automated
       ) VALUES (
         @email_id, @folder, @uid, @seq, @message_id, @in_reply_to, @references_json, @thread_id, @subject,
         @from_json, @to_json, @cc_json, @bcc_json, @reply_to_json, @date, @internal_date,
-        @is_read, @is_starred, @flags_json, @size, @preview, @has_attachments, @attachments_json, @attachment_text, @labels_json
+        @is_read, @is_starred, @flags_json, @size, @preview, @has_attachments, @attachments_json, @attachment_text, @labels_json,
+        @is_automated
       )
       ON CONFLICT(email_id) DO UPDATE SET
         folder = excluded.folder,
@@ -1699,7 +1707,10 @@ export class LocalIndexService {
         has_attachments = excluded.has_attachments,
         attachments_json = excluded.attachments_json,
         attachment_text = COALESCE(excluded.attachment_text, messages.attachment_text),
-        labels_json = excluded.labels_json
+        labels_json = excluded.labels_json,
+        -- Same reasoning: a flags-only refresh fetches no headers, so is_automated arrives
+        -- NULL; the headers of a fixed UID never change, so keeping the stored verdict is safe.
+        is_automated = COALESCE(excluded.is_automated, messages.is_automated)
       RETURNING preview, attachment_text
     `);
     const upsertSyncState = db.prepare(`
@@ -1932,6 +1943,7 @@ export class LocalIndexService {
           attachments_json: JSON.stringify(email.attachments),
           attachment_text: email.attachmentText ?? legacyAttachmentText,
           labels_json: JSON.stringify(email.labels),
+          is_automated: email.isAutomated === undefined ? null : email.isAutomated ? 1 : 0,
         }) as { preview: string | null; attachment_text: string | null };
 
         const mergedPreview = persisted.preview ?? "";
@@ -2063,7 +2075,8 @@ export class LocalIndexService {
         has_attachments INTEGER NOT NULL,
         attachments_json TEXT NOT NULL,
         attachment_text TEXT,
-        labels_json TEXT NOT NULL
+        labels_json TEXT NOT NULL,
+        is_automated INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS sync_state (
@@ -2112,6 +2125,12 @@ export class LocalIndexService {
     }
     if (!columns.has("attachment_text")) {
       db.exec(`ALTER TABLE messages ADD COLUMN attachment_text TEXT`);
+    }
+    // Nullable on purpose: existing rows read back as NULL (= isAutomated undefined) so the
+    // actionable-thread scorer falls back to the sender regex for them instead of treating
+    // every pre-migration message as human. A full re-sync backfills the real value.
+    if (!columns.has("is_automated")) {
+      db.exec(`ALTER TABLE messages ADD COLUMN is_automated INTEGER`);
     }
 
     const syncStateColumns = new Set(
@@ -2630,6 +2649,7 @@ export class LocalIndexService {
       attachments: safeJsonParse(row.attachments_json, []),
       attachmentText: row.attachment_text ?? undefined,
       labels: safeJsonParse(row.labels_json, []),
+      isAutomated: row.is_automated === null || row.is_automated === undefined ? undefined : Boolean(row.is_automated),
     };
   }
 

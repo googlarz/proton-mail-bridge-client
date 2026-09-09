@@ -170,6 +170,11 @@ export interface EmailSummary {
   attachments: EmailAttachmentSummary[];
   attachmentText?: string;
   labels: string[];
+  // Whether the message carries bulk/automated-mail headers (List-Unsubscribe, List-Id,
+  // Precedence: bulk/list/junk, Auto-Submitted, X-Auto-Response-Suppress). undefined means
+  // the headers were not captured for this message (indexed before capture existed, or
+  // fetched via a path without header data), so callers must fall back rather than assume.
+  isAutomated?: boolean;
 }
 
 export interface EmailDetail extends EmailSummary {
