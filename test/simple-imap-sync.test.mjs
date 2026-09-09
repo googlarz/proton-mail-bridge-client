@@ -1523,3 +1523,36 @@ test("toSummary carries the header-derived isAutomated verdict and leaves it und
   const unknown = service.toSummary("INBOX", base);
   assert.equal(unknown.isAutomated, undefined, "a fetch path without headers must not guess");
 });
+
+test("toSummary does not throw on an unparseable Date header", () => {
+  // imapflow does NOT produce an Invalid Date for an unparseable RFC 5322 Date header
+  // (node_modules/imapflow/lib/tools.js): it leaves envelope.date as the raw header STRING
+  // instead of a Date instance. toSummary() used to call envelope.date.toISOString()
+  // unconditionally, which throws a TypeError on a string — aborting the entire
+  // getEmails/searchEmails/sync/getEmailById call for the whole folder over one bad message.
+  const service = new SimpleIMAPService(createConfig());
+  const base = {
+    uid: 1,
+    seq: 1,
+    flags: new Set(),
+    envelope: {
+      subject: "Bad date",
+      from: [{ address: "sender@example.com" }],
+      to: [],
+      cc: [],
+      bcc: [],
+      replyTo: [],
+    },
+    bodyStructure: {},
+  };
+
+  const withBadDate = { ...base, envelope: { ...base.envelope, date: "Thu, 32 Foo 2024 25:61:00 +9900" } };
+  assert.doesNotThrow(() => service.toSummary("INBOX", withBadDate));
+  assert.equal(service.toSummary("INBOX", withBadDate).date, undefined);
+
+  const withGoodDate = { ...base, envelope: { ...base.envelope, date: new Date("2026-03-01T12:00:00.000Z") } };
+  assert.equal(service.toSummary("INBOX", withGoodDate).date, "2026-03-01T12:00:00.000Z", "a real Date instance must still work exactly as before (no regression)");
+
+  const withNoDate = { ...base, envelope: { ...base.envelope } };
+  assert.equal(service.toSummary("INBOX", withNoDate).date, undefined);
+});

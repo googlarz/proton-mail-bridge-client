@@ -3446,6 +3446,24 @@ export class SimpleIMAPService {
     });
   }
 
+  // imapflow does NOT produce an Invalid Date for an unparseable RFC 5322 Date header
+  // (node_modules/imapflow/lib/tools.js): it leaves envelope.date as the raw header STRING
+  // instead of a Date instance. Calling .toISOString() on that unconditionally throws a
+  // TypeError inside toSummary(), which runs in every fetch loop — one bad message (common
+  // from spam or legacy MUAs, e.g. "Thu, 32 Foo 2024 25:61:00 +9900") aborted the whole
+  // folder's getEmails/searchEmails/sync/getEmailById. Treat both shapes explicitly and fall
+  // back to undefined (not a crash) when the header truly can't be parsed either way.
+  private static safeEnvelopeDateIso(value: unknown): string | undefined {
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? undefined : value.toISOString();
+    }
+    if (typeof value === "string") {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
+    }
+    return undefined;
+  }
+
   private toSummary(folder: string, message: FetchMessageObject, uidValidity?: string): EmailSummary {
     const flags = [...(message.flags ?? [])];
     const attachments = extractAttachments(message.bodyStructure);
@@ -3465,7 +3483,7 @@ export class SimpleIMAPService {
       cc: mapEnvelopeAddresses(message.envelope?.cc),
       bcc: mapEnvelopeAddresses(message.envelope?.bcc),
       replyTo: mapEnvelopeAddresses(message.envelope?.replyTo),
-      date: message.envelope?.date?.toISOString(),
+      date: SimpleIMAPService.safeEnvelopeDateIso(message.envelope?.date),
       internalDate:
         message.internalDate instanceof Date
           ? message.internalDate.toISOString()
