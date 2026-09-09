@@ -1524,6 +1524,27 @@ test("toSummary carries the header-derived isAutomated verdict and leaves it und
   assert.equal(unknown.isAutomated, undefined, "a fetch path without headers must not guess");
 });
 
+test("resolveFolders prefers an exact-match folder name over splitting on comma", async () => {
+  // Regression test: resolveFolders() treats a comma-separated input as a LIST of folder
+  // paths (documented convention matching batch_email_action's emailIds, e.g. "INBOX,Sent").
+  // That is ambiguous for a folder whose own name legitimately contains a comma — Proton
+  // allows arbitrary custom label names, e.g. "Client A, Inc." — which used to always split
+  // into two bogus lookups ("Client A" and "Inc.") instead of the one real folder.
+  const service = new SimpleIMAPService(createConfig());
+  service.getFolders = async () => [
+    { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [] },
+    { path: "Labels/Client A, Inc.", name: "Client A, Inc.", delimiter: "/", listed: true, subscribed: true, flags: [] },
+  ];
+
+  const exactMatch = await service.resolveFolders("Labels/Client A, Inc.");
+  assert.deepEqual(exactMatch, ["Labels/Client A, Inc."], "a folder name that itself contains a comma must resolve as one folder when it exists");
+
+  // No-regression check: a genuine multi-folder list (no single folder matches the whole
+  // unsplit string) must still split exactly as before.
+  const multiFolder = await service.resolveFolders("INBOX,Sent");
+  assert.deepEqual(multiFolder, ["INBOX", "Sent"]);
+});
+
 test("toSummary does not throw on an unparseable Date header", () => {
   // imapflow does NOT produce an Invalid Date for an unparseable RFC 5322 Date header
   // (node_modules/imapflow/lib/tools.js): it leaves envelope.date as the raw header STRING

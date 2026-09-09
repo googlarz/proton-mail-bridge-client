@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createEmailId, foldQuotedHistory, htmlToMarkdown, parseEmailId, projectFields, renderMarkdown } from "../dist/utils/helpers.js";
+import { createEmailId, foldQuotedHistory, htmlToMarkdown, normalizeMailboxLabel, parseEmailId, projectFields, renderMarkdown } from "../dist/utils/helpers.js";
 
 test("htmlToMarkdown preserves links, emphasis, and lists instead of stripping them", () => {
   const html = "<h1>Hello</h1><p>This is <b>bold</b> and a <a href=\"https://example.com\">link</a>.</p><ul><li>one</li><li>two</li></ul>";
@@ -177,4 +177,18 @@ test("renderMarkdown still renders an ordinary link correctly", () => {
 test("renderMarkdown rejects a non-http(s)/mailto scheme link (e.g. javascript:) by falling back to #", () => {
   const { html } = renderMarkdown("[click](javascript:alert(1))");
   assert.ok(html.includes('href="#"'), `expected unsafe scheme to be neutralized, got: ${html}`);
+});
+
+test("normalizeMailboxLabel does not throw on a folder/label name containing a bare '%'", () => {
+  // Regression test: `value` here is a real IMAP folder/label path straight from imapflow,
+  // never percent-encoded. decodeURIComponent() on a folder legitimately named e.g. "50% off"
+  // throws URIError (a bare "%" is not a valid percent-encoding sequence), which propagated
+  // out of recordSnapshot() and rolled back the ENTIRE index snapshot over one oddly-named
+  // folder. Must fall back to the raw name instead of throwing.
+  assert.equal(normalizeMailboxLabel("50% off"), "50% off");
+  assert.equal(normalizeMailboxLabel("Labels/50% off"), "50% off");
+  assert.equal(normalizeMailboxLabel("100%"), "100%");
+  // No-regression check: a real percent-encoded value (from an id-derived caller) still
+  // decodes exactly as before.
+  assert.equal(normalizeMailboxLabel("Labels/Caf%C3%A9"), "Café");
 });

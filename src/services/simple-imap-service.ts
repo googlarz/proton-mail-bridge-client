@@ -3389,7 +3389,19 @@ export class SimpleIMAPService {
     if (folder?.trim()) {
       // Comma-separated list of folder paths, same convention as batch_email_action's
       // emailIds — lets a single sync/search call scope to e.g. "INBOX,Sent" instead
-      // of only ever a single folder or every folder.
+      // of only ever a single folder or every folder. This is ambiguous for a folder that
+      // legitimately has a comma in its own name (Proton allows arbitrary custom label
+      // names, e.g. "Client A, Inc."), which used to always split into two bogus lookups.
+      // Only pay for the extra getFolders() round-trip when the input actually contains a
+      // comma; if the whole, unsplit string names a real existing folder, prefer that single
+      // exact match over guessing it's a list.
+      const trimmedInput = folder.trim();
+      if (trimmedInput.includes(",")) {
+        const existingFolders = await this.getFolders();
+        if (existingFolders.some((entry) => entry.path === trimmedInput)) {
+          return [trimmedInput];
+        }
+      }
       return folder
         .split(",")
         .map((entry) => entry.trim())

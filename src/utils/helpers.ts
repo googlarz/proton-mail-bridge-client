@@ -740,7 +740,19 @@ export function normalizeMailboxLabel(value?: string): string | undefined {
     return undefined;
   }
 
-  const decoded = decodeURIComponent(trimmed);
+  // `value` is a real IMAP folder/label path straight from imapflow (which already handles
+  // IMAP's own modified-UTF-7 folder-name encoding) — it was never percent-encoded, so this
+  // decode is only ever meaningful for the rare id-derived caller that already ran it through
+  // encodeURIComponent. A folder that legitimately contains a bare "%" (e.g. a custom label
+  // named "50% off") is not a valid percent-encoding sequence, and decodeURIComponent throws
+  // URIError on it — which propagated out of recordSnapshot() and rolled back the ENTIRE
+  // index snapshot over one oddly-named folder. Fall back to the raw value on that error.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(trimmed);
+  } catch {
+    decoded = trimmed;
+  }
   const lower = decoded.toLowerCase();
 
   if (lower === "inbox") return "Inbox";
