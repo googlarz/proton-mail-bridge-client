@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.8] — 2026-09-09
+
+### Fixed
+- **CI's `npm audit --audit-level=high` started failing on a newly-published high-severity advisory** against nodemailer <=9.1.0 (affecting `resolveContent()`'s legacy-signature file/URL-access bypass, an IDN/punycode allow-list bypass, a quadratic-time address-parser DoS, and an RFC 5322 comment-parsing domain-validation bypass) — none of which this codebase's own nodemailer usage triggers, but the audit gate has no way to know that. Bumped the direct `nodemailer` dependency to `^9.1.1` (same major, no API change) and `mailparser` picked up its own patched nested nodemailer via `npm audit fix`. `hono` (a transitive dependency of `@modelcontextprotocol/sdk`, moderate severity) was also resolved by the same `npm audit fix` run. No source changes; `npm audit` now reports 0 vulnerabilities.
+
 ## [2.0.7] — 2026-09-09
 
 Sixth adversarial review round, following up on real-mailbox testing of v2.0.6. Eight confirmed findings, fixed and verified with new regression tests (299 → 310).
