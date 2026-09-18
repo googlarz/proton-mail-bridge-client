@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applySignature, sanitizeHeader, SMTPService } from "../dist/services/smtp-service.js";
+import { applySignature, injectBccHeader, sanitizeHeader, SMTPService } from "../dist/services/smtp-service.js";
 
 test("sanitizeHeader replaces CR and LF with spaces", () => {
   assert.equal(sanitizeHeader("hello\r\nBcc: evil"), "hello  Bcc: evil");
@@ -469,4 +469,50 @@ test("applySignature is a no-op when appendSignature is false or no signature is
     if (previous === undefined) delete process.env.PROTONMAIL_SIGNATURE;
     else process.env.PROTONMAIL_SIGNATURE = previous;
   }
+});
+
+// Regression test for an externally-reported bug (review of e9773e4 / v2.1.7):
+// nodemailer's MailComposer has no keepBcc option of its own (unlike the
+// underlying MimeNode it builds, which does) — Bcc was silently dropped from
+// every draft saved to the Proton server, so reopening it later never showed
+// who was meant to be Bcc'd. injectBccHeader splices the header back into the
+// already-compiled raw MIME text, only when explicitly asked (buildRawMessage's
+// preserveBcc, used only by syncDraftToRemote — never anything actually
+// delivered to recipients).
+test("injectBccHeader splices a Bcc header into a raw MIME message right before the body", () => {
+  const raw = Buffer.from("From: a@example.com\r\nTo: b@example.com\r\nSubject: Test\r\n\r\nBody text.", "utf8");
+  const result = injectBccHeader(raw, ["hidden@example.com", "hidden2@example.com"]);
+  const text = result.toString("utf8");
+  assert.ok(text.includes("Bcc: hidden@example.com, hidden2@example.com"), "the Bcc header must be present");
+  assert.ok(text.endsWith("Body text."), "the body must be untouched");
+  assert.ok(text.indexOf("Bcc:") < text.indexOf("\r\n\r\n"), "Bcc must land in the header block, not the body");
+});
+
+test("injectBccHeader sanitizes each address against header injection", () => {
+  const raw = Buffer.from("From: a@example.com\r\nTo: b@example.com\r\n\r\nBody.", "utf8");
+  const result = injectBccHeader(raw, ["evil@example.com\r\nBcc: extra@attacker.example"]);
+  const text = result.toString("utf8");
+  assert.ok(!text.includes("\r\nBcc: extra@attacker.example"), "a CRLF-injected second Bcc header must not survive");
+});
+
+test("injectBccHeader returns the buffer unchanged if no header/body separator is found", () => {
+  const raw = Buffer.from("not a real mime message", "utf8");
+  const result = injectBccHeader(raw, ["hidden@example.com"]);
+  assert.equal(result.toString("utf8"), "not a real mime message");
+});
+
+test("buildRawMessage preserves Bcc when preserveBcc is true, and drops it (nodemailer's default) when false", async () => {
+  const service = new SMTPService(createConfig());
+  const input = {
+    to: ["visible@example.com"],
+    bcc: ["hidden@example.com"],
+    subject: "Bcc test",
+    body: "Body",
+  };
+
+  const withoutPreserve = (await service.buildRawMessage(input)).toString("utf8");
+  assert.ok(!withoutPreserve.includes("hidden@example.com"), "default buildRawMessage behavior (no preserveBcc) must be unchanged — Bcc still dropped");
+
+  const withPreserve = (await service.buildRawMessage(input, true)).toString("utf8");
+  assert.ok(withPreserve.includes("Bcc: hidden@example.com"), "preserveBcc:true must keep the Bcc header, for the draft-save path only");
 });

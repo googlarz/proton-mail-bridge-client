@@ -311,6 +311,7 @@ First, enable **Split Addresses** in Proton Bridge and configure each address as
 - Search & read: `search_indexed_emails`, `get_emails`, `get_threads`, `get_thread_by_id`, `count_messages`, `get_labels`, `folder_stats`, `top_senders`, `get_contacts`, `get_volume_trends`, `get_email_analytics`, `get_email_stats`, `get_folders`
 - Triage: `get_inbox_digest`, `get_follow_up_candidates`, `get_actionable_threads`, `find_document_threads`, `prepare_meeting_context`
 - Diagnostics: `get_connection_status`, `get_runtime_status`, `run_doctor` (include an `accounts` array showing per-account status)
+- Drafts: `list_drafts` — lists every configured account's drafts, merged and re-sorted by last update; supports optional `limit`/`offset`
 
 **Account-specific (prefix to target):**
 - Actions: `mark_email_read`, `star_email`, `move_email`, `delete_email`, etc. — prefix the `emailId` with account slug if targeting a non-primary account
@@ -318,7 +319,7 @@ First, enable **Split Addresses** in Proton Bridge and configure each address as
 - Send: `send_email`, `reply_to_email`, `forward_email` — match the `from` address to route through the correct account's SMTP
 
 **Primary-only (for now):**
-- `list_drafts`, `list_remote_drafts` — show primary account drafts only
+- `list_remote_drafts` — shows the primary account's remote Proton Drafts folder only
 - Thread actions (`move_thread`, `delete_thread`, `flag_thread`) — operate on the account the thread ID's prefix names
 
 ### Verify setup

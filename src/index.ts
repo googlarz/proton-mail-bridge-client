@@ -1957,6 +1957,24 @@ function optionalString(args: Record<string, unknown>, key: string): string | un
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+// Found live (external review): update_draft's body:'' and replyTo:'' both
+// returned success but left the old values in place — optionalString collapses
+// an explicitly-empty string to undefined the same as an omitted field
+// entirely, and DraftStoreService.updateDraft's patch treats undefined as
+// "don't touch this field" (`patch.body ?? existing.body`). So there was no
+// way to actually clear either field once set — only used for update_draft's
+// body/replyTo, which are the two fields the review confirmed this breaks
+// (cc/bcc/attachments already have their own clear path via
+// `args.x === undefined ? undefined : ...`, checked separately). Not applied
+// to optionalString itself, since most of its many other callers legitimately
+// want "" treated the same as "not provided".
+export function optionalClearableString(args: Record<string, unknown>, key: string): string | undefined {
+  if (!(key in args) || args[key] === undefined) {
+    return undefined;
+  }
+  return typeof args[key] === "string" ? (args[key] as string).trim() : undefined;
+}
+
 // Shared by get_email_by_id and get_emails_by_ids: applies body preference/
 // truncation and strips the full raw header map by default (needless token
 // bloat — get_email_by_id re-adds it when showHeaders is explicitly true).
@@ -2694,7 +2712,7 @@ async function syncDraftToRemote(
       // signature into the draft body themselves, got it appended a second time
       // on every remote sync.
       appendSignature: false,
-    });
+    }, /* preserveBcc */ true);
 
     const remoteDraft = await imapService.upsertRemoteDraft({
       raw,
@@ -4819,10 +4837,28 @@ export function createServer(
         }
 
         case "list_drafts": {
-          // Scope limitation (follow-up round): stays scoped to the primary account's
-          // drafts only — a non-primary account's drafts aren't listed here yet. Use
-          // get_draft with that account's prefixed draftId if you already have one.
-          const drafts = await draftStore.listDrafts(normalizeBoolean(args.includeSent, false));
+          // Found live (external review): this stayed scoped to the primary
+          // account's own drafts only — a draft created via create_draft(from:
+          // secondary@example.com) is real and gettable by its prefixed draftId,
+          // but never showed up here, so day-to-day draft discovery silently
+          // missed every non-primary account's drafts. Now fans out across every
+          // configured account, same pattern as list_scheduled_sends/
+          // list_snoozed, and re-sorts the merged set by updatedAt (each
+          // account's own list already arrives that way). Single-account guard
+          // keeps byte-identical output for the common case.
+          const includeSent = normalizeBoolean(args.includeSent, false);
+          const allDrafts = accountManager.all().length === 1
+            ? (await draftStore.listDrafts(includeSent)).map((draft) => ({ bundle: primaryBundle, draft }))
+            : (
+                await Promise.all(
+                  accountManager.all().map(async (bundle) => {
+                    const drafts = await bundle.draftStore.listDrafts(includeSent);
+                    return drafts.map((draft) => ({ bundle, draft: presentDraft(bundle, draft) }));
+                  }),
+                )
+              )
+                .flat()
+                .sort((left, right) => right.draft.updatedAt.localeCompare(left.draft.updatedAt));
           // Found live (external review): every draft's full body was returned
           // alongside the already-redacted attachments — confirmed live at ~261k
           // tokens for 107 drafts. Bodies are now truncated the same way a
@@ -4831,18 +4867,18 @@ export function createServer(
           // draft (just with truncated bodies/attachments), so this doesn't change
           // behavior for a caller not using the new params.
           const offset = normalizeLimit(args.offset, 0, 0, 10_000);
-          const limit = typeof args.limit === "number" ? normalizeLimit(args.limit, drafts.length, 1, 10_000) : undefined;
-          const page = limit !== undefined ? drafts.slice(offset, offset + limit) : drafts.slice(offset);
+          const limit = typeof args.limit === "number" ? normalizeLimit(args.limit, allDrafts.length, 1, 10_000) : undefined;
+          const page = limit !== undefined ? allDrafts.slice(offset, offset + limit) : allDrafts.slice(offset);
           return createTextResult(
             {
-              total: drafts.length,
+              total: allDrafts.length,
               offset,
               returned: page.length,
-              hasMore: offset + page.length < drafts.length,
-              drafts: page.map((draft) => truncateDraftBodyForResponse(redactDraftAttachmentsForListing(draft))),
+              hasMore: offset + page.length < allDrafts.length,
+              drafts: page.map(({ draft }) => truncateDraftBodyForResponse(redactDraftAttachmentsForListing(draft))),
             },
             false,
-            page.map(draftSource),
+            page.map(({ draft }) => draftSource(draft)),
           );
         }
 
@@ -4895,7 +4931,11 @@ export function createServer(
           const to = args.to === undefined ? undefined : parseEmails(optionalString(args, "to"));
           const cc = args.cc === undefined ? undefined : parseEmails(optionalString(args, "cc"));
           const bcc = args.bcc === undefined ? undefined : parseEmails(optionalString(args, "bcc"));
-          const replyTo = optionalString(args, "replyTo");
+          // body/replyTo use optionalClearableString, not optionalString — see its
+          // comment — so an explicit body:'' or replyTo:'' actually clears the
+          // field instead of being silently treated as "field not provided".
+          const body = optionalClearableString(args, "body");
+          const replyTo = optionalClearableString(args, "replyTo");
           const from = optionalString(args, "from");
           const priority = optionalString(args, "priority");
           const attachments = args.attachments === undefined ? undefined : optionalAttachmentList(args.attachments);
@@ -4922,7 +4962,7 @@ export function createServer(
               cc,
               bcc,
               subject: optionalString(args, "subject"),
-              body: optionalString(args, "body"),
+              body,
               isHtml: typeof args.isHtml === "boolean" ? args.isHtml : undefined,
               priority:
                 priority === "high" || priority === "low" || priority === "normal"
@@ -5026,6 +5066,22 @@ export function createServer(
             requireString(args, "draftId"),
           );
           const draft = await sendDraftBundle.draftStore.getDraft(sendDraftIdRest);
+          // Found live (external review): sendDraftBundle above is resolved from
+          // the draftId's own account-slug prefix — i.e. where the draft is
+          // STORED — which never changes just because update_draft later set a
+          // different draft.from. Repro: create_draft on primary, then
+          // update_draft(from: secondary@example.com), then send_draft — the
+          // payload correctly carries "secondary@example.com", but it went out
+          // through PRIMARY's live SMTP connection with that as a header
+          // override, which a Split-Addresses config (separate login per
+          // address) can reject outright instead of accepting as a plain alias.
+          // sendBundleForDraft is resolved separately, same distinction
+          // send_email/reply_to_email already draw between "where to read/store"
+          // and "which account to actually send through" — draft storage,
+          // claimForSending, markSent, and remote-draft cleanup all still use
+          // sendDraftBundle (the draft doesn't move), only the SMTP call itself
+          // uses the resolved account.
+          const sendBundleForDraft = draft.from ? accountManager.byAddress(draft.from) ?? sendDraftBundle : sendDraftBundle;
           // Found live: calling send_draft twice on the same draft sent it
           // twice — nothing here checked whether it was already marked
           // "sent" before sending again. Refuse; create_draft for a new
@@ -5103,7 +5159,7 @@ export function createServer(
           const sendStartedAt = Date.now();
           let result: Awaited<ReturnType<typeof smtpService.sendEmail>>;
           try {
-            result = await sendDraftBundle.smtpService.sendEmail({
+            result = await sendBundleForDraft.smtpService.sendEmail({
               to: draft.to,
               cc: draft.cc,
               bcc: draft.bcc,
@@ -5182,16 +5238,27 @@ export function createServer(
               };
           sentDraft = presentDraft(sendDraftBundle, remoteCleanup.draft);
 
+          // Found live (external review): the send and markSent() above already
+          // succeeded — this citation lookup is purely for the response's source
+          // list, and used to throw uncaught if the original message had been
+          // moved/deleted since the draft was created, reporting a false failure
+          // for an email that had actually already been sent (and the draft
+          // already marked "sent", so a caller who saw the error and retried
+          // would correctly hit the already-sent guard above — but with no way to
+          // know the first attempt had, in fact, worked). Best-effort, same as
+          // verifySentCopy just below.
           const sources = [draftSource(sentDraft)];
           if (sentDraft.sourceEmailId) {
-            sources.push(emailSource(await sendDraftBundle.imapService.getEmailById(sentDraft.sourceEmailId)));
+            try {
+              sources.push(emailSource(await sendDraftBundle.imapService.getEmailById(sentDraft.sourceEmailId)));
+            } catch (_) {}
           }
 
           let sentCopyTokenDraft = "[sent-copy:unverified]";
           try {
             const verifyMsgId = result.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(sendDraftBundle.imapService, verifyMsgId);
+              const scv = await verifySentCopy(sendBundleForDraft.imapService, verifyMsgId);
               if (scv.found) sentCopyTokenDraft = "[sent-copy:verified]";
             }
           } catch (_) {}
@@ -5219,6 +5286,13 @@ export function createServer(
             requireString(args, "draftId"),
           );
           const draft = await scheduleDraftBundle.draftStore.getDraft(scheduleDraftIdRest);
+          // Same fix as send_draft's identical sendBundleForDraft — see its
+          // comment. The delivery queue fires via whichever account's own
+          // deliveryQueueService it was enqueued into, so this must be the
+          // account draft.from actually names, not always the draft's storage
+          // account — used consistently below for both the duplicate-schedule
+          // check and the enqueue call itself, so both look at the same queue.
+          const sendBundleForScheduleDraft = draft.from ? accountManager.byAddress(draft.from) ?? scheduleDraftBundle : scheduleDraftBundle;
           // Mirrors send_draft's own pendingScheduled guard, for the reverse
           // ordering: send_draft already delivered this draft once, and
           // scheduling it again here would deliver it a second time at
@@ -5246,13 +5320,13 @@ export function createServer(
           // duplicate. This external check is kept only as an optional
           // early-exit optimization to avoid a wasted round-trip to the lock
           // in the common non-racing case.
-          const alreadyPendingScheduled = (await scheduleDraftBundle.deliveryQueueService.list()).find(
+          const alreadyPendingScheduled = (await sendBundleForScheduleDraft.deliveryQueueService.list()).find(
             (record) => record.sourceDraftId === draft.id && record.status === "pending",
           );
           if (alreadyPendingScheduled) {
             throw new McpError(
               ErrorCode.InvalidParams,
-              `This draft already has a pending scheduled send (id ${withAccountPrefix(responseSlug(scheduleDraftBundle), alreadyPendingScheduled.id)}, sendAt ${alreadyPendingScheduled.sendAt}). Scheduling it again would deliver it twice. Cancel the existing one with cancel_send first if you want a different sendAt.`,
+              `This draft already has a pending scheduled send (id ${withAccountPrefix(responseSlug(sendBundleForScheduleDraft), alreadyPendingScheduled.id)}, sendAt ${alreadyPendingScheduled.sendAt}). Scheduling it again would deliver it twice. Cancel the existing one with cancel_send first if you want a different sendAt.`,
             );
           }
           const sendAt = requireString(args, "sendAt");
@@ -5278,7 +5352,7 @@ export function createServer(
           }
 
           const queued = await withAudit(auditService, name, args, async () =>
-            scheduleDraftBundle.deliveryQueueService.enqueue(
+            sendBundleForScheduleDraft.deliveryQueueService.enqueue(
               {
                 to: draft.to,
                 cc: draft.cc,
@@ -5304,7 +5378,7 @@ export function createServer(
 
           return createTextResult({
             queued: true,
-            id: withAccountPrefix(responseSlug(scheduleDraftBundle), queued.id),
+            id: withAccountPrefix(responseSlug(sendBundleForScheduleDraft), queued.id),
             draftId: withAccountPrefix(responseSlug(scheduleDraftBundle), draft.id),
             sendAt: queued.sendAt,
             note: "The draft's content was snapshotted now and queued. This server must stay running for the send to fire at sendAt — if restarted first, it fires on next startup instead. The draft record itself is not automatically marked sent; use cancel_send with this id to abort before it fires.",
@@ -5455,11 +5529,21 @@ export function createServer(
           const preferHtml = normalizeBoolean(args.preferHtml, false);
           const maxBodyLength = normalizeLimit(args.maxBodyLength, undefined as unknown as number, 1, 500_000);
 
+          // Found live (external review): every id went straight to the primary
+          // account's imapService regardless of its own "<slug>::" prefix, so a
+          // non-primary account's id in the list either resolved the wrong
+          // message on primary or (more often) just failed to be found — the
+          // list [primaryId, secondary::id] reported succeeded:1 instead of 2.
+          // Each id is now resolved to its own account first, same as every
+          // other emailId-taking tool, and the returned id keeps its prefix.
           const results = await Promise.all(
             emailIds.map(async (emailId) => {
               try {
-                const detail = await imapService.getEmailById(emailId);
-                return { emailId, ok: true as const, email: formatEmailDetailOutput(detail, preferHtml, maxBodyLength) };
+                const { bundle, rest } = resolveAccountForEmailId(emailId);
+                const detail = await bundle.imapService.getEmailById(rest);
+                const output = formatEmailDetailOutput(detail, preferHtml, maxBodyLength);
+                output.id = prefixedIdFor(bundle, detail.id);
+                return { emailId, ok: true as const, email: output };
               } catch (error) {
                 return { emailId, ok: false as const, error: error instanceof Error ? error.message : String(error) };
               }

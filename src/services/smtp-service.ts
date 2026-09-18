@@ -10,6 +10,25 @@ export function sanitizeHeader(value: string): string {
   return value.replace(/[\r\n\0]/g, " ").trim();
 }
 
+// Splices a Bcc header back into an already-compiled raw MIME message — see
+// buildRawMessage's preserveBcc comment for why this exists instead of asking
+// MailComposer to keep it (it can't). Inserted right before the header/body
+// blank-line separator so it survives regardless of how many other headers
+// preceded it. If that separator can't be found (a malformed/unexpected raw
+// message), the buffer is returned unchanged rather than guessing where to cut.
+export function injectBccHeader(raw: Buffer, bcc: string[]): Buffer {
+  const message = raw.toString("utf8");
+  const separator = "\r\n\r\n";
+  const separatorIndex = message.indexOf(separator);
+  if (separatorIndex === -1) {
+    return raw;
+  }
+  const headerBlock = message.slice(0, separatorIndex);
+  const rest = message.slice(separatorIndex);
+  const bccLine = `Bcc: ${bcc.map(sanitizeHeader).join(", ")}`;
+  return Buffer.from(`${headerBlock}\r\n${bccLine}${rest}`, "utf8");
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -93,9 +112,22 @@ export class SMTPService {
     return transporter.sendMail(this.buildMailOptions(input));
   }
 
-  async buildRawMessage(input: SendEmailInput): Promise<Buffer> {
+  // preserveBcc: only ever true for syncDraftToRemote's own call (saving to the
+  // Drafts IMAP folder, never anything actually delivered to recipients).
+  // nodemailer's MailComposer has no keepBcc option of its own — the underlying
+  // MimeNode it builds does, but MailComposer never forwards one through — so
+  // Bcc was silently dropped from every draft saved to the Proton server. That's
+  // correct for what actually gets DELIVERED (a Bcc recipient must never see
+  // their own address exposed to other recipients, and sendEmail()'s own path
+  // through transporter.sendMail() is entirely separate from this method and
+  // unaffected either way), but wrong for a DRAFT sitting in the user's own
+  // mailbox: reopening it later (in this client or Proton's own web/app) should
+  // still show who was meant to be Bcc'd, the same way the local draft record
+  // always did. Since MailComposer can't do this itself, the Bcc header is
+  // spliced back into the raw MIME text after compilation, only when asked.
+  async buildRawMessage(input: SendEmailInput, preserveBcc = false): Promise<Buffer> {
     const composer = new MailComposer(this.buildMailOptions(input));
-    return new Promise<Buffer>((resolve, reject) => {
+    const raw = await new Promise<Buffer>((resolve, reject) => {
       composer.compile().build((error, message) => {
         if (error) {
           reject(error);
@@ -104,6 +136,10 @@ export class SMTPService {
         resolve(message);
       });
     });
+    if (!preserveBcc || !input.bcc || input.bcc.length === 0) {
+      return raw;
+    }
+    return injectBccHeader(raw, input.bcc);
   }
 
   async sendTestEmail(to: string, customMessage?: string, from?: string): Promise<SentMessageInfo> {

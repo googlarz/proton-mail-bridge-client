@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.8] — 2026-09-18
+
+Six issues from an external "everyday scenarios" review (16 integration-level MCP scenarios against v2.1.6/`e9773e4`).
+
+### Fixed
+- **`send_draft` could report a failure for an email it had already sent successfully.** After a successful SMTP send and `markSent()`, it re-fetched the original message (for the response's citation list) with no error handling — if that message had since been moved or deleted, the lookup threw and the caller saw an error despite the send having actually gone through (and the draft already correctly marked `sent`, so a retry would hit the "already sent" guard with no way to know the first attempt had, in fact, worked). Now best-effort, same as the adjacent sent-copy verification.
+- **A draft synced to the remote Proton Drafts folder silently lost its Bcc.** nodemailer's `MailComposer` has no option to keep it (unlike the underlying `MimeNode` it builds, which does) — correct for anything actually delivered (a Bcc recipient must never be exposed to other recipients), wrong for a draft sitting in the user's own mailbox, which should still show who was meant to be Bcc'd when reopened. The header is now spliced back into the raw MIME text for this one save-to-drafts path only; nothing that gets delivered is affected.
+- **`get_emails_by_ids` ignored a non-primary account's id prefix**, sending every id to the primary account's IMAP connection regardless — a list mixing a primary id with a `secondary::`-prefixed one reported `succeeded: 1` instead of 2. Each id is now resolved to its own account first, same as every other emailId-taking tool.
+- **`list_drafts` never showed a non-primary account's drafts** — a documented but unresolved gap: a draft created via `create_draft(from: secondary@example.com)` was real and reachable by its prefixed draftId, just invisible to everyday discovery. Now fans out across every configured account, same pattern as `list_scheduled_sends`/`list_snoozed`.
+- **`update_draft`'s `body: ''` and `replyTo: ''` silently did nothing** — the shared `optionalString` helper (used by most tools) collapses an explicitly-empty string to the same `undefined` as an omitted field, and the store's patch logic treats `undefined` as "don't touch this field", so there was no way to actually clear either one. A new `optionalClearableString` distinguishes "field not provided" from "field explicitly cleared", used only for these two fields — every other `optionalString` call site is unchanged, since "" meaning "not provided" is the right behavior for most of them.
+- **Changing a draft's `from` to a different configured account (via `update_draft`) didn't change which SMTP connection `send_draft`/`schedule_draft` actually used.** The draft's *storage* location (which account's `drafts.json` it lives in) and the account it should now send *as* are different questions — sending still went through the storage account's live connection with the new `from` as a header override, which a Split-Addresses setup (separate login per address) can reject outright. The SMTP/queue call is now resolved separately from storage, same distinction `send_email`/`reply_to_email` already draw; the draft itself doesn't move, and remote-draft cleanup still targets the correct (storage) account.
+
+### Added
+- New cases in `test/smtp.test.mjs` for `injectBccHeader`/`buildRawMessage`'s `preserveBcc`, and a new `test/optional-clearable-string.test.mjs` — regression coverage for the Bcc and clearable-field fixes above.
+
 ## [2.1.7] — 2026-09-18
 
 ### Fixed
