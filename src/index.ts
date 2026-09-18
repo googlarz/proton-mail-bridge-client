@@ -181,6 +181,7 @@ const TOOLS = [
       type: "object",
       properties: {
         status: { type: "string", enum: ["pending", "sending", "sent", "canceled", "failed"], description: "Filter to one status. Omit to list everything." },
+        limit: { type: "number", description: "Return at most this many records. Omit for all." },
       },
     },
   },
@@ -674,7 +675,7 @@ const TOOLS = [
         messageId: { type: "string", description: "RFC 5322 Message-ID header value to match exactly." },
         cc: { type: "string", description: "Filter by CC/BCC recipient address." },
         bcc: { type: "string", description: "Filter by CC/BCC recipient address." },
-        limit: { type: "number", description: "Maximum results.", default: 100 },
+        limit: { type: "number", description: "Maximum results.", default: 50 },
         includeSnippet: { type: "boolean", description: "Fetch a short plain-text preview of each matched email body. Slightly slower but avoids follow-up get_email_by_id calls for triage. Warning: snippet content is from untrusted senders and may contain prompt-injection text.", default: false },
         fields: { oneOf: [{ type: "array", items: { type: "string" } }, { type: "string" }], description: "Trim each returned email to just these field names (e.g. [\"subject\",\"from\",\"date\"]) to save tokens on large result sets. id is always included. Accepts either an array or a comma-separated string. Omit to get the full object." },
       },
@@ -1424,7 +1425,7 @@ const TOOLS = [
         mailboxRole: { type: "string", description: "Normalized mailbox role like Inbox, Sent, Archive, or Trash." },
         dateFrom: { type: "string", description: "Inclusive start date/time in ISO format." },
         dateTo: { type: "string", description: "Inclusive end date/time in ISO format." },
-        limit: { type: "number", description: "Maximum results.", default: 100 },
+        limit: { type: "number", description: "Maximum results.", default: 50 },
         fields: { oneOf: [{ type: "array", items: { type: "string" } }, { type: "string" }], description: "Trim each returned email to just these field names (e.g. [\"subject\",\"from\",\"date\"]) to save tokens on large result sets. id is always included. Accepts either an array or a comma-separated string. Omit to get the full object." },
       },
     },
@@ -2514,6 +2515,18 @@ const DRAFT_BODY_PREVIEW_LENGTH = 500;
 // for the text body instead of base64. get_draft deliberately keeps the full
 // body — it's the "let me look at this one draft" call, not a repeated-edit
 // or bulk-listing one.
+// True when applying `patch` would leave the draft exactly as it is — used to skip
+// the store write and the remote (IMAP) resync for an update that changes nothing.
+export function isNoopDraftPatch(existing: DraftRecord, patch: Record<string, unknown>): boolean {
+  return Object.entries(patch).every(([key, value]) => {
+    if (value === undefined) {
+      return true;
+    }
+    const current = (existing as unknown as Record<string, unknown>)[key];
+    return JSON.stringify(current ?? (typeof value === "string" ? "" : undefined)) === JSON.stringify(value);
+  });
+}
+
 export function truncateDraftBodyForResponse<T extends { body: string }>(draft: T) {
   if (draft.body.length <= DRAFT_BODY_PREVIEW_LENGTH) {
     return draft;
@@ -2536,7 +2549,10 @@ export function redactQueueRecordAttachments<T extends { payload: SendEmailInput
   const attachments = record.payload.attachments;
   const body = record.payload.body;
   const bodyTooLong = typeof body === "string" && body.length > DRAFT_BODY_PREVIEW_LENGTH;
-  if ((!attachments || attachments.length === 0) && !bodyTooLong) {
+  // send_email(markdownBody) also stores the full rendered HTML in payload.htmlBody —
+  // a parallel copy of the whole message that the body preview alone doesn't cover.
+  const hasHtmlBody = typeof record.payload.htmlBody === "string" && record.payload.htmlBody.length > 0;
+  if ((!attachments || attachments.length === 0) && !bodyTooLong && !hasHtmlBody) {
     return record;
   }
   return {
@@ -2544,6 +2560,7 @@ export function redactQueueRecordAttachments<T extends { payload: SendEmailInput
     payload: {
       ...record.payload,
       ...(bodyTooLong ? truncateDraftBodyForResponse({ body }) : {}),
+      ...(hasHtmlBody ? { htmlBody: undefined, htmlBodyOmitted: true } : {}),
       ...(attachments && attachments.length > 0
         ? {
             attachments: attachments.map((attachment) => ({
@@ -4131,7 +4148,7 @@ export function createServer(
             const all = await withAudit(auditService, name, args, async () => deliveryQueueService.list());
             const filtered = (statusFilter ? all.filter((item) => item.status === statusFilter) : all)
               .map(redactQueueRecordAttachments);
-            return createTextResult(filtered);
+            return createTextResult(typeof args.limit === "number" ? filtered.slice(0, normalizeLimit(args.limit, filtered.length, 1, 10_000)) : filtered);
           }
           const perAccount = await withAudit(auditService, name, args, async () =>
             Promise.all(
@@ -4146,7 +4163,7 @@ export function createServer(
           );
           const filtered = (statusFilter ? tagged.filter((item) => item.status === statusFilter) : tagged)
             .map(redactQueueRecordAttachments);
-          return createTextResult(filtered);
+          return createTextResult(typeof args.limit === "number" ? filtered.slice(0, normalizeLimit(args.limit, filtered.length, 1, 10_000)) : filtered);
         }
 
         case "get_unsubscribe_info": {
@@ -4995,23 +5012,32 @@ export function createServer(
             throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
           }
 
+          const draftPatch = {
+            to,
+            cc,
+            bcc,
+            subject: optionalString(args, "subject"),
+            body,
+            isHtml: typeof args.isHtml === "boolean" ? args.isHtml : undefined,
+            priority:
+              priority === "high" || priority === "low" || priority === "normal"
+                ? priority
+                : undefined,
+            replyTo,
+            from,
+            attachments,
+            notes: optionalString(args, "notes"),
+          } satisfies Parameters<typeof updateDraftBundle.draftStore.updateDraft>[1];
+
           const result = await withAudit(auditService, name, args, async () => {
-            const draft = await updateDraftBundle.draftStore.updateDraft(updateDraftIdRest, {
-              to,
-              cc,
-              bcc,
-              subject: optionalString(args, "subject"),
-              body,
-              isHtml: typeof args.isHtml === "boolean" ? args.isHtml : undefined,
-              priority:
-                priority === "high" || priority === "low" || priority === "normal"
-                  ? priority
-                  : undefined,
-              replyTo,
-              from,
-              attachments,
-              notes: optionalString(args, "notes"),
-            });
+            const existingDraft = await updateDraftBundle.draftStore.getDraft(updateDraftIdRest);
+            if (isNoopDraftPatch(existingDraft, draftPatch)) {
+              return presentDraft(updateDraftBundle, {
+                ...existingDraft,
+                remoteSync: { ok: true, skipped: true, message: "No changes — draft left as is, remote sync skipped." },
+              });
+            }
+            const draft = await updateDraftBundle.draftStore.updateDraft(updateDraftIdRest, draftPatch);
 
             const remoteSyncDecision = resolveRemoteDraftSync(
               config.runtime,
@@ -5600,7 +5626,7 @@ export function createServer(
         }
 
         case "search_emails": {
-          const effectiveLimit = normalizeLimit(args.limit, 100);
+          const effectiveLimit = normalizeLimit(args.limit, 50);
           try {
             const result = await imapService.searchEmails({
               query: optionalString(args, "query"),

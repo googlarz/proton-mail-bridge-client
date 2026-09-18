@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.15] — 2026-09-18
+
+### Fixed
+- **`list_scheduled_sends` still leaked the full message via `payload.htmlBody`** (set by `send_email(markdownBody)`): one long queued message ≈ 47k tokens even after the body preview. `htmlBody` is now omitted from the listing (`htmlBodyOmitted:true`); the stored record used for sending is untouched. Found by external review.
+
+### Changed
+- **`search_emails` and `search_indexed_emails` default to 50 results (was 100).** Pass `limit` for more.
+- **`update_draft` skips the store write and the remote IMAP resync when nothing actually changes**, returning the draft with a `remoteSync.skipped` note.
+- **`list_scheduled_sends` accepts an optional `limit`.** No default: it still returns an array, which the CLI's undo-send polling relies on.
+
+### Added
+- `test/noop-draft-patch.test.mjs`, extra case in `test/queue-body-truncation.test.mjs`.
+
 ## [2.1.14] — 2026-09-18
 
 ### Fixed

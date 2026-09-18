@@ -21,3 +21,12 @@ test("truncating the body does not mutate the stored record", () => {
   redactQueueRecordAttachments(r);
   assert.equal(r.payload.body.length, 5000);
 });
+
+test("queue record's payload.htmlBody is omitted in the listing but kept in the stored record", () => {
+  const r = { id: "q1", payload: { to: ["a@example.com"], subject: "s", body: "short", htmlBody: "<p>" + "z".repeat(5000) + "</p>" } };
+  const out = redactQueueRecordAttachments(r);
+  assert.equal(out.payload.htmlBody, undefined);
+  assert.equal(out.payload.htmlBodyOmitted, true);
+  assert.ok(JSON.stringify(out).length < 500);
+  assert.equal(r.payload.htmlBody.length, 5007, "the record used for sending must stay intact");
+});

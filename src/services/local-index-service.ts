@@ -672,7 +672,7 @@ export class LocalIndexService {
       to: filters.to || parsedQuery.to,
       subject: filters.subject || parsedQuery.subject,
     };
-    const limit = normalizedFilters.limit ?? 100;
+    const limit = normalizedFilters.limit ?? 50;
     const offset = 0;
 
     if (normalizedFilters.threadId?.trim()) {

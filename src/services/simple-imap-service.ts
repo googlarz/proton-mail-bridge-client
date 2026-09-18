@@ -1318,7 +1318,7 @@ export class SimpleIMAPService {
     hasMore: boolean;
     emails: EmailSummary[];
   }> {
-    const limit = normalizeLimit(input.limit, 100);
+    const limit = normalizeLimit(input.limit, 50);
     const folders = await this.resolveFolders(input.folder);
     const searchQuery = this.buildSearchQuery(input);
     const collected: EmailSummary[] = [];
