@@ -500,7 +500,7 @@ const TOOLS = [
   },
   {
     name: "update_draft",
-    description: "Update an existing locally saved draft's recipients, subject, body, or other fields. Use to edit a draft before sending. Only provided fields are updated — omitted fields retain their current values. After updating, call send_draft to send or sync_draft_to_remote to push to Proton Drafts.",
+    description: "Update an existing locally saved draft's recipients, subject, body, or other fields. Use to edit a draft before sending. Only provided fields are updated — omitted fields retain their current values. After updating, call send_draft to send or sync_draft_to_remote to push to Proton Drafts. The response's attachments are metadata only (filename/contentType/size, no base64 content) even if the draft has attachments from a previous call — use get_draft if you need the actual attachment bytes back.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -4709,8 +4709,15 @@ export function createServer(
             );
           });
 
+          // update_draft is typically called repeatedly against the same draft to tweak
+          // subject/body — the attachments usually aren't touched by this call at all, so
+          // re-echoing their full base64 `content` (serialized twice by createTextResult,
+          // same issue redactDraftAttachmentsForListing already fixed for list_drafts)
+          // burns tokens on every single edit for a draft that has any attachment. The
+          // caller already knows what it attached; get_draft remains full-content for the
+          // "let me look at this draft" case, which is a single call rather than a loop.
           return createTextResult(
-            result,
+            redactDraftAttachmentsForListing(result),
             false,
             [
               draftSource(result),

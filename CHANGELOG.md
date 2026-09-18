@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.2] — 2026-09-18
+
+### Fixed
+- **`update_draft` burned a lot of tokens on drafts with attachments.** It echoed the draft's full base64 attachment content back on every call — including edits that only touched the subject or body — and `createTextResult` serializes that payload twice (once into `content[0].text`, again into `structuredContent`). This is the exact issue `redactDraftAttachmentsForListing` already fixed for `list_drafts`; `update_draft` just wasn't using it. Its response now returns attachment metadata only (filename/contentType/size), same as `list_drafts` — use `get_draft` if you need the actual attachment bytes back.
+
 ## [2.1.1] — 2026-09-18
 
 ### Fixed
