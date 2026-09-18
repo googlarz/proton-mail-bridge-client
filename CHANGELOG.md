@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.7] — 2026-09-18
+
+### Fixed
+- **`get_emails`' `hasMore` was still wrong under a restrictive filter like `beforeUid`.** 2.1.6 fixed the lopsided-multi-account case by deriving `hasMore` from the raw, summed mailbox total — but that total is unfiltered, so `beforeUid` narrowing 300 messages down to 2 matches still compared 300 against the requested page and reported `hasMore: true` with nothing left to page to. Neither approach alone was right: comparing against what was *fetched* broke the lopsided-accounts case, comparing against the raw *total* broke any active filter. Fixed by fetching one extra item beyond the requested page — whether that extra item actually comes back directly answers "is there a next page" under whatever filter is active, without inferring it from either count.
+
+### Changed
+- **`update_draft`, `create_draft`, `create_reply_draft`, `create_forward_draft`, `create_thread_reply_draft`, `sync_draft_to_remote`, and `list_drafts` no longer echo a draft's complete body.** Reported across three review rounds — confirmed live at ~40k tokens for a single `update_draft` call that only changed the subject of a ~202 KB draft, and ~261k tokens for `list_drafts` with 107 drafts. Same reasoning as the existing attachment redaction: the caller already knows what body it just sent (or already has it from a prior call), so a body over 500 characters is now truncated to a preview with `bodyTruncated: true` and the real size in `bodyLength`. `get_draft` is unaffected — it stays full-content by design, as the "let me look at this one draft" call rather than a repeated-edit or bulk-listing one.
+- **`list_drafts` gained optional `limit`/`offset` pagination.** Omitting them still returns every draft (now with truncated bodies/attachments) — this is additive, not a behavior change for existing callers — but a caller that only needs a bounded page can now ask for one instead of paying for the whole store every time.
+
+### Added
+- A `beforeUid`-style filtered-results case in `test/get-emails-cross-account-pagination.test.mjs`, and a new `test/draft-body-truncation.test.mjs` — regression coverage for the two fixes above.
+
 ## [2.1.6] — 2026-09-18
 
 A third-pass external re-review of v2.1.5 (`a292ab6`) confirmed the prior fixes (349/349 project tests, 29/30 additional signature scenarios — the one non-pass is the already-documented queue-signature-timing gap against a proposed plan, not a regression) and found four more issues, three of them gaps in the 2.1.5 fixes themselves.

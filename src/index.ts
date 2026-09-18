@@ -465,12 +465,14 @@ const TOOLS = [
   },
   {
     name: "list_drafts",
-    description: "List all locally saved drafts with their status, subject, and timestamps. Attachment content is omitted here (filename/type/size only) to keep this unbounded listing from blowing up on large attachments — use get_draft for the full attachment content of one draft. Use to review in-progress or unsent messages. Does NOT list drafts stored only on the Proton server — use list_remote_drafts for those. Prefer get_draft when you already have a draftId and need the full content.",
+    description: "List all locally saved drafts with their status, subject, and timestamps. Attachment content is omitted here (filename/type/size only) — use get_draft for the full attachment content of one draft. Each draft's body is also truncated to a short preview (bodyTruncated:true, bodyLength gives the real size) — use get_draft for the full body of one draft. Use to review in-progress or unsent messages. Does NOT list drafts stored only on the Proton server — use list_remote_drafts for those. Prefer get_draft when you already have a draftId and need the full content.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
         includeSent: { type: "boolean", description: "Include drafts already sent.", default: false },
+        limit: { type: "number", description: "Maximum drafts to return. Omit to return every draft (still with truncated bodies/attachments) — set this when you only need a bounded page." },
+        offset: { type: "number", description: "Number of drafts to skip, newest-updated first.", default: 0 },
       },
     },
   },
@@ -2444,6 +2446,36 @@ export function redactDraftAttachmentsForListing(draft: DraftRecord) {
       content: "",
       size: Buffer.byteLength(attachment.content, "base64"),
     })),
+  };
+}
+
+// How much of a draft's body survives into a mutation/listing response before
+// it's truncated — long enough to recognize the draft at a glance, short
+// enough that a large body (a long thread quoted into a reply, a big pasted
+// table) doesn't dominate the response the way redactDraftAttachmentsForListing
+// already stops a base64 attachment from doing.
+const DRAFT_BODY_PREVIEW_LENGTH = 500;
+
+// Found live (external review, repeated across three rounds): create_draft,
+// update_draft, create_reply_draft, create_forward_draft,
+// create_thread_reply_draft, sync_draft_to_remote, and list_drafts all echoed
+// the draft's COMPLETE body back — confirmed live at ~40k tokens for a single
+// update_draft call that only changed the subject of a ~202 KB draft, and
+// ~261k tokens for list_drafts with 107 drafts. The caller supplied the body
+// itself (create/update) or already has it from a prior call (list) — same
+// "caller already knows what it sent" reasoning as attachment redaction, just
+// for the text body instead of base64. get_draft deliberately keeps the full
+// body — it's the "let me look at this one draft" call, not a repeated-edit
+// or bulk-listing one.
+export function truncateDraftBodyForResponse<T extends { body: string }>(draft: T) {
+  if (draft.body.length <= DRAFT_BODY_PREVIEW_LENGTH) {
+    return draft;
+  }
+  return {
+    ...draft,
+    body: `${draft.body.slice(0, DRAFT_BODY_PREVIEW_LENGTH)}…`,
+    bodyLength: draft.body.length,
+    bodyTruncated: true,
   };
 }
 
@@ -4551,10 +4583,10 @@ export function createServer(
           });
 
           // Same fix as update_draft's identical bloat — see its comment. The
-          // caller already knows what it attached; get_draft is the "let me see
-          // the full attachment content" call, not this one.
+          // caller already knows what it attached (and what body it just sent);
+          // get_draft is the "let me see the full content" call, not this one.
           return createTextResult(
-            redactDraftAttachmentsForListing(result),
+            truncateDraftBodyForResponse(redactDraftAttachmentsForListing(result)),
             false,
             [
               draftSource(result),
@@ -4664,7 +4696,7 @@ export function createServer(
 
           // Same fix as create_draft/update_draft's identical bloat — see their comments.
           return createTextResult(
-            redactDraftAttachmentsForListing(result),
+            truncateDraftBodyForResponse(redactDraftAttachmentsForListing(result)),
             false,
             [
               draftSource(result),
@@ -4768,7 +4800,7 @@ export function createServer(
 
           // Same fix as create_draft/update_draft's identical bloat — see their comments.
           return createTextResult(
-            redactDraftAttachmentsForListing(result),
+            truncateDraftBodyForResponse(redactDraftAttachmentsForListing(result)),
             false,
             [
               draftSource(result),
@@ -4791,13 +4823,26 @@ export function createServer(
           // drafts only — a non-primary account's drafts aren't listed here yet. Use
           // get_draft with that account's prefixed draftId if you already have one.
           const drafts = await draftStore.listDrafts(normalizeBoolean(args.includeSent, false));
+          // Found live (external review): every draft's full body was returned
+          // alongside the already-redacted attachments — confirmed live at ~261k
+          // tokens for 107 drafts. Bodies are now truncated the same way a
+          // mutation response's body is (see truncateDraftBodyForResponse). limit/
+          // offset are optional and additive — omitting them still returns every
+          // draft (just with truncated bodies/attachments), so this doesn't change
+          // behavior for a caller not using the new params.
+          const offset = normalizeLimit(args.offset, 0, 0, 10_000);
+          const limit = typeof args.limit === "number" ? normalizeLimit(args.limit, drafts.length, 1, 10_000) : undefined;
+          const page = limit !== undefined ? drafts.slice(offset, offset + limit) : drafts.slice(offset);
           return createTextResult(
             {
               total: drafts.length,
-              drafts: drafts.map(redactDraftAttachmentsForListing),
+              offset,
+              returned: page.length,
+              hasMore: offset + page.length < drafts.length,
+              drafts: page.map((draft) => truncateDraftBodyForResponse(redactDraftAttachmentsForListing(draft))),
             },
             false,
-            drafts.map(draftSource),
+            page.map(draftSource),
           );
         }
 
@@ -4921,11 +4966,14 @@ export function createServer(
           // subject/body — the attachments usually aren't touched by this call at all, so
           // re-echoing their full base64 `content` (serialized twice by createTextResult,
           // same issue redactDraftAttachmentsForListing already fixed for list_drafts)
-          // burns tokens on every single edit for a draft that has any attachment. The
-          // caller already knows what it attached; get_draft remains full-content for the
-          // "let me look at this draft" case, which is a single call rather than a loop.
+          // burns tokens on every single edit for a draft that has any attachment. Same
+          // reasoning for the body itself — confirmed live at ~40k tokens for a single
+          // subject-only edit of a ~202 KB draft (see truncateDraftBodyForResponse). The
+          // caller already knows what it attached and what body it just sent; get_draft
+          // remains full-content for the "let me look at this draft" case, which is a
+          // single call rather than a loop.
           return createTextResult(
-            redactDraftAttachmentsForListing(result),
+            truncateDraftBodyForResponse(redactDraftAttachmentsForListing(result)),
             false,
             [
               draftSource(result),
@@ -4954,7 +5002,7 @@ export function createServer(
           const presentedSynced = presentDraft(syncDraftBundle, synced.draft);
           // Same fix as create_draft/update_draft's identical bloat — see their comments.
           return createTextResult(
-            { ...redactDraftAttachmentsForListing(presentedSynced), remoteSync: synced.remoteSync },
+            { ...truncateDraftBodyForResponse(redactDraftAttachmentsForListing(presentedSynced)), remoteSync: synced.remoteSync },
             false,
             [
               draftSource(presentedSynced),
@@ -5328,7 +5376,26 @@ export function createServer(
           // requested offset/limit to that merged superset instead of per account.
           const primarySlug = accountManager.primary().account.slug;
           const requestedOffset = getEmailsInput.offset ?? 0;
-          const perAccountFetchLimit = requestedOffset + effectiveLimit;
+          // +1 beyond what's strictly needed to fill the page: whether that extra
+          // item actually comes back is what tells us hasMore, independent of any
+          // filter (beforeUid etc.) or of how the raw mailbox total compares to the
+          // page window. Two things were tried and each broke a different case:
+          // (1) using mergedAll.length > offset+limit as hasMore, with NO extra
+          // overfetch — a lopsided distribution (e.g. 300 messages in one account,
+          // 0 in another) fetches exactly offset+limit from the big account, so
+          // mergedAll.length can never exceed that window even though hundreds
+          // more exist, reporting hasMore:false wrongly.
+          // (2) using the raw summed mailbox `total` for hasMore instead — correct
+          // for that case, but wrong under a restrictive filter like beforeUid:
+          // `total` is the UNFILTERED mailbox message count, not the count of
+          // messages actually matching the filter, so a beforeUid narrowing 300
+          // messages down to 2 matches still compared against total=300 and
+          // reported hasMore:true with nothing left to page to.
+          // Fetching one extra item fixes both: it directly observes whether a
+          // NEXT matching item exists, under whatever filter is active, rather
+          // than inferring it from a count that can be either capped-by-fetch or
+          // filter-blind depending on which one you pick.
+          const perAccountFetchLimit = requestedOffset + effectiveLimit + 1;
           const perAccount = await Promise.all(
             accountManager.all().map(async (bundle) => {
               const result = await bundle.imapService.getEmails({ ...getEmailsInput, offset: 0, limit: perAccountFetchLimit });
@@ -5339,18 +5406,8 @@ export function createServer(
             result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlug), email.id) })),
           );
           const mergedAll = sortByDateDesc(taggedEmails, (email) => email.internalDate || email.date);
-          const { page: merged } = paginateMergedAccountResults(mergedAll, requestedOffset, effectiveLimit);
+          const { page: merged, hasMore } = paginateMergedAccountResults(mergedAll, requestedOffset, effectiveLimit);
           const total = perAccount.reduce((sum, { result }) => sum + result.total, 0);
-          // Found live (external review): paginateMergedAccountResults' own hasMore
-          // only looks at what was actually FETCHED (mergedAll.length, capped at
-          // perAccountFetchLimit per account) — with a lopsided distribution (e.g.
-          // 300 messages in one account, 0 in another) and a small page near the
-          // start, mergedAll.length can equal requestedOffset+limit exactly even
-          // though the account's real total is far larger, reporting hasMore:false
-          // while 275 more messages exist. `total` above is each account's real,
-          // authoritative IMAP mailbox count (not bounded by what we fetched), so
-          // it's the correct source for this instead.
-          const hasMore = total > requestedOffset + effectiveLimit;
           return createTextResult(
             {
               folder: getEmailsInput.folder?.trim() || "INBOX",
@@ -7570,7 +7627,7 @@ export function createServer(
 
           // Same fix as create_draft/update_draft's identical bloat — see their comments.
           return createTextResult(
-            redactDraftAttachmentsForListing(result),
+            truncateDraftBodyForResponse(redactDraftAttachmentsForListing(result)),
             false,
             [
               draftSource(result),

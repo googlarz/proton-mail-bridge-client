@@ -1209,7 +1209,15 @@ export class SimpleIMAPService {
     // account), but it fixes the correctness bug; the cost is a separate,
     // larger question the review flagged too (worth cursors eventually, not a
     // single-number fix).
-    const limit = normalizeLimit(input.limit, 50, 1, 10_250);
+    //
+    // Found live again (external review, third pass): get_emails' hasMore now
+    // fetches one extra item beyond offset+limit to directly detect a next page
+    // under any filter (see its own comment for why neither of the two
+    // approaches tried before that worked for both the lopsided-accounts case
+    // AND a restrictive beforeUid filter) — so the deepest possible request is
+    // offset's max (10_000) + outer limit's max (250) + 1, one past the cap
+    // above. Bumped by that same 1.
+    const limit = normalizeLimit(input.limit, 50, 1, 10_251);
     const offset = normalizeLimit(input.offset, 0, 0, 10_000);
 
     return this.withMailbox(folder, true, async (client) => {
