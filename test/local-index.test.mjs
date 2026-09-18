@@ -2518,3 +2518,62 @@ test("opening an index created before the is_automated column migrates in place 
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("deliveredTo round-trips through recordSnapshot and is preserved on a flags-only refresh", async () => {
+  // Delivered-To tells apart which of the account's own addresses/aliases a message
+  // arrived at, since Proton delivers all of them into one IMAP mailbox. Same
+  // preserve-on-refresh contract as isAutomated: a flags-only incremental sync fetches
+  // no headers, so the incoming value is null and must not clobber the stored one.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-delivered-to-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  try {
+    const baseEmail = {
+      id: "INBOX::1",
+      folder: "INBOX",
+      uid: 1,
+      seq: 1,
+      messageId: "<msg-1@example.com>",
+      subject: "Hello",
+      from: [{ address: "colleague@example.com" }],
+      to: [{ address: "owner@pm.me" }],
+      cc: [],
+      bcc: [],
+      replyTo: [],
+      date: "2026-01-01T00:00:00.000Z",
+      internalDate: "2026-01-01T00:00:00.000Z",
+      isRead: true,
+      isStarred: false,
+      flags: [],
+      preview: "Body",
+      hasAttachments: false,
+      attachments: [],
+      labels: [],
+    };
+
+    await service.recordSnapshot({
+      syncedAt: "2026-01-01T00:00:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "full" }],
+      emails: [{ ...baseEmail, deliveredTo: "owner@pm.me" }],
+    });
+
+    const afterFirstSync = await service.listRecentMessages(10);
+    assert.equal(afterFirstSync[0].deliveredTo, "owner@pm.me");
+
+    // Flags-only refresh (e.g. a read-status change): no header data fetched, so
+    // deliveredTo arrives undefined on the incoming row.
+    await service.recordSnapshot({
+      syncedAt: "2026-01-01T01:00:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "incremental_window" }],
+      emails: [{ ...baseEmail, isRead: false, deliveredTo: undefined }],
+    });
+
+    const afterRefresh = await service.listRecentMessages(10);
+    assert.equal(afterRefresh[0].isRead, false, "the actual update (flag change) must still apply");
+    assert.equal(afterRefresh[0].deliveredTo, "owner@pm.me", "a flags-only refresh must not clobber the previously stored deliveredTo");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

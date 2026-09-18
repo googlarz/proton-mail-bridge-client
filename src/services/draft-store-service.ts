@@ -80,6 +80,7 @@ export class DraftStoreService {
     isHtml?: boolean;
     priority?: "high" | "normal" | "low";
     replyTo?: string;
+    from?: string;
     inReplyTo?: string;
     references?: string[];
     attachments?: DraftRecord["attachments"];
@@ -104,6 +105,7 @@ export class DraftStoreService {
         isHtml: Boolean(input.isHtml),
         priority: input.priority,
         replyTo: input.replyTo,
+        from: input.from,
         inReplyTo: input.inReplyTo,
         references: input.references ? [...input.references] : undefined,
         draftMessageId: this.createDraftMessageId(),
@@ -132,6 +134,7 @@ export class DraftStoreService {
       isHtml?: boolean;
       priority?: "high" | "normal" | "low";
       replyTo?: string;
+      from?: string;
       inReplyTo?: string;
       references?: string[];
       attachments?: DraftRecord["attachments"];
@@ -157,6 +160,7 @@ export class DraftStoreService {
         isHtml: typeof patch.isHtml === "boolean" ? patch.isHtml : existing.isHtml,
         priority: patch.priority ?? existing.priority,
         replyTo: patch.replyTo ?? existing.replyTo,
+        from: patch.from ?? existing.from,
         inReplyTo: patch.inReplyTo ?? existing.inReplyTo,
         references: patch.references ? [...patch.references] : existing.references,
         attachments: patch.attachments ? [...patch.attachments] : existing.attachments,

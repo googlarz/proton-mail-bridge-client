@@ -123,6 +123,7 @@ const TOOLS = [
           description: "SMTP priority header.",
         },
         fromName: { type: "string", description: "Optional display name for the From header (e.g. 'Alice'). Does not change the sending address." },
+        from: { type: "string", description: "Send as this address instead of the Bridge login's default (e.g. an alias or additional address on the same Proton account). Proton accepts any address verified on the account; an address not on the account is rejected by Proton at send time." },
         sanitizeHtml: { type: "boolean", description: "Strip scripts, event handlers, and remote image beacons from HTML before delivery. Defaults to true when body is HTML.", default: true },
         replyTo: { type: "string", description: "Optional reply-to email address." },
         requestReadReceipt: { type: "boolean", description: "Request a read receipt (MDN) via a Disposition-Notification-To header. Most mail clients ask the recipient before honoring it — this is a request, not a guarantee.", default: false },
@@ -226,6 +227,7 @@ const TOOLS = [
         cc: { type: "string", description: "Additional CC recipients, comma-separated." },
         bcc: { type: "string", description: "Additional BCC recipients, comma-separated." },
         fromName: { type: "string", description: "Optional display name for the From header." },
+        from: { type: "string", description: "Send as this address instead of the Bridge login's default (e.g. an alias or additional address on the same Proton account). Proton accepts any address verified on the account; an address not on the account is rejected by Proton at send time." },
         sanitizeHtml: { type: "boolean", description: "Strip scripts and remote image beacons from HTML before delivery. Defaults to true.", default: true },
         attachments: {
           type: "array",
@@ -264,6 +266,7 @@ const TOOLS = [
         cc: { type: "string", description: "Additional CC recipients, comma-separated." },
         bcc: { type: "string", description: "Additional BCC recipients, comma-separated." },
         fromName: { type: "string", description: "Optional display name for the From header." },
+        from: { type: "string", description: "Send as this address instead of the Bridge login's default (e.g. an alias or additional address on the same Proton account). Proton accepts any address verified on the account; an address not on the account is rejected by Proton at send time." },
         sanitizeHtml: { type: "boolean", description: "Strip scripts and remote image beacons from HTML before delivery. Defaults to true.", default: true },
         attachments: {
           type: "array",
@@ -303,6 +306,7 @@ const TOOLS = [
         cc: { type: "string", description: "CC recipients, comma-separated." },
         bcc: { type: "string", description: "BCC recipients, comma-separated." },
         fromName: { type: "string", description: "Optional display name for the From header." },
+        from: { type: "string", description: "Send as this address instead of the Bridge login's default (e.g. an alias or additional address on the same Proton account). Proton accepts any address verified on the account; an address not on the account is rejected by Proton at send time." },
         sanitizeHtml: { type: "boolean", description: "Strip scripts and remote image beacons from HTML before delivery. Defaults to true.", default: true },
         attachments: {
           type: "array",
@@ -343,6 +347,7 @@ const TOOLS = [
         isHtml: { type: "boolean", description: "Whether the body should be HTML.", default: false },
         priority: { type: "string", enum: ["high", "normal", "low"] },
         replyTo: { type: "string", description: "Optional reply-to email address." },
+        from: { type: "string", description: "Send as this address instead of the Bridge login's default when the draft is sent (e.g. an alias or additional address on the same Proton account). Proton accepts any address verified on the account; an address not on the account is rejected by Proton at send time." },
         notes: { type: "string", description: "Optional local note for the draft." },
         syncToRemote: {
           type: "boolean",
@@ -496,6 +501,7 @@ const TOOLS = [
         isHtml: { type: "boolean", description: "Whether the body should be HTML." },
         priority: { type: "string", enum: ["high", "normal", "low"] },
         replyTo: { type: "string", description: "Optional reply-to email address." },
+        from: { type: "string", description: "Send as this address instead of the Bridge login's default when the draft is sent (e.g. an alias or additional address on the same Proton account). Proton accepts any address verified on the account; an address not on the account is rejected by Proton at send time." },
         notes: { type: "string", description: "Optional local note for the draft." },
         syncToRemote: {
           type: "boolean",
@@ -3374,6 +3380,7 @@ export function createServer(
           const priority = optionalString(args, "priority");
           const replyTo = optionalString(args, "replyTo");
           const fromName = optionalString(args, "fromName");
+          const from = optionalString(args, "from");
           const sanitizeHtml = normalizeBoolean(args.sanitizeHtml, true);
           const attachments = optionalAttachmentList(args.attachments);
 
@@ -3382,6 +3389,9 @@ export function createServer(
           ensureValidEmails(bcc, "bcc");
           if (replyTo && !isValidEmail(replyTo)) {
             throw new McpError(ErrorCode.InvalidParams, "replyTo must be a valid email address.");
+          }
+          if (from && !isValidEmail(from)) {
+            throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
           }
 
           // dryRun: preview without sending
@@ -3410,6 +3420,7 @@ export function createServer(
             isHtml,
             htmlBody,
             fromName,
+            from,
             sanitizeHtml,
             priority:
               priority === "high" || priority === "low" || priority === "normal"
@@ -3564,6 +3575,10 @@ export function createServer(
           const htmlBody = markdownBodyReply ? renderMarkdown(markdownBodyReply).html : undefined;
           const replyAll = normalizeBoolean(args.replyAll, false);
           const fromNameReply = optionalString(args, "fromName");
+          const fromReply = optionalString(args, "from");
+          if (fromReply && !isValidEmail(fromReply)) {
+            throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
+          }
           const sanitizeHtmlReply = normalizeBoolean(args.sanitizeHtml, true);
           const attachments = optionalAttachmentList(args.attachments);
           const extraCc = parseEmails(optionalString(args, "cc"));
@@ -3610,6 +3625,7 @@ export function createServer(
               isHtml,
               htmlBody: signedReply.htmlBody,
               fromName: fromNameReply,
+              from: fromReply,
               sanitizeHtml: sanitizeHtmlReply,
               inReplyTo: detail.messageId,
               references: detail.messageId ? [detail.messageId] : undefined,
@@ -3649,6 +3665,10 @@ export function createServer(
           const isHtmlRa = markdownBodyRa ? false : normalizeBoolean(args.isHtml, false);
           const htmlBodyRa = markdownBodyRa ? renderMarkdown(markdownBodyRa).html : undefined;
           const fromNameRa = optionalString(args, "fromName");
+          const fromRa = optionalString(args, "from");
+          if (fromRa && !isValidEmail(fromRa)) {
+            throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
+          }
           const sanitizeHtmlRa = normalizeBoolean(args.sanitizeHtml, true);
           const attachmentsRa = optionalAttachmentList(args.attachments);
           const extraCcRa = parseEmails(optionalString(args, "cc"));
@@ -3694,6 +3714,7 @@ export function createServer(
               isHtml: isHtmlRa,
               htmlBody: signedReplyRa.htmlBody,
               fromName: fromNameRa,
+              from: fromRa,
               sanitizeHtml: sanitizeHtmlRa,
               inReplyTo: detailRa.messageId,
               references: detailRa.messageId ? [detailRa.messageId] : undefined,
@@ -3736,6 +3757,10 @@ export function createServer(
           const isHtml = markdownBodyFwd ? false : normalizeBoolean(args.isHtml, false);
           const htmlBody = markdownBodyFwd ? renderMarkdown(markdownBodyFwd).html : undefined;
           const fromNameFwd = optionalString(args, "fromName");
+          const fromFwd = optionalString(args, "from");
+          if (fromFwd && !isValidEmail(fromFwd)) {
+            throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
+          }
           const sanitizeHtmlFwd = normalizeBoolean(args.sanitizeHtml, true);
           // args.attachments are new attachments the caller wants to add to the
           // forward — they are NOT the original message's attachments. Despite
@@ -3802,6 +3827,7 @@ export function createServer(
               isHtml,
               htmlBody: signedFwd.htmlBody,
               fromName: fromNameFwd,
+              from: fromFwd,
               sanitizeHtml: sanitizeHtmlFwd,
               attachments: fwdAttachments,
               // Already applied above, before quote-wrapping.
@@ -3837,6 +3863,7 @@ export function createServer(
           const subject = requireString(args, "subject");
           const body = requireString(args, "body");
           const replyTo = optionalString(args, "replyTo");
+          const from = optionalString(args, "from");
           const attachments = optionalAttachmentList(args.attachments);
           const priority = optionalString(args, "priority");
 
@@ -3845,6 +3872,9 @@ export function createServer(
           ensureValidEmails(bcc, "bcc");
           if (replyTo && !isValidEmail(replyTo)) {
             throw new McpError(ErrorCode.InvalidParams, "replyTo must be a valid email address.");
+          }
+          if (from && !isValidEmail(from)) {
+            throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
           }
 
           const result = await withAudit(auditService, name, args, async () => {
@@ -3861,6 +3891,7 @@ export function createServer(
                   ? priority
                   : undefined,
               replyTo,
+              from,
               notes: optionalString(args, "notes"),
               attachments,
             });
@@ -4106,6 +4137,7 @@ export function createServer(
           const cc = args.cc === undefined ? undefined : parseEmails(optionalString(args, "cc"));
           const bcc = args.bcc === undefined ? undefined : parseEmails(optionalString(args, "bcc"));
           const replyTo = optionalString(args, "replyTo");
+          const from = optionalString(args, "from");
           const priority = optionalString(args, "priority");
           const attachments = args.attachments === undefined ? undefined : optionalAttachmentList(args.attachments);
 
@@ -4121,6 +4153,9 @@ export function createServer(
           if (replyTo && !isValidEmail(replyTo)) {
             throw new McpError(ErrorCode.InvalidParams, "replyTo must be a valid email address.");
           }
+          if (from && !isValidEmail(from)) {
+            throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
+          }
 
           const result = await withAudit(auditService, name, args, async () => {
             const draft = await draftStore.updateDraft(draftId, {
@@ -4135,6 +4170,7 @@ export function createServer(
                   ? priority
                   : undefined,
               replyTo,
+              from,
               attachments,
               notes: optionalString(args, "notes"),
             });
@@ -4291,6 +4327,7 @@ export function createServer(
               isHtml: draft.isHtml,
               priority: draft.priority,
               replyTo: draft.replyTo,
+              from: draft.from,
               inReplyTo: draft.inReplyTo,
               references: draft.references,
               attachments: draft.attachments,
@@ -4463,6 +4500,7 @@ export function createServer(
                 isHtml: draft.isHtml,
                 priority: draft.priority,
                 replyTo: draft.replyTo,
+                from: draft.from,
                 inReplyTo: draft.inReplyTo,
                 references: draft.references,
                 attachments: draft.attachments,

@@ -8,6 +8,7 @@ import {
   isLikelyAuthenticationError,
   isLikelyConnectionError,
   mapHeaderValue,
+  parseDeliveredToFromHeaders,
   pickNewestUids,
   planFolderSync,
   SEARCH_FILTER_BATCH_SIZE,
@@ -1493,6 +1494,35 @@ test("detectAutomatedFromHeaders flags each bulk/automated header signal and cle
   assert.equal(
     detectAutomatedFromHeaders(headers(["List-Unsubscribe: <https://shop.example/u?x=1>,", "\t<mailto:unsub@shop.example>"])),
     true,
+    "folded header continuation lines must still be recognised",
+  );
+});
+
+test("parseDeliveredToFromHeaders extracts the account address a message was delivered to", () => {
+  // Proton delivers mail addressed to any alias/additional address on the account into
+  // the same IMAP mailbox — Delivered-To is the only way to tell which one a message
+  // actually arrived at. Fetched via the same HEADER.FIELDS FETCH as isAutomated's signals.
+  const headers = (lines) => Buffer.from([...lines, ""].join("\r\n"));
+
+  assert.equal(parseDeliveredToFromHeaders(undefined), undefined, "no header data must stay undefined, not a guess");
+  assert.equal(parseDeliveredToFromHeaders(headers([])), undefined, "no Delivered-To header present");
+  assert.equal(
+    parseDeliveredToFromHeaders(headers(["From: alice@example.com", "Delivered-To: dawid@pm.me"])),
+    "dawid@pm.me",
+  );
+  assert.equal(
+    parseDeliveredToFromHeaders(headers(["Delivered-To: Dawid@Odysseia-Publishing.COM"])),
+    "dawid@odysseia-publishing.com",
+    "must be lowercased for consistent comparison",
+  );
+  assert.equal(
+    parseDeliveredToFromHeaders(headers(["Delivered-To: first-hop@example.com", "Delivered-To: dawid@proton.me"])),
+    "first-hop@example.com",
+    "a relayed message's first (topmost) Delivered-To line is the most recently added — the account's own delivery hop",
+  );
+  assert.equal(
+    parseDeliveredToFromHeaders(headers(["Delivered-To:", "\t dawid@proton.me"])),
+    "dawid@proton.me",
     "folded header continuation lines must still be recognised",
   );
 });

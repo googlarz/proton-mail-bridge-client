@@ -85,6 +85,7 @@ type MessageRow = {
   attachment_text: string | null;
   labels_json: string;
   is_automated: number | null;
+  delivered_to: string | null;
 };
 
 const DB_SCHEMA_VERSION = 3;
@@ -1694,12 +1695,12 @@ export class LocalIndexService {
         email_id, folder, uid, seq, message_id, in_reply_to, references_json, thread_id, subject,
         from_json, to_json, cc_json, bcc_json, reply_to_json, date, internal_date,
         is_read, is_starred, flags_json, size, preview, has_attachments, attachments_json, attachment_text, labels_json,
-        is_automated
+        is_automated, delivered_to
       ) VALUES (
         @email_id, @folder, @uid, @seq, @message_id, @in_reply_to, @references_json, @thread_id, @subject,
         @from_json, @to_json, @cc_json, @bcc_json, @reply_to_json, @date, @internal_date,
         @is_read, @is_starred, @flags_json, @size, @preview, @has_attachments, @attachments_json, @attachment_text, @labels_json,
-        @is_automated
+        @is_automated, @delivered_to
       )
       ON CONFLICT(email_id) DO UPDATE SET
         folder = excluded.folder,
@@ -1732,7 +1733,8 @@ export class LocalIndexService {
         labels_json = excluded.labels_json,
         -- Same reasoning: a flags-only refresh fetches no headers, so is_automated arrives
         -- NULL; the headers of a fixed UID never change, so keeping the stored verdict is safe.
-        is_automated = COALESCE(excluded.is_automated, messages.is_automated)
+        is_automated = COALESCE(excluded.is_automated, messages.is_automated),
+        delivered_to = COALESCE(excluded.delivered_to, messages.delivered_to)
       RETURNING preview, attachment_text
     `);
     const upsertSyncState = db.prepare(`
@@ -1966,6 +1968,7 @@ export class LocalIndexService {
           attachment_text: email.attachmentText ?? legacyAttachmentText,
           labels_json: JSON.stringify(email.labels),
           is_automated: email.isAutomated === undefined ? null : email.isAutomated ? 1 : 0,
+          delivered_to: email.deliveredTo ?? null,
         }) as { preview: string | null; attachment_text: string | null };
 
         const mergedPreview = persisted.preview ?? "";
@@ -2098,7 +2101,8 @@ export class LocalIndexService {
         attachments_json TEXT NOT NULL,
         attachment_text TEXT,
         labels_json TEXT NOT NULL,
-        is_automated INTEGER
+        is_automated INTEGER,
+        delivered_to TEXT
       );
 
       CREATE TABLE IF NOT EXISTS sync_state (
@@ -2153,6 +2157,11 @@ export class LocalIndexService {
     // every pre-migration message as human. A full re-sync backfills the real value.
     if (!columns.has("is_automated")) {
       db.exec(`ALTER TABLE messages ADD COLUMN is_automated INTEGER`);
+    }
+    // Nullable on purpose: existing rows read back as NULL (= deliveredTo unknown), not
+    // "no other addresses on the account" — a full re-sync backfills the real value.
+    if (!columns.has("delivered_to")) {
+      db.exec(`ALTER TABLE messages ADD COLUMN delivered_to TEXT`);
     }
 
     const syncStateColumns = new Set(
@@ -2709,6 +2718,7 @@ export class LocalIndexService {
       attachmentText: row.attachment_text ?? undefined,
       labels: safeJsonParse(row.labels_json, []),
       isAutomated: row.is_automated === null || row.is_automated === undefined ? undefined : Boolean(row.is_automated),
+      deliveredTo: row.delivered_to ?? undefined,
     };
   }
 

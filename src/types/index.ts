@@ -115,6 +115,8 @@ export interface SendEmailInput {
   htmlBody?: string;
   /** Override the display name in the From header without changing the address. */
   fromName?: string;
+  /** Send as a different address than the configured Bridge login (e.g. an alias or additional address on the same Proton account). Proton's outgoing MTA accepts any address verified on the account regardless of which one Bridge is logged in as; an address not on the account is rejected by Proton at send time, not validated here. */
+  from?: string;
   /** Strip scripts, event handlers, and remote image beacons before delivery. Defaults to true when body is HTML. */
   sanitizeHtml?: boolean;
   priority?: "high" | "normal" | "low";
@@ -175,6 +177,12 @@ export interface EmailSummary {
   // the headers were not captured for this message (indexed before capture existed, or
   // fetched via a path without header data), so callers must fall back rather than assume.
   isAutomated?: boolean;
+  // Which of the account's own addresses/aliases this message was actually delivered to
+  // (from the Delivered-To header), for accounts with more than one address on the same
+  // Proton Bridge login — all of which land in the same IMAP mailbox with no other way
+  // to tell them apart. undefined means not captured (indexed before capture existed, or
+  // fetched via a path without header data), not "no aliases configured".
+  deliveredTo?: string;
 }
 
 export interface EmailDetail extends EmailSummary {
@@ -228,6 +236,8 @@ export interface DraftRecord {
   isHtml: boolean;
   priority?: "high" | "normal" | "low";
   replyTo?: string;
+  /** Send as this address instead of the configured Bridge login when the draft is sent — see SendEmailInput.from. */
+  from?: string;
   inReplyTo?: string;
   references?: string[];
   draftMessageId: string;

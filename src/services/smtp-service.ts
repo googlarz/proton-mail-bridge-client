@@ -3,7 +3,7 @@ import nodemailer, { type SentMessageInfo, type Transporter } from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import sanitizeHtml from "sanitize-html";
 import type { ProtonMailConfig, SendEmailInput } from "../types/index.js";
-import { htmlToMarkdown } from "../utils/helpers.js";
+import { htmlToMarkdown, isValidEmail } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
 export function sanitizeHeader(value: string): string {
@@ -178,7 +178,12 @@ export class SMTPService {
       };
     });
 
-    const fromAddress = this.config.smtp.username;
+    // input.from lets a caller send as any of the account's own aliases/additional
+    // addresses rather than always the one Bridge happens to be logged in as — Proton's
+    // outgoing MTA accepts any address verified on the account regardless of Bridge's
+    // login identity. Only validated for shape here; an address not on the account is
+    // rejected by Proton at send time, same as it would be from any other mail client.
+    const fromAddress = input.from && isValidEmail(input.from) ? input.from : this.config.smtp.username;
     const fromName = input.fromName ? sanitizeHeader(input.fromName).replace(/"/g, "") : undefined;
     const subject = sanitizeHeader(input.subject);
     const replyTo = input.replyTo ? sanitizeHeader(input.replyTo) : undefined;

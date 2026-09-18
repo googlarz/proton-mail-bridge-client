@@ -85,9 +85,16 @@ const AUTOMATED_SIGNAL_HEADER_FIELDS = [
   "X-Auto-Response-Suppress",
 ];
 
+// Proton delivers mail addressed to any of the account's aliases/additional addresses
+// into the same single IMAP mailbox, so there was previously no way to tell which of
+// the user's own addresses a given message actually arrived at. Delivered-To (Proton's
+// own stamped header) carries that. Folded into the same FETCH as the automated-signal
+// headers above — no extra round-trip.
+const DELIVERED_TO_HEADER_FIELD = "Delivered-To";
+
 const FETCH_INDEX_DETAIL_QUERY = {
   ...FETCH_INDEX_QUERY,
-  headers: AUTOMATED_SIGNAL_HEADER_FIELDS,
+  headers: [...AUTOMATED_SIGNAL_HEADER_FIELDS, DELIVERED_TO_HEADER_FIELD],
   source: true,
 } as const;
 
@@ -552,6 +559,33 @@ export function detectAutomatedFromHeaders(headers: Buffer | undefined): boolean
     }
   }
   return false;
+}
+
+// Parses the same raw HEADER.FIELDS Buffer for the Delivered-To value — the address of
+// the account's own alias/additional address the message was actually delivered to.
+// A relayed message can carry more than one Delivered-To line (each hop may prepend its
+// own); the first line is the most recently added, i.e. Proton's own delivery hop, so it
+// is the one that reflects which of the account's addresses this message arrived at.
+// Returns undefined when no header data was fetched, or the header wasn't present at all
+// (a message with only one address on the account, or fetched before this field existed).
+export function parseDeliveredToFromHeaders(headers: Buffer | undefined): string | undefined {
+  if (!headers) {
+    return undefined;
+  }
+
+  const unfolded = headers.toString("utf8").replace(/\r?\n[ \t]+/g, " ");
+  for (const line of unfolded.split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator <= 0) {
+      continue;
+    }
+    const name = line.slice(0, separator).trim().toLowerCase();
+    if (name === "delivered-to") {
+      const value = line.slice(separator + 1).trim().toLowerCase();
+      return value ? value : undefined;
+    }
+  }
+  return undefined;
 }
 
 export function mapHeaderValue(value: unknown): unknown {
@@ -3510,6 +3544,7 @@ export class SimpleIMAPService {
       attachmentText: undefined,
       labels: [...(message.labels ?? [])],
       isAutomated: detectAutomatedFromHeaders(message.headers),
+      deliveredTo: parseDeliveredToFromHeaders(message.headers),
     };
   }
 

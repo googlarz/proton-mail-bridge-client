@@ -70,6 +70,45 @@ test("buildRawMessage neutralizes CRLF header injection from subject and fromNam
   assert.ok(headerLines.some((line) => /^subject: hello/i.test(line.trim())));
 });
 
+// Proton Bridge is logged in as one address, but the account can have other
+// verified addresses/aliases; Proton's outgoing MTA accepts a From header set to
+// any of them regardless of Bridge's login identity — this lets a caller pick one.
+test("buildRawMessage sends as the caller's from address instead of the Bridge login when provided", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "Hi",
+    body: "plain text body",
+    from: "owner@pm.me",
+  });
+  const headerBlock = raw.toString("utf8").split("\r\n\r\n")[0];
+  assert.ok(/^from: owner@pm\.me/im.test(headerBlock));
+  assert.ok(!headerBlock.toLowerCase().includes("owner@example.com"));
+});
+
+test("buildRawMessage falls back to the Bridge login when from is omitted", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "Hi",
+    body: "plain text body",
+  });
+  const headerBlock = raw.toString("utf8").split("\r\n\r\n")[0];
+  assert.ok(/^from: owner@example\.com/im.test(headerBlock));
+});
+
+test("buildRawMessage falls back to the Bridge login when from is not a valid email address", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "Hi",
+    body: "plain text body",
+    from: "not-an-email",
+  });
+  const headerBlock = raw.toString("utf8").split("\r\n\r\n")[0];
+  assert.ok(/^from: owner@example\.com/im.test(headerBlock));
+});
+
 test("buildRawMessage sanitizes script tags out of HTML bodies by default", async () => {
   const service = new SMTPService(createConfig());
   const raw = await service.buildRawMessage({
