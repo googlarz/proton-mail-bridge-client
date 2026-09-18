@@ -951,18 +951,30 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string)
 // one — get_email_by_id (formatEmailDetailOutput, which doesn't go through
 // this function) still returns it in full for the "let me read this one
 // message's attachment text" case.
+//
+// Also drops references — the RFC 2822 Message-ID chain for the whole thread
+// (can be a dozen-plus entries for a message deep in a long thread, each
+// ~60-150 chars). Found live it's carried on every search/list result even
+// though nothing here ever reads it back FROM a prior list result:
+// reply_to_email/reply_all_email/forward_email/create_reply_draft/
+// create_thread_reply_draft all resolve their OWN references by re-fetching
+// the original message's full detail internally (bundle.imapService.
+// getEmailById), never from a caller-supplied value — the caller can't
+// meaningfully use this except to eyeball it. get_email_by_id keeps it in
+// full, same as attachmentText above.
 export function trimAttachmentsForListing<T>(item: T): T {
-  const record = item as unknown as { attachments?: unknown; attachmentText?: unknown };
+  const record = item as unknown as { attachments?: unknown; attachmentText?: unknown; references?: unknown };
   const hasAttachments = Array.isArray(record.attachments) && record.attachments.length > 0;
   const hasAttachmentText = record.attachmentText !== undefined;
-  if (!hasAttachments && !hasAttachmentText) {
+  const hasReferences = record.references !== undefined;
+  if (!hasAttachments && !hasAttachmentText && !hasReferences) {
     return item;
   }
-  // Destructure attachmentText out rather than setting it to undefined — the
-  // key must actually be ABSENT, not present-with-an-undefined-value, so it
-  // drops the same way regardless of whether a given serialization path
-  // treats an undefined property as "omit" or "keep as null".
-  const { attachmentText: _attachmentText, ...rest } = item as unknown as Record<string, unknown>;
+  // Destructure attachmentText/references out rather than setting them to
+  // undefined — the keys must actually be ABSENT, not present-with-an-
+  // undefined-value, so they drop the same way regardless of whether a given
+  // serialization path treats an undefined property as "omit" or "keep as null".
+  const { attachmentText: _attachmentText, references: _references, ...rest } = item as unknown as Record<string, unknown>;
   return {
     ...(rest as T),
     ...(hasAttachments

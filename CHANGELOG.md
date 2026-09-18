@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.12] — 2026-09-18
+
+### Fixed
+- **`references` — the RFC 2822 Message-ID chain for a message's whole thread (can be a dozen-plus entries, each ~60-150 chars, for a message deep in a long thread) — was carried on every search/list result even though nothing reads it back from one.** `reply_to_email`, `reply_all_email`, `forward_email`, `create_reply_draft`, `create_thread_reply_draft` all resolve their own references by re-fetching the original message's full detail internally (`getEmailById`) — never from a value the caller saw in a prior search result. Dropped from list-style results the same way as `attachmentText`; `get_email_by_id` is unaffected and still returns it in full.
+
+### Added
+- New cases in `test/attachment-metadata-trimming.test.mjs` — regression coverage for the fix above.
+
 ## [2.1.11] — 2026-09-18
 
 Continued the token-efficiency pass (per-call cost during actual day-to-day use, not just session-start tool-schema cost — see 2.1.9/2.1.10).

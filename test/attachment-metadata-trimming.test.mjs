@@ -83,6 +83,25 @@ test("trimAttachmentsForListing drops attachmentText even when there are no atta
   assert.equal("attachmentText" in result, false);
 });
 
+// Regression test: references is the RFC 2822 Message-ID chain for the whole
+// thread — can be a dozen-plus entries for a message deep in a long thread.
+// Nothing here ever reads it back FROM a search/list result: reply/forward/
+// draft tools all re-fetch the original message's full detail internally
+// (getEmailById) to build their own references, never from a caller-supplied
+// value. Found live carried on every search/list result regardless.
+test("trimAttachmentsForListing drops references entirely (key absent, not just empty)", () => {
+  const email = { id: "e1", subject: "Deep thread reply", references: ["<a@example.com>", "<b@example.com>", "<c@example.com>"] };
+  const result = trimAttachmentsForListing(email);
+  assert.equal("references" in result, false, "the key must be absent, not present with an empty/undefined value");
+  assert.equal(result.subject, "Deep thread reply", "other fields must survive unchanged");
+});
+
+test("trimAttachmentsForListing drops references even when there are no attachments or attachmentText", () => {
+  const email = { id: "e1", references: ["<only-one@example.com>"] };
+  const result = trimAttachmentsForListing(email);
+  assert.equal("references" in result, false);
+});
+
 test("projectFields trims attachments even when no fields filter is requested (the default case)", () => {
   const items = [{ id: "e1", subject: "Invoice", attachments: [makeAttachment()] }];
   const result = projectFields(items);
