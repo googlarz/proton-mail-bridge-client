@@ -72,7 +72,7 @@ export class SMTPService {
     });
   }
 
-  async sendTestEmail(to: string, customMessage?: string): Promise<SentMessageInfo> {
+  async sendTestEmail(to: string, customMessage?: string, from?: string): Promise<SentMessageInfo> {
     const message =
       customMessage ??
       [
@@ -86,6 +86,7 @@ export class SMTPService {
       subject: "ProtonMail MCP test email",
       body: message,
       isHtml: false,
+      from,
     });
   }
 

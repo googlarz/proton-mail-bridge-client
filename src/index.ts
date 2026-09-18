@@ -215,6 +215,7 @@ const TOOLS = [
       properties: {
         to: { type: "string", description: "Recipient email address." },
         customMessage: { type: "string", description: "Optional custom test body." },
+        from: { type: "string", description: "Send as this address instead of the Bridge login's default (e.g. an alias or additional address on the same Proton account). Proton accepts any address verified on the account; an address not on the account is rejected by Proton at send time." },
         confirmed: { type: "boolean", description: "Set to true to confirm this send when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
       required: ["to"],
@@ -395,6 +396,7 @@ const TOOLS = [
         cc: { type: "string", description: "Additional CC recipients, comma-separated." },
         bcc: { type: "string", description: "Additional BCC recipients, comma-separated." },
         notes: { type: "string", description: "Optional local note for the draft." },
+        from: { type: "string", description: "Store this draft under this address instead of the Bridge login's default (e.g. an additional configured account address). Falls back to the primary account if the address isn't a configured account." },
         syncToRemote: {
           type: "boolean",
           description: "Whether to sync the draft to the Proton Drafts mailbox when IMAP is available.",
@@ -433,6 +435,7 @@ const TOOLS = [
         cc: { type: "string", description: "CC recipients, comma-separated." },
         bcc: { type: "string", description: "BCC recipients, comma-separated." },
         notes: { type: "string", description: "Optional local note for the draft." },
+        from: { type: "string", description: "Store this draft under this address instead of the Bridge login's default (e.g. an additional configured account address). Falls back to the primary account if the address isn't a configured account." },
         syncToRemote: {
           type: "boolean",
           description: "Whether to sync the draft to the Proton Drafts mailbox when IMAP is available.",
@@ -1604,6 +1607,7 @@ const TOOLS = [
         cc: { type: "string", description: "Additional CC recipients, comma-separated." },
         bcc: { type: "string", description: "Additional BCC recipients, comma-separated." },
         notes: { type: "string", description: "Optional local note for the draft." },
+        from: { type: "string", description: "Store this draft under this address instead of the Bridge login's default (e.g. an additional configured account address). Falls back to the primary account if the address isn't a configured account." },
         syncBefore: {
           type: "boolean",
           description: "Refresh the local mailbox index from IMAP before resolving the thread.",
@@ -3494,6 +3498,40 @@ export function createServer(
     );
   }
 
+  // draftId and emailId share the exact same "<slug>::" prefixing scheme (plain
+  // string-prefix stripping over the non-primary slugs), so draftId resolution reuses
+  // resolveAccountForEmailId itself rather than a second, parallel mechanism.
+  const resolveAccountForDraftId = resolveAccountForEmailId;
+
+  // The slug to prefix a response id with for this bundle — undefined for the
+  // primary account, so a primary-account id round-trips with NO prefix at all,
+  // exactly as it did before multi-account support existed.
+  function responseSlug(bundle: AccountBundle): string | undefined {
+    return bundle.account.slug === accountManager.primary().account.slug ? undefined : bundle.account.slug;
+  }
+
+  // A draft created/updated through a non-primary account's own draftStore needs its
+  // id wrapped with that account's slug prefix in the RESPONSE (so get_draft/
+  // update_draft/send_draft/delete_draft/list_drafts can find it again via
+  // resolveAccountForDraftId) — but every internal draftStore/imapService call for
+  // that account keeps using the bundle's own unprefixed id, exactly as stored on
+  // disk under that account's own dataDir. remoteDraft.emailId is a real emailId (not
+  // a draftId) for a remote copy living in that same account's mailbox, so it gets
+  // the identical prefix treatment for the identical reason.
+  function presentDraft<T extends DraftRecord>(bundle: AccountBundle, draft: T): T {
+    const slug = responseSlug(bundle);
+    if (!slug) {
+      return draft;
+    }
+    return {
+      ...draft,
+      id: withAccountPrefix(slug, draft.id),
+      remoteDraft: draft.remoteDraft?.emailId
+        ? { ...draft.remoteDraft, emailId: withAccountPrefix(slug, draft.remoteDraft.emailId) }
+        : draft.remoteDraft,
+    };
+  }
+
   if (options.startBackgroundSync) {
     // Every configured account gets its own independent sync/delivery-queue/snooze
     // loop — additional accounts are not just readable, they stay live-synced exactly
@@ -3749,6 +3787,12 @@ export function createServer(
             undoWindowSeconds = requested;
           }
           if (undoWindowSeconds > 0) {
+            // Scope limitation (follow-up round): the undo-send queue is always the
+            // primary's deliveryQueueService, so a delayed send with a non-primary
+            // `from` still only gets the header-override-on-primary fallback at fire
+            // time, not this account's own SMTP connection — unlike the immediate-send
+            // path above. Fine for now since `from` is still passed through in the
+            // payload and Proton accepts any verified address on the account.
             const sendAt = new Date(Date.now() + undoWindowSeconds * 1000).toISOString();
             const queued = await withAudit(auditService, name, args, async () =>
               deliveryQueueService.enqueue(emailPayload, sendAt, "undo_send"),
@@ -3761,15 +3805,26 @@ export function createServer(
             });
           }
 
+          // A `from` matching a configured additional account routes through that
+          // account's own SMTP connection — required under Bridge's Split Addresses
+          // feature, where each address is its own separate IMAP/SMTP login, not just
+          // an alias on the primary's connection. A `from` that doesn't match any
+          // configured account falls back to the pre-multi-account behavior: send via
+          // the primary connection with `from` passed through as a plain header
+          // override (still valid for a genuine alias only reachable that way).
+          const sendBundle = from ? accountManager.byAddress(from) : undefined;
+          const sendSmtp = sendBundle ? sendBundle.smtpService : smtpService;
+          const sendImap = sendBundle ? sendBundle.imapService : imapService;
+
           const result = await withAudit(auditService, name, args, async () =>
-            smtpService.sendEmail(emailPayload),
+            sendSmtp.sendEmail(emailPayload),
           );
 
           let sentCopyTokenSend = "[sent-copy:unverified]";
           try {
             const verifyMsgId = result.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(imapService, verifyMsgId);
+              const scv = await verifySentCopy(sendImap, verifyMsgId);
               if (scv.found) sentCopyTokenSend = "[sent-copy:verified]";
             }
           } catch (_) {}
@@ -3857,13 +3912,21 @@ export function createServer(
           if (!isValidEmail(to)) {
             throw new McpError(ErrorCode.InvalidParams, "to must be a valid email address.");
           }
+          const fromTest = optionalString(args, "from");
+          if (fromTest && !isValidEmail(fromTest)) {
+            throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
+          }
 
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Send test email to ${to}`);
           ensureSendAllowed(config.runtime);
           ensureOutboundRecipientsAllowed(config.runtime, config.smtp.username, [to]);
 
+          // Same account-routing-or-header-override fallback as send_email.
+          const testSendBundle = fromTest ? accountManager.byAddress(fromTest) : undefined;
+          const testSmtp = testSendBundle ? testSendBundle.smtpService : smtpService;
+
           const result = await withAudit(auditService, name, args, async () =>
-            smtpService.sendTestEmail(to, optionalString(args, "customMessage")),
+            testSmtp.sendTestEmail(to, optionalString(args, "customMessage"), testSendBundle ? undefined : fromTest),
           );
           return createTextResult({
             messageId: result.messageId,
@@ -3876,9 +3939,15 @@ export function createServer(
         case "reply_to_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Reply to email ${String(args.emailId ?? "?")}`);
           ensureSendAllowed(config.runtime);
-          const rawEmailIdReply = requireString(args, "emailId");
-          const { bundle: bundleReply, rest: emailIdReply } = resolveAccountForEmailId(rawEmailIdReply);
-          const detail = await bundleReply.imapService.getEmailById(emailIdReply);
+          // The message being replied to might belong to a non-primary account (its
+          // emailId carries that account's slug prefix) — resolve it the same way
+          // every other emailId-taking tool does, and read AND send through that same
+          // account by default (a `from` matching a DIFFERENT configured account still
+          // wins and routes the send there instead — see sendBundleForReply below).
+          const { bundle: readBundleReply, rest: emailIdReplyRest } = resolveAccountForEmailId(
+            requireString(args, "emailId"),
+          );
+          const detail = await readBundleReply.imapService.getEmailById(emailIdReplyRest);
           const markdownBodyReply = optionalString(args, "markdownBody");
           const body = markdownBodyReply ? markdownBodyReply : requireString(args, "body");
           const isHtml = markdownBodyReply ? false : normalizeBoolean(args.isHtml, false);
@@ -3889,11 +3958,13 @@ export function createServer(
           if (fromReply && !isValidEmail(fromReply)) {
             throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
           }
+          const sendBundleReply = fromReply ? accountManager.byAddress(fromReply) : undefined;
+          const sendBundleForReply = sendBundleReply ?? readBundleReply;
           const sanitizeHtmlReply = normalizeBoolean(args.sanitizeHtml, true);
           const attachments = optionalAttachmentList(args.attachments);
           const extraCc = parseEmails(optionalString(args, "cc"));
           const extraBcc = parseEmails(optionalString(args, "bcc"));
-          const recipients = getReplyRecipients(detail, config.smtp.username, replyAll);
+          const recipients = getReplyRecipients(detail, readBundleReply.config.smtp.username, replyAll);
           const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
           const to = uniqueAddresses(recipients.to);
 
@@ -3922,11 +3993,11 @@ export function createServer(
           }
 
           if (dryRunReply) {
-            return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc: extraBcc }, subject: prefixedSubject(detail.subject, "Re:"), note: "No email was sent." }, false, [emailSource({ ...detail, id: prefixedIdFor(bundleReply, detail.id) })]);
+            return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc: extraBcc }, subject: prefixedSubject(detail.subject, "Re:"), note: "No email was sent." }, false, [emailSource({ ...detail, id: prefixedIdFor(readBundleReply, detail.id) })]);
           }
 
           const result = await withAudit(auditService, name, args, async () =>
-            bundleReply.smtpService.sendEmail({
+            sendBundleForReply.smtpService.sendEmail({
               to,
               cc,
               bcc: extraBcc,
@@ -3949,13 +4020,13 @@ export function createServer(
           try {
             const verifyMsgId = result.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(bundleReply.imapService, verifyMsgId);
+              const scv = await verifySentCopy(sendBundleForReply.imapService, verifyMsgId);
               if (scv.found) sentCopyTokenReply = "[sent-copy:verified]";
             }
           } catch (_) {}
 
           return createTextResult({
-            repliedTo: prefixedIdFor(bundleReply, detail.id),
+            repliedTo: prefixedIdFor(readBundleReply, detail.id),
             to,
             cc,
             messageId: result.messageId,
@@ -3963,15 +4034,17 @@ export function createServer(
             rejected: result.rejected,
             response: result.response,
             sentCopy: sentCopyTokenReply,
-          }, false, [emailSource({ ...detail, id: prefixedIdFor(bundleReply, detail.id) })]);
+          }, false, [emailSource({ ...detail, id: prefixedIdFor(readBundleReply, detail.id) })]);
         }
 
         case "reply_all_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Reply-all to email ${String(args.emailId ?? "?")}`);
           ensureSendAllowed(config.runtime);
-          const rawEmailIdRa = requireString(args, "emailId");
-          const { bundle: bundleRa, rest: emailIdRa } = resolveAccountForEmailId(rawEmailIdRa);
-          const detailRa = await bundleRa.imapService.getEmailById(emailIdRa);
+          // Same emailId account resolution as reply_to_email — see its comment.
+          const { bundle: readBundleRa, rest: emailIdRaRest } = resolveAccountForEmailId(
+            requireString(args, "emailId"),
+          );
+          const detailRa = await readBundleRa.imapService.getEmailById(emailIdRaRest);
           const markdownBodyRa = optionalString(args, "markdownBody");
           const bodyRa = markdownBodyRa ? markdownBodyRa : requireString(args, "body");
           const isHtmlRa = markdownBodyRa ? false : normalizeBoolean(args.isHtml, false);
@@ -3981,11 +4054,13 @@ export function createServer(
           if (fromRa && !isValidEmail(fromRa)) {
             throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
           }
+          const sendBundleRa = fromRa ? accountManager.byAddress(fromRa) : undefined;
+          const sendBundleForRa = sendBundleRa ?? readBundleRa;
           const sanitizeHtmlRa = normalizeBoolean(args.sanitizeHtml, true);
           const attachmentsRa = optionalAttachmentList(args.attachments);
           const extraCcRa = parseEmails(optionalString(args, "cc"));
           const extraBccRa = parseEmails(optionalString(args, "bcc"));
-          const recipientsRa = getReplyRecipients(detailRa, config.smtp.username, true);
+          const recipientsRa = getReplyRecipients(detailRa, readBundleRa.config.smtp.username, true);
           const ccRa = uniqueAddresses([...recipientsRa.cc, ...extraCcRa]);
           const toRa = uniqueAddresses(recipientsRa.to);
 
@@ -4017,7 +4092,7 @@ export function createServer(
           const replyBodyRa = includeQuoteRa ? buildReplyText(detailRa, signedReplyRa.body) : signedReplyRa.body;
 
           const resultRa = await withAudit(auditService, name, args, async () =>
-            bundleRa.smtpService.sendEmail({
+            sendBundleForRa.smtpService.sendEmail({
               to: toRa,
               cc: ccRa,
               bcc: extraBccRa,
@@ -4040,13 +4115,13 @@ export function createServer(
           try {
             const verifyMsgId = resultRa.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(bundleRa.imapService, verifyMsgId);
+              const scv = await verifySentCopy(sendBundleForRa.imapService, verifyMsgId);
               if (scv.found) sentCopyTokenRa = "[sent-copy:verified]";
             }
           } catch (_) {}
 
           return createTextResult({
-            repliedTo: prefixedIdFor(bundleRa, detailRa.id),
+            repliedTo: prefixedIdFor(readBundleRa, detailRa.id),
             to: toRa,
             cc: ccRa,
             messageId: resultRa.messageId,
@@ -4054,15 +4129,17 @@ export function createServer(
             rejected: resultRa.rejected,
             response: resultRa.response,
             sentCopy: sentCopyTokenRa,
-          }, false, [emailSource({ ...detailRa, id: prefixedIdFor(bundleRa, detailRa.id) })]);
+          }, false, [emailSource({ ...detailRa, id: prefixedIdFor(readBundleRa, detailRa.id) })]);
         }
 
         case "forward_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Forward email ${String(args.emailId ?? "?")} to ${String(args.to ?? "?")}`);
           ensureSendAllowed(config.runtime);
-          const rawEmailIdFwd = requireString(args, "emailId");
-          const { bundle: bundleFwd, rest: emailIdFwd } = resolveAccountForEmailId(rawEmailIdFwd);
-          const detail = await bundleFwd.imapService.getEmailById(emailIdFwd);
+          // Same emailId account resolution as reply_to_email — see its comment.
+          const { bundle: readBundleFwd, rest: emailIdFwdRest } = resolveAccountForEmailId(
+            requireString(args, "emailId"),
+          );
+          const detail = await readBundleFwd.imapService.getEmailById(emailIdFwdRest);
           const to = parseEmails(requireString(args, "to"));
           const cc = parseEmails(optionalString(args, "cc"));
           const bcc = parseEmails(optionalString(args, "bcc"));
@@ -4075,6 +4152,8 @@ export function createServer(
           if (fromFwd && !isValidEmail(fromFwd)) {
             throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
           }
+          const sendBundleFwd = fromFwd ? accountManager.byAddress(fromFwd) : undefined;
+          const sendBundleForFwd = sendBundleFwd ?? readBundleFwd;
           const sanitizeHtmlFwd = normalizeBoolean(args.sanitizeHtml, true);
           // args.attachments are new attachments the caller wants to add to the
           // forward — they are NOT the original message's attachments. Despite
@@ -4121,7 +4200,7 @@ export function createServer(
             ? await Promise.all(
                 detail.attachments
                   .filter((a) => a.id && (!attachmentParts || (a.part !== undefined && attachmentParts.includes(a.part))))
-                  .map((a) => bundleFwd.imapService.getAttachmentForForward(detail.id, a.id as string)),
+                  .map((a) => readBundleFwd.imapService.getAttachmentForForward(detail.id, a.id as string)),
               )
             : [];
           const fwdAttachments = [...originalAttachments, ...attachments];
@@ -4132,7 +4211,7 @@ export function createServer(
           const signedFwd = applySignature(body ?? "", htmlBody, normalizeBoolean(args.appendSignature, true));
 
           const result = await withAudit(auditService, name, args, async () =>
-            bundleFwd.smtpService.sendEmail({
+            sendBundleForFwd.smtpService.sendEmail({
               to,
               cc,
               bcc,
@@ -4153,13 +4232,13 @@ export function createServer(
           try {
             const verifyMsgId = result.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(bundleFwd.imapService, verifyMsgId);
+              const scv = await verifySentCopy(sendBundleForFwd.imapService, verifyMsgId);
               if (scv.found) sentCopyTokenFwd = "[sent-copy:verified]";
             }
           } catch (_) {}
 
           return createTextResult({
-            forwardedMessage: prefixedIdFor(bundleFwd, detail.id),
+            forwardedMessage: prefixedIdFor(readBundleFwd, detail.id),
             to,
             cc,
             messageId: result.messageId,
@@ -4167,7 +4246,7 @@ export function createServer(
             rejected: result.rejected,
             response: result.response,
             sentCopy: sentCopyTokenFwd,
-          }, false, [emailSource({ ...detail, id: prefixedIdFor(bundleFwd, detail.id) })]);
+          }, false, [emailSource({ ...detail, id: prefixedIdFor(readBundleFwd, detail.id) })]);
         }
 
         case "create_draft": {
@@ -4191,8 +4270,14 @@ export function createServer(
             throw new McpError(ErrorCode.InvalidParams, "from must be a valid email address.");
           }
 
+          // A `from` matching a configured additional account stores the draft in
+          // THAT account's own draftStore (own dataDir/drafts.json) instead of the
+          // primary's — the draft's id is prefixed with that account's slug in the
+          // response so get_draft/update_draft/send_draft/... can find it again.
+          const createDraftBundle = from ? accountManager.byAddress(from) ?? primaryBundle : primaryBundle;
+
           const result = await withAudit(auditService, name, args, async () => {
-            const draft = await draftStore.createDraft({
+            const draft = await createDraftBundle.draftStore.createDraft({
               mode: "compose",
               to,
               cc,
@@ -4215,7 +4300,12 @@ export function createServer(
               normalizeBoolean(args.syncToRemote, true),
             );
             const synced = remoteSyncDecision.enabled
-              ? await syncDraftToRemote(draftStore, smtpService, imapService, draft)
+              ? await syncDraftToRemote(
+                  createDraftBundle.draftStore,
+                  createDraftBundle.smtpService,
+                  createDraftBundle.imapService,
+                  draft,
+                )
               : { draft, remoteSync: undefined };
             const remoteSync =
               synced.remoteSync ??
@@ -4227,7 +4317,10 @@ export function createServer(
                   }
                 : undefined);
 
-            return remoteSync ? { ...synced.draft, remoteSync } : synced.draft;
+            return presentDraft(
+              createDraftBundle,
+              remoteSync ? { ...synced.draft, remoteSync } : synced.draft,
+            );
           });
 
           return createTextResult(
@@ -4268,8 +4361,14 @@ export function createServer(
             throw new McpError(ErrorCode.InvalidParams, "Unable to infer reply recipient.");
           }
 
+          // Same from-based draftStore routing as create_draft — see its comment.
+          const createReplyDraftBundle =
+            optionalString(args, "from") !== undefined
+              ? accountManager.byAddress(optionalString(args, "from") as string) ?? primaryBundle
+              : primaryBundle;
+
           const result = await withAudit(auditService, name, args, async () => {
-            const draft = await draftStore.createDraft({
+            const draft = await createReplyDraftBundle.draftStore.createDraft({
               mode: "reply",
               to,
               cc,
@@ -4290,7 +4389,12 @@ export function createServer(
               normalizeBoolean(args.syncToRemote, true),
             );
             const synced = remoteSyncDecision.enabled
-              ? await syncDraftToRemote(draftStore, smtpService, imapService, draft)
+              ? await syncDraftToRemote(
+                  createReplyDraftBundle.draftStore,
+                  createReplyDraftBundle.smtpService,
+                  createReplyDraftBundle.imapService,
+                  draft,
+                )
               : { draft, remoteSync: undefined };
             const remoteSync =
               synced.remoteSync ??
@@ -4302,7 +4406,10 @@ export function createServer(
                   }
                 : undefined);
 
-            return remoteSync ? { ...synced.draft, remoteSync } : synced.draft;
+            return presentDraft(
+              createReplyDraftBundle,
+              remoteSync ? { ...synced.draft, remoteSync } : synced.draft,
+            );
           });
 
           return createTextResult(
@@ -4351,8 +4458,14 @@ export function createServer(
             : [];
           const attachments = [...originalAttachments, ...callerAttachments];
 
+          // Same from-based draftStore routing as create_draft — see its comment.
+          const createForwardDraftBundle =
+            optionalString(args, "from") !== undefined
+              ? accountManager.byAddress(optionalString(args, "from") as string) ?? primaryBundle
+              : primaryBundle;
+
           const result = await withAudit(auditService, name, args, async () => {
-            const draft = await draftStore.createDraft({
+            const draft = await createForwardDraftBundle.draftStore.createDraft({
               mode: "forward",
               to,
               cc,
@@ -4371,7 +4484,12 @@ export function createServer(
               normalizeBoolean(args.syncToRemote, true),
             );
             const synced = remoteSyncDecision.enabled
-              ? await syncDraftToRemote(draftStore, smtpService, imapService, draft)
+              ? await syncDraftToRemote(
+                  createForwardDraftBundle.draftStore,
+                  createForwardDraftBundle.smtpService,
+                  createForwardDraftBundle.imapService,
+                  draft,
+                )
               : { draft, remoteSync: undefined };
             const remoteSync =
               synced.remoteSync ??
@@ -4383,7 +4501,10 @@ export function createServer(
                   }
                 : undefined);
 
-            return remoteSync ? { ...synced.draft, remoteSync } : synced.draft;
+            return presentDraft(
+              createForwardDraftBundle,
+              remoteSync ? { ...synced.draft, remoteSync } : synced.draft,
+            );
           });
 
           return createTextResult(
@@ -4406,6 +4527,9 @@ export function createServer(
         }
 
         case "list_drafts": {
+          // Scope limitation (follow-up round): stays scoped to the primary account's
+          // drafts only — a non-primary account's drafts aren't listed here yet. Use
+          // get_draft with that account's prefixed draftId if you already have one.
           const drafts = await draftStore.listDrafts(normalizeBoolean(args.includeSent, false));
           return createTextResult(
             {
@@ -4418,6 +4542,8 @@ export function createServer(
         }
 
         case "list_remote_drafts": {
+          // Scope limitation (follow-up round): stays scoped to the primary account's
+          // remote Drafts mailbox only — see list_drafts' identical note.
           const result = await imapService.listRemoteDrafts(
             normalizeLimit(args.limit, 50),
             normalizeLimit(args.offset, 0, 0, 10_000),
@@ -4426,7 +4552,10 @@ export function createServer(
         }
 
         case "get_draft": {
-          const draft = await draftStore.getDraft(requireString(args, "draftId"));
+          const { bundle: getDraftBundle, rest: getDraftIdRest } = resolveAccountForDraftId(
+            requireString(args, "draftId"),
+          );
+          const draft = presentDraft(getDraftBundle, await getDraftBundle.draftStore.getDraft(getDraftIdRest));
           return createTextResult(
             draft,
             false,
@@ -4446,7 +4575,9 @@ export function createServer(
         }
 
         case "update_draft": {
-          const draftId = requireString(args, "draftId");
+          const { bundle: updateDraftBundle, rest: updateDraftIdRest } = resolveAccountForDraftId(
+            requireString(args, "draftId"),
+          );
           const to = args.to === undefined ? undefined : parseEmails(optionalString(args, "to"));
           const cc = args.cc === undefined ? undefined : parseEmails(optionalString(args, "cc"));
           const bcc = args.bcc === undefined ? undefined : parseEmails(optionalString(args, "bcc"));
@@ -4472,7 +4603,7 @@ export function createServer(
           }
 
           const result = await withAudit(auditService, name, args, async () => {
-            const draft = await draftStore.updateDraft(draftId, {
+            const draft = await updateDraftBundle.draftStore.updateDraft(updateDraftIdRest, {
               to,
               cc,
               bcc,
@@ -4494,7 +4625,12 @@ export function createServer(
               normalizeBoolean(args.syncToRemote, true),
             );
             const synced = remoteSyncDecision.enabled
-              ? await syncDraftToRemote(draftStore, smtpService, imapService, draft)
+              ? await syncDraftToRemote(
+                  updateDraftBundle.draftStore,
+                  updateDraftBundle.smtpService,
+                  updateDraftBundle.imapService,
+                  draft,
+                )
               : { draft, remoteSync: undefined };
             const remoteSync =
               synced.remoteSync ??
@@ -4506,7 +4642,10 @@ export function createServer(
                   }
                 : undefined);
 
-            return remoteSync ? { ...synced.draft, remoteSync } : synced.draft;
+            return presentDraft(
+              updateDraftBundle,
+              remoteSync ? { ...synced.draft, remoteSync } : synced.draft,
+            );
           });
 
           return createTextResult(
@@ -4529,21 +4668,25 @@ export function createServer(
 
         case "sync_draft_to_remote": {
           ensureRemoteDraftSyncAllowed(config.runtime);
-          const draft = await draftStore.getDraft(requireString(args, "draftId"));
-          const synced = await withAudit(auditService, name, args, async () =>
-            syncDraftToRemote(draftStore, smtpService, imapService, draft),
+          const { bundle: syncDraftBundle, rest: syncDraftIdRest } = resolveAccountForDraftId(
+            requireString(args, "draftId"),
           );
+          const draft = await syncDraftBundle.draftStore.getDraft(syncDraftIdRest);
+          const synced = await withAudit(auditService, name, args, async () =>
+            syncDraftToRemote(syncDraftBundle.draftStore, syncDraftBundle.smtpService, syncDraftBundle.imapService, draft),
+          );
+          const presentedSynced = presentDraft(syncDraftBundle, synced.draft);
           return createTextResult(
-            { ...synced.draft, remoteSync: synced.remoteSync },
+            { ...presentedSynced, remoteSync: synced.remoteSync },
             false,
             [
-              draftSource(synced.draft),
-              ...(synced.draft.remoteDraft?.emailId
+              draftSource(presentedSynced),
+              ...(presentedSynced.remoteDraft?.emailId
                 ? [
                     emailSource({
-                      id: synced.draft.remoteDraft.emailId,
-                      subject: synced.draft.subject,
-                      folder: synced.draft.remoteDraft.folder,
+                      id: presentedSynced.remoteDraft.emailId,
+                      subject: presentedSynced.subject,
+                      folder: presentedSynced.remoteDraft.folder,
                     })
                   ]
                 : []),
@@ -4554,7 +4697,10 @@ export function createServer(
         case "send_draft": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Send draft ${String(args.draftId ?? "?")}`);
           ensureSendAllowed(config.runtime);
-          const draft = await draftStore.getDraft(requireString(args, "draftId"));
+          const { bundle: sendDraftBundle, rest: sendDraftIdRest } = resolveAccountForDraftId(
+            requireString(args, "draftId"),
+          );
+          const draft = await sendDraftBundle.draftStore.getDraft(sendDraftIdRest);
           // Found live: calling send_draft twice on the same draft sent it
           // twice — nothing here checked whether it was already marked
           // "sent" before sending again. Refuse; create_draft for a new
@@ -4570,7 +4716,7 @@ export function createServer(
           // transactions, since nothing here knew about the still-pending
           // scheduled send. Refuse instead; cancel_send first if the
           // immediate send is actually what's wanted.
-          const pendingScheduled = (await deliveryQueueService.list()).find(
+          const pendingScheduled = (await sendDraftBundle.deliveryQueueService.list()).find(
             (record) => record.sourceDraftId === draft.id && record.status === "pending",
           );
           if (pendingScheduled) {
@@ -4617,7 +4763,7 @@ export function createServer(
           // them. claimForSending() re-reads status under the draft store's
           // lock and flips "draft" -> "sending" in that same critical
           // section — only the call that wins the claim proceeds to SMTP.
-          await draftStore.claimForSending(draft.id);
+          await sendDraftBundle.draftStore.claimForSending(draft.id);
 
           // Found live: withAudit wrapped the SMTP call, so an audit-log
           // write failure AFTER a successful send (e.g. disk full) was
@@ -4632,7 +4778,7 @@ export function createServer(
           const sendStartedAt = Date.now();
           let result: Awaited<ReturnType<typeof smtpService.sendEmail>>;
           try {
-            result = await smtpService.sendEmail({
+            result = await sendDraftBundle.smtpService.sendEmail({
               to: draft.to,
               cc: draft.cc,
               bcc: draft.bcc,
@@ -4655,7 +4801,7 @@ export function createServer(
             // Mirrors SnoozeService.wake()'s catch handler: revert the claim
             // so the draft is retryable instead of stuck in "sending"
             // forever because SMTP failed.
-            await draftStore.revertSending(draft.id);
+            await sendDraftBundle.draftStore.revertSending(draft.id);
             await auditService
               .record({
                 timestamp: new Date().toISOString(),
@@ -4691,14 +4837,14 @@ export function createServer(
             );
           }
 
-          let sentDraft = await draftStore.markSent(draft.id, {
+          let sentDraft = await sendDraftBundle.draftStore.markSent(draft.id, {
             messageId: result.messageId,
             accepted: result.accepted,
             rejected: result.rejected,
             response: result.response,
           });
           const remoteCleanup = resolveRemoteDraftSync(config.runtime, true).enabled
-            ? await clearRemoteDraft(draftStore, imapService, sentDraft)
+            ? await clearRemoteDraft(sendDraftBundle.draftStore, sendDraftBundle.imapService, sentDraft)
             : {
                 draft: sentDraft,
                 remoteDelete: sentDraft.remoteDraft?.emailId
@@ -4709,18 +4855,18 @@ export function createServer(
                     }
                   : undefined,
               };
-          sentDraft = remoteCleanup.draft;
+          sentDraft = presentDraft(sendDraftBundle, remoteCleanup.draft);
 
           const sources = [draftSource(sentDraft)];
           if (sentDraft.sourceEmailId) {
-            sources.push(emailSource(await imapService.getEmailById(sentDraft.sourceEmailId)));
+            sources.push(emailSource(await sendDraftBundle.imapService.getEmailById(sentDraft.sourceEmailId)));
           }
 
           let sentCopyTokenDraft = "[sent-copy:unverified]";
           try {
             const verifyMsgId = result.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(imapService, verifyMsgId);
+              const scv = await verifySentCopy(sendDraftBundle.imapService, verifyMsgId);
               if (scv.found) sentCopyTokenDraft = "[sent-copy:verified]";
             }
           } catch (_) {}
@@ -4744,7 +4890,10 @@ export function createServer(
         case "schedule_draft": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Schedule draft ${String(args.draftId ?? "?")} to send later`);
           ensureSendAllowed(config.runtime);
-          const draft = await draftStore.getDraft(requireString(args, "draftId"));
+          const { bundle: scheduleDraftBundle, rest: scheduleDraftIdRest } = resolveAccountForDraftId(
+            requireString(args, "draftId"),
+          );
+          const draft = await scheduleDraftBundle.draftStore.getDraft(scheduleDraftIdRest);
           // Mirrors send_draft's own pendingScheduled guard, for the reverse
           // ordering: send_draft already delivered this draft once, and
           // scheduling it again here would deliver it a second time at
@@ -4772,7 +4921,7 @@ export function createServer(
           // duplicate. This external check is kept only as an optional
           // early-exit optimization to avoid a wasted round-trip to the lock
           // in the common non-racing case.
-          const alreadyPendingScheduled = (await deliveryQueueService.list()).find(
+          const alreadyPendingScheduled = (await scheduleDraftBundle.deliveryQueueService.list()).find(
             (record) => record.sourceDraftId === draft.id && record.status === "pending",
           );
           if (alreadyPendingScheduled) {
@@ -4804,7 +4953,7 @@ export function createServer(
           }
 
           const queued = await withAudit(auditService, name, args, async () =>
-            deliveryQueueService.enqueue(
+            scheduleDraftBundle.deliveryQueueService.enqueue(
               {
                 to: draft.to,
                 cc: draft.cc,
@@ -4831,18 +4980,21 @@ export function createServer(
           return createTextResult({
             queued: true,
             id: queued.id,
-            draftId: draft.id,
+            draftId: withAccountPrefix(responseSlug(scheduleDraftBundle), draft.id),
             sendAt: queued.sendAt,
             note: "The draft's content was snapshotted now and queued. This server must stay running for the send to fire at sendAt — if restarted first, it fires on next startup instead. The draft record itself is not automatically marked sent; use cancel_send with this id to abort before it fires.",
           });
         }
 
         case "delete_draft": {
-          const draft = await draftStore.getDraft(requireString(args, "draftId"));
+          const { bundle: deleteDraftBundle, rest: deleteDraftIdRest } = resolveAccountForDraftId(
+            requireString(args, "draftId"),
+          );
+          const draft = await deleteDraftBundle.draftStore.getDraft(deleteDraftIdRest);
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args?.confirmed, false), "Permanently delete draft: " + draft.id);
           const deleted = await withAudit(auditService, name, args, async () => {
             const remoteCleanup = resolveRemoteDraftSync(config.runtime, true).enabled
-              ? await clearRemoteDraft(draftStore, imapService, draft)
+              ? await clearRemoteDraft(deleteDraftBundle.draftStore, deleteDraftBundle.imapService, draft)
               : {
                   draft,
                   remoteDelete: draft.remoteDraft?.emailId
@@ -4853,8 +5005,10 @@ export function createServer(
                       }
                     : undefined,
                 };
+            const deletedResult = await deleteDraftBundle.draftStore.deleteDraft(draft.id);
             return {
-              ...(await draftStore.deleteDraft(draft.id)),
+              ...deletedResult,
+              id: withAccountPrefix(responseSlug(deleteDraftBundle), deletedResult.id),
               remoteDelete: remoteCleanup.remoteDelete,
             };
           });
@@ -6807,8 +6961,14 @@ export function createServer(
             throw new McpError(ErrorCode.InvalidParams, "Unable to infer reply recipient.");
           }
 
+          // Same from-based draftStore routing as create_draft — see its comment.
+          const createThreadReplyDraftBundle =
+            optionalString(args, "from") !== undefined
+              ? accountManager.byAddress(optionalString(args, "from") as string) ?? primaryBundle
+              : primaryBundle;
+
           const result = await withAudit(auditService, name, args, async () => {
-            const draft = await draftStore.createDraft({
+            const draft = await createThreadReplyDraftBundle.draftStore.createDraft({
               mode: "reply",
               to,
               cc,
@@ -6829,7 +6989,12 @@ export function createServer(
               normalizeBoolean(args.syncToRemote, true),
             );
             const synced = remoteSyncDecision.enabled
-              ? await syncDraftToRemote(draftStore, smtpService, imapService, draft)
+              ? await syncDraftToRemote(
+                  createThreadReplyDraftBundle.draftStore,
+                  createThreadReplyDraftBundle.smtpService,
+                  createThreadReplyDraftBundle.imapService,
+                  draft,
+                )
               : { draft, remoteSync: undefined };
             const remoteSync =
               synced.remoteSync ??
@@ -6841,9 +7006,11 @@ export function createServer(
                   }
                 : undefined);
 
-            return remoteSync
-              ? { ...synced.draft, remoteSync, threadId: thread.id }
-              : { ...synced.draft, threadId: thread.id };
+            const presented = presentDraft(
+              createThreadReplyDraftBundle,
+              remoteSync ? { ...synced.draft, remoteSync } : synced.draft,
+            );
+            return { ...presented, threadId: thread.id };
           });
 
           return createTextResult(
