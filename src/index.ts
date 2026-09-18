@@ -25,7 +25,7 @@ import { DeliveryQueueService } from "./services/delivery-queue-service.js";
 import { DraftStoreService } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
 import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService, UID_VALIDITY_MISMATCH_ERROR } from "./services/simple-imap-service.js";
-import { applySignature, SMTPService } from "./services/smtp-service.js";
+import { applySignature, plainTextToHtml, SMTPService } from "./services/smtp-service.js";
 import { SnoozeService } from "./services/snooze-service.js";
 import { TemplateService } from "./services/template-service.js";
 import type {
@@ -2218,6 +2218,56 @@ function buildForwardText(detail: EmailDetail, body?: string): string {
     .join("\n");
 }
 
+// HTML counterparts of buildReplyText/buildForwardText — needed because a
+// markdown-authored reply/forward (markdownBody) renders its OWN new text to a
+// real, separate htmlBody, but buildReplyText/buildForwardText only ever wrapped
+// the PLAIN TEXT `body` with the quoted/forwarded original. That original never
+// made it into htmlBody at all — an HTML-viewing recipient of a markdown reply
+// saw only the new text and signature, with the entire original message missing
+// (confirmed on generated MIME messages), while the text/plain part had it via
+// buildReplyText. Uses the original message's own detail.html when present
+// (real markup, not reconstructed); falls back to escaping detail.text/preview
+// through plainTextToHtml otherwise, same as a plain-text send's own html
+// alternative (see smtp-service.ts's plainTextToHtml comment).
+export function buildReplyHtml(detail: EmailDetail, htmlBody: string): string {
+  const originalHtml = typeof detail.html === "string" && detail.html
+    ? detail.html
+    : plainTextToHtml(detail.text || detail.preview || "");
+  const fromText = formatAddressList(detail.from);
+  const dateText = detail.date || detail.internalDate || "an unknown date";
+  return [
+    htmlBody,
+    `<p>On ${escapeHtmlForQuote(dateText)}, ${escapeHtmlForQuote(fromText || "the sender")} wrote:</p>`,
+    `<blockquote>${originalHtml}</blockquote>`,
+  ].join("\n");
+}
+
+export function buildForwardHtml(detail: EmailDetail, htmlBody?: string): string {
+  const originalHtml = typeof detail.html === "string" && detail.html
+    ? detail.html
+    : plainTextToHtml(detail.text || detail.preview || "");
+  return [
+    htmlBody?.trim() || "",
+    "<p>---------- Forwarded message ---------</p>",
+    `<p>From: ${escapeHtmlForQuote(formatAddressList(detail.from))}<br>`,
+    `Date: ${escapeHtmlForQuote(detail.date || detail.internalDate || "")}<br>`,
+    `Subject: ${escapeHtmlForQuote(detail.subject)}<br>`,
+    `To: ${escapeHtmlForQuote(formatAddressList(detail.to))}${detail.cc.length > 0 ? `<br>Cc: ${escapeHtmlForQuote(formatAddressList(detail.cc))}` : ""}</p>`,
+    originalHtml,
+  ]
+    .filter((part) => part !== "")
+    .join("\n");
+}
+
+function escapeHtmlForQuote(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export function getReplyRecipients(
   detail: EmailDetail,
   ownerEmail: string,
@@ -4093,8 +4143,14 @@ export function createServer(
           const includeQuoteReply = normalizeBoolean(args.includeQuote, true);
           // Signature goes right after the user's own reply text, before the
           // quoted original — not at the very end, after the quote.
-          const signedReply = applySignature(body, htmlBody, normalizeBoolean(args.appendSignature, true));
+          const signedReply = applySignature(body, htmlBody, normalizeBoolean(args.appendSignature, true), isHtml);
           const replyBody = includeQuoteReply ? buildReplyText(detail, signedReply.body) : signedReply.body;
+          // A separate htmlBody (the markdown-rendered case) needs the SAME quoted
+          // original merged in — see buildReplyHtml's comment for why this was
+          // previously missing entirely from the html part.
+          const replyHtmlBody = includeQuoteReply && signedReply.htmlBody !== undefined
+            ? buildReplyHtml(detail, signedReply.htmlBody)
+            : signedReply.htmlBody;
 
           if (config.runtime.restrictOutboundToSelf) {
             const selfAddr = config.smtp.username.toLowerCase();
@@ -4117,7 +4173,7 @@ export function createServer(
               subject: prefixedSubject(detail.subject, "Re:"),
               body: replyBody,
               isHtml,
-              htmlBody: signedReply.htmlBody,
+              htmlBody: replyHtmlBody,
               fromName: fromNameReply,
               from: fromReply,
               sanitizeHtml: sanitizeHtmlReply,
@@ -4201,8 +4257,12 @@ export function createServer(
           const includeQuoteRa = normalizeBoolean(args.includeQuote, true);
           // Signature goes right after the user's own reply text, before the
           // quoted original — not at the very end, after the quote.
-          const signedReplyRa = applySignature(bodyRa, htmlBodyRa, normalizeBoolean(args.appendSignature, true));
+          const signedReplyRa = applySignature(bodyRa, htmlBodyRa, normalizeBoolean(args.appendSignature, true), isHtmlRa);
           const replyBodyRa = includeQuoteRa ? buildReplyText(detailRa, signedReplyRa.body) : signedReplyRa.body;
+          // Same fix as reply_to_email — see buildReplyHtml's comment.
+          const replyHtmlBodyRa = includeQuoteRa && signedReplyRa.htmlBody !== undefined
+            ? buildReplyHtml(detailRa, signedReplyRa.htmlBody)
+            : signedReplyRa.htmlBody;
 
           const resultRa = await withAudit(auditService, name, args, async () =>
             sendBundleForRa.smtpService.sendEmail({
@@ -4212,7 +4272,7 @@ export function createServer(
               subject: prefixedSubject(detailRa.subject, "Re:"),
               body: replyBodyRa,
               isHtml: isHtmlRa,
-              htmlBody: signedReplyRa.htmlBody,
+              htmlBody: replyHtmlBodyRa,
               fromName: fromNameRa,
               from: fromRa,
               sanitizeHtml: sanitizeHtmlRa,
@@ -4321,7 +4381,13 @@ export function createServer(
           // Signature goes right after the user's own note, before the
           // "---------- Forwarded message ---------" block — not at the very
           // end, after the forwarded content.
-          const signedFwd = applySignature(body ?? "", htmlBody, normalizeBoolean(args.appendSignature, true));
+          const signedFwd = applySignature(body ?? "", htmlBody, normalizeBoolean(args.appendSignature, true), isHtml);
+          // Same fix as reply_to_email/reply_all_email — see buildReplyHtml's
+          // comment (applies equally to a markdown-authored forward's separate
+          // htmlBody, which buildForwardText never touches).
+          const forwardHtmlBody = signedFwd.htmlBody !== undefined
+            ? buildForwardHtml(detail, signedFwd.htmlBody)
+            : signedFwd.htmlBody;
 
           const result = await withAudit(auditService, name, args, async () =>
             sendBundleForFwd.smtpService.sendEmail({
@@ -4331,7 +4397,7 @@ export function createServer(
               subject: prefixedSubject(detail.subject, "Fwd:"),
               body: buildForwardText(detail, signedFwd.body),
               isHtml,
-              htmlBody: signedFwd.htmlBody,
+              htmlBody: forwardHtmlBody,
               fromName: fromNameFwd,
               from: fromFwd,
               sanitizeHtml: sanitizeHtmlFwd,
@@ -4455,14 +4521,21 @@ export function createServer(
         }
 
         case "create_reply_draft": {
-          const detail = await imapService.getEmailById(requireString(args, "emailId"));
+          // emailId carries the same "<slug>::" account prefix as everywhere else —
+          // this previously always read via the PRIMARY account's imapService
+          // regardless of that prefix, so replying to a non-primary account's email
+          // either resolved the wrong message or threw not-found.
+          const { bundle: createReplyReadBundle, rest: createReplyEmailIdRest } = resolveAccountForEmailId(
+            requireString(args, "emailId"),
+          );
+          const detail = await createReplyReadBundle.imapService.getEmailById(createReplyEmailIdRest);
           const body = requireString(args, "body");
           const isHtml = normalizeBoolean(args.isHtml, false);
           const replyAll = normalizeBoolean(args.replyAll, false);
           const attachments = optionalAttachmentList(args.attachments);
           const extraCc = parseEmails(optionalString(args, "cc"));
           const extraBcc = parseEmails(optionalString(args, "bcc"));
-          const recipients = getReplyRecipients(detail, config.smtp.username, replyAll);
+          const recipients = getReplyRecipients(detail, createReplyReadBundle.config.smtp.username, replyAll);
           const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
           const to = uniqueAddresses(recipients.to);
 
@@ -4474,11 +4547,16 @@ export function createServer(
             throw new McpError(ErrorCode.InvalidParams, "Unable to infer reply recipient.");
           }
 
-          // Same from-based draftStore routing as create_draft — see its comment.
+          // Same from-based draftStore routing as create_draft — see its comment —
+          // except the no-`from` default is the ACCOUNT THE ORIGINAL MESSAGE BELONGS
+          // TO, not always the primary: a reply drafted against a non-primary
+          // account's email with no explicit `from` should default to replying as
+          // that same account, not silently switch to primary. `from` still wins
+          // when it names a different configured account.
           const createReplyDraftBundle =
             optionalString(args, "from") !== undefined
-              ? accountManager.byAddress(optionalString(args, "from") as string) ?? primaryBundle
-              : primaryBundle;
+              ? accountManager.byAddress(optionalString(args, "from") as string) ?? createReplyReadBundle
+              : createReplyReadBundle;
 
           const result = await withAudit(auditService, name, args, async () => {
             const draft = await createReplyDraftBundle.draftStore.createDraft({
@@ -4545,7 +4623,11 @@ export function createServer(
         }
 
         case "create_forward_draft": {
-          const detail = await imapService.getEmailById(requireString(args, "emailId"));
+          // Same emailId account resolution as create_reply_draft — see its comment.
+          const { bundle: createForwardReadBundle, rest: createForwardEmailIdRest } = resolveAccountForEmailId(
+            requireString(args, "emailId"),
+          );
+          const detail = await createForwardReadBundle.imapService.getEmailById(createForwardEmailIdRest);
           const to = parseEmails(requireString(args, "to"));
           const cc = parseEmails(optionalString(args, "cc"));
           const bcc = parseEmails(optionalString(args, "bcc"));
@@ -4566,16 +4648,18 @@ export function createServer(
             ? await Promise.all(
                 detail.attachments
                   .filter((a) => a.id)
-                  .map((a) => imapService.getAttachmentForForward(detail.id, a.id as string)),
+                  .map((a) => createForwardReadBundle.imapService.getAttachmentForForward(detail.id, a.id as string)),
               )
             : [];
           const attachments = [...originalAttachments, ...callerAttachments];
 
-          // Same from-based draftStore routing as create_draft — see its comment.
+          // Same from-based draftStore routing as create_reply_draft — defaults to
+          // the ORIGINAL MESSAGE's own account, not always primary, when `from`
+          // isn't given.
           const createForwardDraftBundle =
             optionalString(args, "from") !== undefined
-              ? accountManager.byAddress(optionalString(args, "from") as string) ?? primaryBundle
-              : primaryBundle;
+              ? accountManager.byAddress(optionalString(args, "from") as string) ?? createForwardReadBundle
+              : createForwardReadBundle;
 
           const result = await withAudit(auditService, name, args, async () => {
             const draft = await createForwardDraftBundle.draftStore.createDraft({
@@ -7342,11 +7426,16 @@ export function createServer(
             throw new McpError(ErrorCode.InvalidParams, "Unable to infer reply recipient.");
           }
 
-          // Same from-based draftStore routing as create_draft — see its comment.
+          // Same from-based draftStore routing as create_reply_draft — defaults to
+          // the THREAD's own account (threadReplyBundle, already resolved above from
+          // the threadId's own prefix), not always primary, when `from` isn't given.
+          // Previously always defaulted to primary regardless of which account the
+          // thread actually belonged to — a reply drafted with no explicit `from`
+          // against a non-primary account's thread silently switched accounts.
           const createThreadReplyDraftBundle =
             optionalString(args, "from") !== undefined
-              ? accountManager.byAddress(optionalString(args, "from") as string) ?? primaryBundle
-              : primaryBundle;
+              ? accountManager.byAddress(optionalString(args, "from") as string) ?? threadReplyBundle
+              : threadReplyBundle;
 
           const result = await withAudit(auditService, name, args, async () => {
             const draft = await createThreadReplyDraftBundle.draftStore.createDraft({

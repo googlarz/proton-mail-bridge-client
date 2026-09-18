@@ -1187,7 +1187,17 @@ export class SimpleIMAPService {
     emails: EmailSummary[];
   }> {
     const folder = input.folder?.trim() || "INBOX";
-    const limit = normalizeLimit(input.limit, 50);
+    // normalizeLimit's own default max (250) silently truncated any caller that
+    // legitimately needs a deeper fetch — notably index.ts's multi-account get_emails
+    // merge, which fetches offset 0 up to (requestedOffset + limit) from every
+    // account so each account's true contribution to the global page is captured.
+    // With offset already allowed up to 10_000, capping limit at 250 meant that
+    // overfetch got silently clamped right back down, so a page past position 250
+    // (e.g. offset:250,limit:25 on a 300-message mailbox) came back empty even
+    // though the messages exist — the fetch never actually reached them. Raised to
+    // match offset's own ceiling so a request that's otherwise in bounds isn't
+    // quietly truncated to a smaller page than requested.
+    const limit = normalizeLimit(input.limit, 50, 1, 10_000);
     const offset = normalizeLimit(input.offset, 0, 0, 10_000);
 
     return this.withMailbox(folder, true, async (client) => {

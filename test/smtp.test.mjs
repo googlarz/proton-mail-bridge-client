@@ -387,6 +387,30 @@ test("applySignature appends after the given text, not conditioned on any wrappi
   }
 });
 
+// Regression test for an externally-reported bug (code review of 7c36bae / v2.1.3):
+// isHtml:true with no separate htmlBody used to treat `body` as plain text
+// regardless — gluing a literal "\n\n" (which HTML collapses, so lines visually
+// ran together) and an UNESCAPED signature onto raw HTML source. Downstream
+// sanitization then stripped anything in that unescaped signature that looked
+// like a disallowed tag (e.g. a literal "<Sales>" in the signature vanished
+// outright instead of rendering as text). Passing isHtml=true routes this
+// through the same escaped-<br> treatment the separate-htmlBody branch already
+// used, and returns it via `body` (not `htmlBody`) since `body` IS the HTML
+// source when isHtml is true and htmlBody wasn't supplied.
+test("applySignature escapes and <br>-joins the signature into `body` when isHtml is true and there's no separate htmlBody", () => {
+  const previous = process.env.PROTONMAIL_SIGNATURE;
+  process.env.PROTONMAIL_SIGNATURE = "Best,\n<Sales>";
+  try {
+    const result = applySignature("<p>Sounds good!</p>", undefined, true, true);
+    assert.equal(result.body, "<p>Sounds good!</p><br><br>Best,<br>&lt;Sales&gt;");
+    assert.equal(result.htmlBody, undefined, "htmlBody stays undefined — body IS the html source in this case");
+    assert.ok(!result.body.includes("\n\n"), "no raw newline glued onto HTML source, which HTML would collapse visually");
+  } finally {
+    if (previous === undefined) delete process.env.PROTONMAIL_SIGNATURE;
+    else process.env.PROTONMAIL_SIGNATURE = previous;
+  }
+});
+
 test("applySignature is a no-op when appendSignature is false or no signature is configured", () => {
   const previous = process.env.PROTONMAIL_SIGNATURE;
   try {

@@ -27,7 +27,10 @@ function escapeHtml(value: string): string {
 // part just... didn't show one. Auto-deriving an html alternative from the same text
 // (escaped, newlines as <br>) means every send is multipart/alternative like a normal
 // mail client, and the signature gets its HTML treatment on this path too.
-function plainTextToHtml(text: string): string {
+// Exported so callers building their own HTML quote/forward blocks from plain
+// text (see buildReplyHtml/buildForwardHtml in index.ts) can reuse the exact
+// same escape-then-<br> conversion instead of a second, parallel implementation.
+export function plainTextToHtml(text: string): string {
   return escapeHtml(text).replace(/\n/g, "<br>");
 }
 
@@ -44,11 +47,30 @@ export function applySignature(
   body: string,
   htmlBody: string | undefined,
   appendSignature: boolean | undefined,
+  // When isHtml is true and there's no separate htmlBody, `body` itself IS the
+  // HTML source (see buildMailOptions's htmlContent derivation: `input.htmlBody ??
+  // (input.isHtml ? input.body : ...)`) — but reply_to_email/reply_all_email/
+  // forward_email call this BEFORE that point, to insert the signature ahead of
+  // the quoted/forwarded content rather than after it, and used to always treat
+  // `body` as plain text regardless of isHtml. That glued a literal `\n\n` (which
+  // HTML collapses, so multiple lines visually ran together) and an UNESCAPED
+  // signature onto raw HTML — sanitizeHtmlContent then stripped anything in the
+  // signature that looked like a disallowed tag (e.g. a signature containing
+  // literal "<Sales>" vanished outright instead of rendering as text). Passing
+  // isHtml lets this branch the same way the separate-htmlBody case already does:
+  // escape the signature and join with <br> instead of a raw newline.
+  isHtml?: boolean,
 ): { body: string; htmlBody: string | undefined } {
   const signature = process.env.PROTONMAIL_SIGNATURE?.trim();
   const shouldAppend = appendSignature !== false && Boolean(signature);
   if (!shouldAppend) {
     return { body, htmlBody };
+  }
+  if (isHtml && htmlBody === undefined) {
+    return {
+      body: `${body}<br><br>${escapeHtml(signature as string).replace(/\n/g, "<br>")}`,
+      htmlBody,
+    };
   }
   return {
     body: `${body}\n\n${signature}`,

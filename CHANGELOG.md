@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.4] — 2026-09-18
+
+Four more issues found by the same independent external code review, this round against v2.1.3 (commit `7c36bae`) — two were the previous round's fixes only partially closing the gap, two were newly surfaced.
+
+### Fixed
+- **A reply/forward draft with no explicit `from` still defaulted to the primary account**, even when the original message/thread it was replying to belonged to a different configured account — so a later send from that draft could use the wrong sender. `create_reply_draft`, `create_forward_draft`, and `create_thread_reply_draft` now default to the account the original message/thread actually belongs to; `from` still wins when it names a different configured account. `create_reply_draft`/`create_forward_draft` also didn't resolve the emailId's own account prefix at all before this — both now do, mirroring every other emailId-taking tool.
+- **`get_emails`' multi-account pagination fix from 2.1.3 was itself truncated by an internal 250-message cap.** The fix fetches each account from offset 0 up to (offset + limit) so nothing is skipped across the merged timeline — but `SimpleIMAPService.getEmails`'s own `limit` parameter silently clamped back down to 250 regardless of what was requested, so `offset:250,limit:25` on a 300-message mailbox came back empty even though those messages exist. Raised to match `offset`'s own existing 10,000 ceiling.
+- **A signature appended to an `isHtml:true` reply/forward with no separate `htmlBody` lost its formatting.** The signature was glued onto the raw HTML source as literal plain text — a literal `\n\n` (which HTML collapses, so lines visually ran together) and an unescaped signature that downstream sanitization then stripped anything tag-looking out of (a signature containing literal `<Sales>` vanished outright instead of rendering as text). `applySignature` now escapes and `<br>`-joins the signature into the HTML source in this case, same as it already did for a separately-supplied `htmlBody`.
+- **A markdown-authored reply/forward's HTML part was missing the original message entirely.** `markdownBody` renders the new text to a real, separate `htmlBody` — but the quoted/forwarded original was only ever merged into the plain-text body (via `buildReplyText`/`buildForwardText`); nothing built the HTML equivalent. An HTML-viewing recipient saw only the new text and signature, with the original missing — confirmed on generated MIME messages. New `buildReplyHtml`/`buildForwardHtml` build the same quoted/forwarded block for the HTML part (using the original's own `html` field when present, escaped plain text otherwise).
+
+### Added
+- `test/markdown-reply-forward-html-quote.test.mjs`, plus a new case in `test/smtp.test.mjs` — regression coverage for the signature and markdown-HTML-quote fixes above.
+
 ## [2.1.3] — 2026-09-18
 
 Five multi-account bugs found and confirmed by an independent external code review of v2.1.2 (commit `95d1d2c`), reproduced with fake mail services, and fixed.
