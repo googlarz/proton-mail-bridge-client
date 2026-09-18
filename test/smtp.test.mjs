@@ -306,6 +306,26 @@ test("buildRawMessage appends PROTONMAIL_SIGNATURE to text and HTML bodies by de
   }
 });
 
+test("buildRawMessage still attaches an html part (with signature) for a plain-text send with no htmlBody", async () => {
+  const previous = process.env.PROTONMAIL_SIGNATURE;
+  process.env.PROTONMAIL_SIGNATURE = "Best,\nOwner";
+  try {
+    const service = new SMTPService(createConfig());
+    const raw = await service.buildRawMessage({
+      to: ["victim@example.com"],
+      subject: "Plain text signature test",
+      body: "hello there",
+      isHtml: false,
+    });
+    const message = raw.toString("utf8");
+    assert.ok(message.includes("multipart/alternative"), "expected a multipart message with a text and html part");
+    assert.ok(message.includes("hello there<br>Best,<br>Owner") || message.includes("hello there<br><br>Best,<br>Owner"));
+  } finally {
+    if (previous === undefined) delete process.env.PROTONMAIL_SIGNATURE;
+    else process.env.PROTONMAIL_SIGNATURE = previous;
+  }
+});
+
 test("buildRawMessage omits the signature when appendSignature is false", async () => {
   const previous = process.env.PROTONMAIL_SIGNATURE;
   process.env.PROTONMAIL_SIGNATURE = "Best,\nOwner";

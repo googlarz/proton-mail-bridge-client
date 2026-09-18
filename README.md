@@ -446,7 +446,13 @@ PROTONMAIL_ALLOW_REMOTE_DRAFT_SYNC='true'
 PROTONMAIL_ALLOWED_ACTIONS='mark_read,mark_unread,star,unstar,archive,trash,restore,move,delete'
 PROTONMAIL_CONFIRM_DESTRUCTIVE='false'
 PROTONMAIL_SEND_DELAY_SECONDS='0'    # >0: send_email queues instead of sending immediately, cancelable via cancel_send. Only fires while this server stays running.
-PROTONMAIL_SIGNATURE=''              # Plain text, appended to send_email/reply_to_email/reply_all_email/forward_email bodies (text + HTML), after your own text and before any quoted/forwarded content. Opt out per-message with appendSignature: false. Never applied to send_draft/schedule_draft — draft content is already finalized.
+PROTONMAIL_SIGNATURE=''              # Plain text, appended to send_email/reply_to_email/reply_all_email/forward_email bodies (text + HTML), after your own text and before any quoted/forwarded content. Every send now goes out multipart (a plain-text send auto-gets an html alternative too), so the signature always gets its HTML treatment, not just the text/plain part. Opt out per-message with appendSignature: false. Never applied to send_draft/schedule_draft — draft content is already finalized.
+#
+# Note: a signature configured inside Proton Mail itself (Settings → Identity and addressing)
+# is only inserted by Proton's own web/app compose UI — it is NEVER applied to mail submitted
+# over SMTP by an external client, including this one. There is no way to make Bridge apply it
+# for you. Set PROTONMAIL_SIGNATURE above instead if you want a signature on messages this
+# server sends.
 
 # Sync
 PROTONMAIL_AUTO_SYNC='true'

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.1] — 2026-09-18
+
+### Fixed
+- **A plain-text send (`isHtml: false`, no `htmlBody`) went out with no HTML part at all**, so `PROTONMAIL_SIGNATURE` only ever reached the text/plain part — any HTML-preferring mail client showed no signature. Found live: user reported signatures getting lost on ordinary replies. `send_email`/`reply_to_email`/`reply_all_email`/`forward_email` now always derive an html alternative from the plain text (escaped, newlines as `<br>`) when the caller doesn't supply one, so every send is multipart/alternative like a normal mail client and the signature gets its HTML treatment on this path too.
+
+### Documented
+- Clarified in the README that a signature configured inside Proton Mail's own settings (Settings → Identity and addressing) is only inserted by Proton's own web/app compose UI — it is never applied to mail submitted over SMTP by this or any external client. `PROTONMAIL_SIGNATURE` is the supported way to get a signature on messages this server sends.
+
 ## [2.1.0] — 2026-09-18
 
 **Multi-account support.** Prompted directly by 2.0.9's `from` field turning out to be insufficient once Bridge's Split Addresses feature is enabled — under Split Addresses each of the account's addresses becomes its own separate Bridge IMAP/SMTP login rather than an alias reachable from one shared connection, so overriding the `From` header on a single connection doesn't actually let you send as another address. This release adds real multi-account support instead: every configured address gets its own fully independent, isolated service stack (own IMAP/SMTP connection, own local SQLite index, own drafts/snoozed/delivery-queue/audit.log), and every tool operates across all of them.

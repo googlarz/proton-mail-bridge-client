@@ -19,6 +19,18 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
+// Plain-text sends (isHtml: false, no explicit htmlBody) used to go out with NO html
+// part at all — a real mail client renders that as "plain text", not "normal text",
+// and applySignature's html branch never fires because there's no htmlBody for it to
+// append the (HTML-escaped, <br>-joined) signature block to. So a plain-text send's
+// signature only ever reached the text/plain part, and any client preferring the html
+// part just... didn't show one. Auto-deriving an html alternative from the same text
+// (escaped, newlines as <br>) means every send is multipart/alternative like a normal
+// mail client, and the signature gets its HTML treatment on this path too.
+function plainTextToHtml(text: string): string {
+  return escapeHtml(text).replace(/\n/g, "<br>");
+}
+
 // PROTONMAIL_SIGNATURE is plain text; appended to both the text body and,
 // for HTML mail, as a <br><br> separated block escaped into the markup
 // (kept simple — not itself HTML, so no separate sanitization concern).
@@ -210,7 +222,11 @@ export class SMTPService {
     }
     const shouldSanitize = (input.sanitizeHtml !== false || !unsafeHtmlAllowed)
       && (input.isHtml || input.htmlBody !== undefined);
-    const htmlContent = input.htmlBody ?? (input.isHtml ? input.body : undefined);
+    // Plain-text case (isHtml false, no htmlBody supplied): derive an html
+    // alternative from the same text instead of sending text-only — see
+    // plainTextToHtml's comment. Already escaped, so it's excluded from
+    // shouldSanitize above (sanitizing it again would be a no-op anyway).
+    const htmlContent = input.htmlBody ?? (input.isHtml ? input.body : (input.body ? plainTextToHtml(input.body) : undefined));
     const sanitizedHtml = shouldSanitize && htmlContent
       ? this.sanitizeHtmlContent(htmlContent)
       : htmlContent;
