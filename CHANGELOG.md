@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.10] — 2026-09-18
+
+### Changed
+- **`PROTONMAIL_TOOL_TIER=core` gained 6 tools it was missing for no real reason** — `list_drafts`, `get_draft`, `update_draft` (the "review/edit a draft before sending" step, even though the endpoints on either side of it, `create_draft` and `send_draft`, were already core), `reply_all_email` and `forward_email` (siblings of the already-core `reply_to_email`, with no reason for the asymmetry), and `list_accounts` (no way to even see configured accounts or their connection status under multi-account setups without switching to the full tier). Core is now 25 tools instead of 19 — still a ~74-tool, ~15k-token reduction versus the full 96-tool tier on every session start, just without cutting off routine draft-review and multi-account workflows in the process.
+
+### Added
+- New cases in `test/core-tool-tier.test.mjs` — regression coverage for the additions above, plus a guard against the core tier quietly creeping back toward the full set over time.
+
 ## [2.1.9] — 2026-09-18
 
 Self-initiated token-efficiency review (requested follow-up testing), found live against the user's real mailbox rather than by an external reviewer.

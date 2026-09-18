@@ -1796,8 +1796,22 @@ export const CORE_TOOL_NAMES = new Set([
   "search_indexed_emails",
   "send_email",
   "reply_to_email",
+  // reply_all_email/forward_email were missing here despite reply_to_email
+  // being core — an asymmetry with no real reason behind it (all three are
+  // equally routine day-to-day sends, confirmed by this session's own
+  // multi-account/daily-scenarios testing).
+  "reply_all_email",
+  "forward_email",
   "create_draft",
   "send_draft",
+  // list_drafts/get_draft/update_draft — found live: these are exactly as
+  // routine as create_draft/send_draft (already core), just for the
+  // review-before-sending step in between. Leaving them full-tier-only meant
+  // "core" covered composing and sending a draft but not looking at or
+  // editing it first.
+  "list_drafts",
+  "get_draft",
+  "update_draft",
   "trash_email",
   "archive_email",
   "mark_email_read",
@@ -1810,6 +1824,10 @@ export const CORE_TOOL_NAMES = new Set([
   "get_folders",
   "sync_emails",
   "get_connection_status",
+  // list_accounts — found live: with multi-account support (v2.1.0+), core
+  // had no way to even see which accounts were configured or check their
+  // connection status without switching to the full tier.
+  "list_accounts",
 ]);
 
 function citationToResourceLink(source: CitationSource): ToolResult["content"][number] {
