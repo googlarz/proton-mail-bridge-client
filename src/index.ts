@@ -30,6 +30,7 @@ import { SnoozeService } from "./services/snooze-service.js";
 import { TemplateService } from "./services/template-service.js";
 import type {
   AccountConfig,
+  ActionableThreadSummary,
   BatchActionEntry,
   BatchActionResult,
   BulkMatchCriteria,
@@ -43,6 +44,7 @@ import type {
   EmailSummary,
   ProtonMailConfig,
   SendEmailInput,
+  ThreadDetail,
 } from "./types/index.js";
 import {
   ensureValidEmails,
@@ -2307,6 +2309,60 @@ function threadSource(thread: {
   };
 }
 
+// Recursively prefixes every id-bearing field on a thread (or array of threads) with
+// the owning account's slug via withAccountPrefix, so ids returned by a tool fanned
+// out across accounts (see accountManager.all() usages below) stay globally unique
+// and resolvable back to the right account by splitAccountPrefix. slug is undefined
+// for the primary account, and withAccountPrefix(undefined, id) === id, so the
+// primary's own threads/messages are returned byte-for-byte unchanged — zero
+// behavior change for single-account setups. Deep-clones via JSON round-trip since
+// every field tagged here is plain, already-JSON-serializable data.
+export function tagAccountIds<T>(slug: string | undefined, value: T): T {
+  if (!slug || value === undefined || value === null) {
+    return value;
+  }
+  const clone = JSON.parse(JSON.stringify(value));
+  const prefix = (id: unknown) => (typeof id === "string" ? withAccountPrefix(slug, id) : id);
+  const tagThread = (thread: unknown) => {
+    if (!thread || typeof thread !== "object") {
+      return;
+    }
+    const t = thread as Record<string, unknown>;
+    if (typeof t.id === "string") t.id = prefix(t.id);
+    if (typeof t.latestEmailId === "string") t.latestEmailId = prefix(t.latestEmailId);
+    if (Array.isArray(t.messageIds)) t.messageIds = t.messageIds.map(prefix);
+    if (Array.isArray(t.documents)) {
+      for (const doc of t.documents) {
+        if (doc && typeof doc === "object" && typeof (doc as Record<string, unknown>).emailId === "string") {
+          (doc as Record<string, unknown>).emailId = prefix((doc as Record<string, unknown>).emailId);
+        }
+      }
+    }
+    if (Array.isArray(t.messages)) {
+      for (const message of t.messages) {
+        if (!message || typeof message !== "object") continue;
+        const m = message as Record<string, unknown>;
+        if (typeof m.id === "string") m.id = prefix(m.id);
+        if (typeof m.primaryEmailId === "string") m.primaryEmailId = prefix(m.primaryEmailId);
+        if (typeof m.canonicalId === "string") m.canonicalId = prefix(m.canonicalId);
+        if (Array.isArray(m.locations)) {
+          for (const loc of m.locations) {
+            if (loc && typeof loc === "object" && typeof (loc as Record<string, unknown>).emailId === "string") {
+              (loc as Record<string, unknown>).emailId = prefix((loc as Record<string, unknown>).emailId);
+            }
+          }
+        }
+      }
+    }
+  };
+  if (Array.isArray(clone)) {
+    clone.forEach(tagThread);
+  } else {
+    tagThread(clone);
+  }
+  return clone as T;
+}
+
 // list_drafts has no filter and returns every draft unconditionally — unlike get_draft/create_draft,
 // which each touch exactly one draft the caller already knows the content of. DraftRecord.attachments
 // carries full base64 `content`, and createTextResult() serializes the whole payload TWICE (once into
@@ -3304,6 +3360,12 @@ export function createServer(
   function resolveAccountForEmailId(emailId: string): { bundle: AccountBundle; rest: string } {
     const { accountSlug, rest } = splitAccountPrefix(emailId, accountManager.additionalSlugs());
     return { bundle: accountManager.bySlugOrPrimary(accountSlug), rest };
+  }
+
+  // undefined for the primary account (so tagAccountIds is a no-op for it, preserving
+  // unprefixed ids exactly as before multi-account support existed).
+  function slugForBundle(bundle: AccountBundle): string | undefined {
+    return bundle.account.slug === primaryBundle.account.slug ? undefined : bundle.account.slug;
   }
 
   if (options.startBackgroundSync) {
@@ -5601,6 +5663,39 @@ export function createServer(
             return undefined;
           };
 
+          // Per-account breakdown, purely additive alongside every existing top-level
+          // field above (which keep describing the PRIMARY account only, unchanged, for
+          // backward compatibility) — same shape list_accounts already returns, plus a
+          // live connection check reusing that same checkConnections pattern, gated on
+          // this tool's own includeSmtp/includeImap flags.
+          const accountsInfo = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const [accountIndexStatus, connection] = await Promise.all([
+                bundle.localIndexService.getStatus(),
+                includeSmtp || includeImap
+                  ? Promise.allSettled([
+                      includeSmtp ? bundle.smtpService.verifyConnection() : Promise.resolve(undefined),
+                      includeImap ? bundle.imapService.ping() : Promise.resolve(undefined),
+                    ]).then(([smtpResult, imapResult]) => ({
+                      smtp: !includeSmtp
+                        ? undefined
+                        : smtpResult.status === "fulfilled" ? { ok: true } : { ok: false, error: describeImapError(smtpResult.reason) },
+                      imap: !includeImap
+                        ? undefined
+                        : imapResult.status === "fulfilled" ? { ok: true } : { ok: false, error: describeImapError(imapResult.reason) },
+                    }))
+                  : Promise.resolve(undefined),
+              ]);
+              return {
+                slug: bundle.account.slug,
+                address: bundle.account.address,
+                isPrimary: bundle.account.slug === primaryBundle.account.slug,
+                index: { storedMessageCount: accountIndexStatus.storedMessageCount, updatedAt: accountIndexStatus.updatedAt, isStale: accountIndexStatus.isStale },
+                connection,
+              };
+            }),
+          );
+
           return createTextResult({
             checkedAt: new Date().toISOString(),
             // See get_connection_status for why this matters: from inside
@@ -5679,6 +5774,7 @@ export function createServer(
                 "vacation responder (Proton account API only, not exposed via Bridge)",
               ],
             },
+            accounts: accountsInfo,
           });
         }
 
@@ -5687,6 +5783,22 @@ export function createServer(
             localIndexService.getStatus(),
             draftStore.listDrafts(true),
           ]);
+          // Per-account breakdown, purely additive alongside every existing top-level
+          // field above (which keep describing the PRIMARY account only, unchanged, for
+          // backward compatibility) — same shape list_accounts already returns, index
+          // status only (no live connection check here — this tool is meant to be fast,
+          // unlike run_doctor).
+          const accountsInfo = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const accountIndexStatus = await bundle.localIndexService.getStatus();
+              return {
+                slug: bundle.account.slug,
+                address: bundle.account.address,
+                isPrimary: bundle.account.slug === primaryBundle.account.slug,
+                index: { storedMessageCount: accountIndexStatus.storedMessageCount, updatedAt: accountIndexStatus.updatedAt, isStale: accountIndexStatus.isStale },
+              };
+            }),
+          );
           return createTextResult({
             checkedAt: new Date().toISOString(),
             runtime: sanitizeRuntimeConfig(config.runtime),
@@ -5702,6 +5814,7 @@ export function createServer(
               remoteSynced: drafts.filter((draft) => draft.remoteSyncState === "synced").length,
               syncFailed: drafts.filter((draft) => draft.remoteSyncState === "sync_failed").length,
             },
+            accounts: accountsInfo,
           });
         }
 
@@ -5871,143 +5984,297 @@ export function createServer(
 
         case "get_actionable_threads":
         {
-          const refresh = await maybeRefreshLocalIndex(imapService, localIndexService, {
-            force: normalizeBoolean(args.syncBefore, false),
-            folder: "INBOX",
-            limitPerFolder: 100,
-          });
-          const result = await localIndexService.getActionableThreads({
-            query: optionalString(args, "query"),
-            label: optionalString(args, "label"),
-            pendingOn:
-              args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any"
-                ? args.pendingOn
-                : undefined,
-            unreadOnly: normalizeBoolean(args.unreadOnly, true),
-            limit: typeof args.limit === "number" ? args.limit : undefined,
-          });
+          const limit = typeof args.limit === "number" ? args.limit : 50;
+          // Fan-out merge: ask every account for its own top-`limit` actionable threads
+          // (each account's own getActionableThreads already sorts by score, then
+          // recency — see local-index-service.ts), tag every thread/message id with its
+          // account's slug, then merge all accounts' lists, re-sort by that exact same
+          // (score, then latestDate) order, and take the top `limit` of the MERGED set —
+          // never per-account. Requesting `limit` (not divided) from each account is what
+          // makes this correct: any thread in the true global top-`limit` must already
+          // rank within its own account's top-`limit`, since a lower rank there would mean
+          // at least `limit` better-or-equal threads exist ahead of it account-wide alone.
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const refresh = await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
+                force: normalizeBoolean(args.syncBefore, false),
+                folder: "INBOX",
+                limitPerFolder: 100,
+              });
+              const result = await bundle.localIndexService.getActionableThreads({
+                query: optionalString(args, "query"),
+                label: optionalString(args, "label"),
+                pendingOn:
+                  args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any"
+                    ? args.pendingOn
+                    : undefined,
+                unreadOnly: normalizeBoolean(args.unreadOnly, true),
+                limit,
+              });
+              return { bundle, refresh, result };
+            }),
+          );
+          const mergedThreads = perAccount
+            .flatMap(({ bundle, result }) => tagAccountIds(slugForBundle(bundle), result.threads))
+            .sort((left: ActionableThreadSummary, right: ActionableThreadSummary) => {
+              if (right.score !== left.score) return right.score - left.score;
+              return new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime();
+            })
+            .slice(0, limit);
+          const totalCount = perAccount.reduce((sum, { result }) => sum + result.total, 0);
+          const messagesCapped = perAccount.some(({ result }) => result.messagesCapped);
+          const latestRefresh = perAccount.map(({ refresh }) => refresh).find((refresh) => refresh);
           return createTextResult(
-            refresh ? { ...result, indexUpdatedAt: refresh.indexStatus.updatedAt } : result,
+            {
+              total: totalCount,
+              hasMore: totalCount > limit,
+              threads: mergedThreads,
+              ...(messagesCapped ? { messagesCapped: true } : {}),
+              ...(latestRefresh ? { indexUpdatedAt: latestRefresh.indexStatus.updatedAt } : {}),
+            },
             false,
-            result.threads.map(threadSource),
+            mergedThreads.map(threadSource),
           );
         }
 
         case "get_inbox_digest":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
-            force: normalizeBoolean(args.syncBefore, false),
-            folder: "INBOX",
-            limitPerFolder: 100,
-          });
-          const result = await localIndexService.getInboxDigest({
-            limit: typeof args.limit === "number" ? args.limit : undefined,
-            minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : undefined,
-          });
-          const topThreads = Array.isArray(result.topThreads) ? result.topThreads : [];
-          const staleThreads = Array.isArray(result.staleAwaitingYou) ? result.staleAwaitingYou : [];
+          const limit = typeof args.limit === "number" ? args.limit : 10;
+          // Fan-out merge: get_inbox_digest already internally aggregates two lists
+          // (topThreads by score/recency, staleAwaitingYou by score/recency) plus a
+          // `counts` summary — mirror that same internal merge style across accounts.
+          // Ask each account for its own top-`limit` of both lists, tag ids with the
+          // account's slug, concatenate each list across accounts, re-sort by the same
+          // (score, then latestDate) order the single-account version uses, and take the
+          // top `limit` of the MERGED list (never per-account — see get_actionable_threads
+          // for why requesting `limit`, not limit/accounts, per account is what makes this
+          // correct). `counts` is summed across accounts field-by-field.
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
+                force: normalizeBoolean(args.syncBefore, false),
+                folder: "INBOX",
+                limitPerFolder: 100,
+              });
+              const result = await bundle.localIndexService.getInboxDigest({
+                limit,
+                minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : undefined,
+              });
+              const slug = slugForBundle(bundle);
+              return {
+                counts: (result.counts ?? {}) as Record<string, number>,
+                indexUpdatedAt: result.indexUpdatedAt as string | undefined,
+                topThreads: tagAccountIds(slug, (result.topThreads ?? []) as ActionableThreadSummary[]),
+                staleAwaitingYou: tagAccountIds(slug, (result.staleAwaitingYou ?? []) as ActionableThreadSummary[]),
+              };
+            }),
+          );
+          const byScoreThenDate = (left: ActionableThreadSummary, right: ActionableThreadSummary) => {
+            if (right.score !== left.score) return right.score - left.score;
+            return new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime();
+          };
+          const topThreads = perAccount.flatMap((entry) => entry.topThreads).sort(byScoreThenDate).slice(0, limit);
+          const staleAwaitingYou = perAccount.flatMap((entry) => entry.staleAwaitingYou).sort(byScoreThenDate).slice(0, limit);
+          const countKeys = new Set(perAccount.flatMap((entry) => Object.keys(entry.counts)));
+          const counts: Record<string, number> = {};
+          for (const key of countKeys) {
+            counts[key] = perAccount.reduce((sum, entry) => sum + (entry.counts[key] ?? 0), 0);
+          }
+          const result = {
+            generatedAt: new Date().toISOString(),
+            indexUpdatedAt: perAccount.map((entry) => entry.indexUpdatedAt).filter(Boolean).sort().reverse()[0],
+            counts,
+            topThreads,
+            staleAwaitingYou,
+          };
           return createTextResult(
             result,
             false,
-            [...topThreads, ...staleThreads]
-              .filter((thread): thread is { id: string; subject: string; latestDate?: string; messageCount: number; normalizedLabels?: string[]; participants?: EmailAddress[] } =>
-                Boolean(thread && typeof thread === "object" && "id" in thread),
-              )
-              .map(threadSource),
+            [...topThreads, ...staleAwaitingYou].map(threadSource),
           );
         }
 
         case "get_follow_up_candidates":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
-            force: normalizeBoolean(args.syncBefore, false),
-            folder: "INBOX",
-            limitPerFolder: 100,
-          });
-          const result = await localIndexService.getFollowUpCandidates({
-            limit: typeof args.limit === "number" ? args.limit : undefined,
-            minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : undefined,
-            pendingOn:
-              args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any"
-                ? args.pendingOn
-                : undefined,
-          });
+          const limit = typeof args.limit === "number" ? args.limit : 25;
+          // Fan-out merge: ask every account for its own top-`limit` follow-up
+          // candidates (each account's own getFollowUpCandidates sorts by ageHours, then
+          // score), tag ids with the account's slug, concatenate, re-sort by that same
+          // (ageHours, then score) order, and take the top `limit` of the MERGED set —
+          // same correctness argument as get_actionable_threads' fan-out.
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
+                force: normalizeBoolean(args.syncBefore, false),
+                folder: "INBOX",
+                limitPerFolder: 100,
+              });
+              const result = await bundle.localIndexService.getFollowUpCandidates({
+                limit,
+                minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : undefined,
+                pendingOn:
+                  args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any"
+                    ? args.pendingOn
+                    : undefined,
+              });
+              return {
+                bundle,
+                indexUpdatedAt: result.indexUpdatedAt as string | undefined,
+                threads: tagAccountIds(slugForBundle(bundle), (result.threads ?? []) as (ActionableThreadSummary & { ageHours?: number })[]),
+                total: (result.total as number) ?? 0,
+              };
+            }),
+          );
+          const threads = perAccount
+            .flatMap((entry) => entry.threads)
+            .sort((left, right) => {
+              if ((right.ageHours ?? 0) !== (left.ageHours ?? 0)) return (right.ageHours ?? 0) - (left.ageHours ?? 0);
+              return right.score - left.score;
+            })
+            .slice(0, limit);
+          const totalCount = perAccount.reduce((sum, entry) => sum + entry.total, 0);
+          const result = {
+            generatedAt: new Date().toISOString(),
+            indexUpdatedAt: perAccount.map((entry) => entry.indexUpdatedAt).filter(Boolean).sort().reverse()[0],
+            minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : 24,
+            pendingOn: args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any" ? args.pendingOn : "you",
+            total: totalCount,
+            hasMore: totalCount > limit,
+            threads,
+          };
           return createTextResult(
             result,
             false,
-            Array.isArray(result.threads)
-              ? result.threads
-                  .filter((thread): thread is { id: string; subject: string; latestDate?: string; messageCount: number; normalizedLabels?: string[]; participants?: EmailAddress[] } =>
-                    Boolean(thread && typeof thread === "object" && "id" in thread),
-                  )
-                  .map(threadSource)
-              : [],
+            threads
+              .filter((thread): thread is ActionableThreadSummary & { ageHours?: number } & { id: string; subject: string; latestDate?: string; messageCount: number; normalizedLabels?: string[]; participants?: EmailAddress[] } =>
+                Boolean(thread && typeof thread === "object" && "id" in thread),
+              )
+              .map(threadSource),
           );
         }
 
         case "find_document_threads":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
-            force: normalizeBoolean(args.syncBefore, false),
-            folder: "INBOX",
-            limitPerFolder: 100,
-          });
-          const result = await localIndexService.findDocumentThreads({
-            category:
-              args.category === "document" ||
-              args.category === "invoice" ||
-              args.category === "contract" ||
-              args.category === "travel" ||
-              args.category === "calendar"
-                ? args.category
-                : undefined,
-            query: optionalString(args, "query"),
-            limit: typeof args.limit === "number" ? args.limit : undefined,
-          });
-          const threads = Array.isArray(result.threads) ? result.threads : [];
+          const limit = typeof args.limit === "number" ? args.limit : 25;
+          // Fan-out merge: ask every account for its own top-`limit` document threads
+          // (each account's own findDocumentThreads sorts by document count, then
+          // recency), tag ids (including each document's own emailId) with the
+          // account's slug, concatenate, re-sort by that same order, and take the top
+          // `limit` of the MERGED set — same correctness argument as
+          // get_actionable_threads' fan-out.
+          const category =
+            args.category === "document" ||
+            args.category === "invoice" ||
+            args.category === "contract" ||
+            args.category === "travel" ||
+            args.category === "calendar"
+              ? args.category
+              : "document";
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
+                force: normalizeBoolean(args.syncBefore, false),
+                folder: "INBOX",
+                limitPerFolder: 100,
+              });
+              const result = await bundle.localIndexService.findDocumentThreads({
+                category,
+                query: optionalString(args, "query"),
+                limit,
+              });
+              type DocumentThread = ThreadDetail & { documents: { emailId: string; subject: string; filename?: string; kind?: string; contentType?: string }[] };
+              return {
+                indexUpdatedAt: result.indexUpdatedAt as string | undefined,
+                threads: tagAccountIds(slugForBundle(bundle), (result.threads ?? []) as DocumentThread[]),
+                total: (result.total as number) ?? 0,
+              };
+            }),
+          );
+          const threads = perAccount
+            .flatMap((entry) => entry.threads)
+            .sort((left, right) => {
+              if (right.documents.length !== left.documents.length) return right.documents.length - left.documents.length;
+              return new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime();
+            })
+            .slice(0, limit);
+          const totalCount = perAccount.reduce((sum, entry) => sum + entry.total, 0);
+          const result = {
+            generatedAt: new Date().toISOString(),
+            indexUpdatedAt: perAccount.map((entry) => entry.indexUpdatedAt).filter(Boolean).sort().reverse()[0],
+            category,
+            total: totalCount,
+            hasMore: totalCount > limit,
+            threads,
+          };
           return createTextResult(
             result,
             false,
-            threads
-              .filter((thread): thread is { id: string; subject: string; latestDate?: string; messageCount: number; normalizedLabels?: string[]; participants?: EmailAddress[] } =>
-                Boolean(thread && typeof thread === "object" && "id" in thread),
-              )
-              .map(threadSource),
+            threads.map(threadSource),
           );
         }
 
         case "prepare_meeting_context":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
-            force: normalizeBoolean(args.syncBefore, false),
-            folder: "INBOX",
-            limitPerFolder: 100,
-          });
-          const result = await localIndexService.getMeetingPrep({
-            person: optionalString(args, "person"),
-            domain: optionalString(args, "domain"),
-            limit: typeof args.limit === "number" ? args.limit : undefined,
-          });
-          const threads = Array.isArray(result.threads) ? result.threads : [];
+          const limit = typeof args.limit === "number" ? args.limit : 10;
+          // Fan-out merge: ask every account for its own top-`limit` meeting-prep
+          // threads (each account's own getMeetingPrep sorts by recency — see
+          // local-index-service.ts), tag ids with the account's slug, concatenate,
+          // re-sort by that same recency order, and take the top `limit` of the
+          // MERGED set — same correctness argument as get_actionable_threads' fan-out.
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
+                force: normalizeBoolean(args.syncBefore, false),
+                folder: "INBOX",
+                limitPerFolder: 100,
+              });
+              const result = await bundle.localIndexService.getMeetingPrep({
+                person: optionalString(args, "person"),
+                domain: optionalString(args, "domain"),
+                limit,
+              });
+              return {
+                indexUpdatedAt: result.indexUpdatedAt as string | undefined,
+                threads: tagAccountIds(slugForBundle(bundle), (result.threads ?? []) as ThreadDetail[]),
+                total: (result.total as number) ?? 0,
+              };
+            }),
+          );
+          const threads = perAccount
+            .flatMap((entry) => entry.threads)
+            .sort((left, right) => new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime())
+            .slice(0, limit);
+          const totalCount = perAccount.reduce((sum, entry) => sum + entry.total, 0);
+          const result = {
+            generatedAt: new Date().toISOString(),
+            indexUpdatedAt: perAccount.map((entry) => entry.indexUpdatedAt).filter(Boolean).sort().reverse()[0],
+            total: totalCount,
+            hasMore: totalCount > limit,
+            threads,
+          };
           return createTextResult(
             result,
             false,
-            threads
-              .filter((thread): thread is { id: string; subject: string; latestDate?: string; messageCount: number; normalizedLabels?: string[]; participants?: EmailAddress[] } =>
-                Boolean(thread && typeof thread === "object" && "id" in thread),
-              )
-              .map(threadSource),
+            threads.map(threadSource),
           );
         }
 
         case "get_thread_brief":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
+          // Fanned out across accounts the same way emailId-targeted tools resolve a
+          // specific account: the threadId's optional "<slug>::" prefix (from a merged
+          // digest/follow-up/etc. result above) picks the owning account's bundle, same
+          // pattern as resolveAccountForEmailId. A plain, unprefixed threadId still
+          // means the primary account, unchanged from single-account behavior.
+          const { bundle, rest } = resolveAccountForEmailId(requireString(args, "threadId"));
+          const slug = slugForBundle(bundle);
+          await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
             folder: "INBOX",
             limitPerFolder: 100,
           });
-          const thread = await localIndexService.getThreadById(requireString(args, "threadId"));
-          const result = buildThreadBrief(thread, config.smtp.username);
+          const rawThread = await bundle.localIndexService.getThreadById(rest);
+          const thread = tagAccountIds(slug, rawThread);
+          const result = buildThreadBrief(thread, bundle.config.smtp.username);
           return createTextResult(
             result,
             false,

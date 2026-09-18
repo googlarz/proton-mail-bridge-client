@@ -118,6 +118,14 @@ export class BackgroundSyncService {
         this.status.lastError = undefined;
         this.status.lastFailureKind = undefined;
         this.status.lastFailureMessage = undefined;
+        // A successful sync attempt (this runNow) previously left a stale
+        // lastIdleError visible forever after an earlier failed IDLE watch —
+        // lastSuccessAt moved forward but lastIdleError never got cleared, since
+        // only the IDLE loop itself (on its own next successful iteration) cleared
+        // it. A caller reading run_doctor/get_runtime_status right after a
+        // successful sync would see a real success alongside a leftover error that
+        // no longer reflects current health.
+        this.status.lastIdleError = undefined;
         this.authFailureCount = 0;
         this.transientFailureCount = 0;
       } catch (error) {
