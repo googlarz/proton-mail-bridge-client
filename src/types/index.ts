@@ -6,6 +6,19 @@ export interface ProtonConnectionConfig {
   password: string;
 }
 
+// One configured Proton address: either the primary account (from
+// PROTONMAIL_USERNAME/PASSWORD, matching ProtonMailConfig.imap/smtp/dataDir exactly)
+// or an additional address on the same Proton account, exposed by Bridge's Split
+// Addresses feature as its own IMAP/SMTP login. `slug` is a stable, filesystem- and
+// email-id-safe identifier derived from `address` — see slugifyAccountAddress().
+export interface AccountConfig {
+  address: string;
+  slug: string;
+  imap: ProtonConnectionConfig;
+  smtp: ProtonConnectionConfig;
+  dataDir: string;
+}
+
 export interface ProtonMailConfig {
   smtp: ProtonConnectionConfig;
   imap: ProtonConnectionConfig;
@@ -16,6 +29,10 @@ export interface ProtonMailConfig {
   autoSync: boolean;
   syncInterval: number;
   runtime: ProtonRuntimeConfig;
+  // accounts[0] is always the primary account, identical to the top-level
+  // imap/smtp/dataDir above — every account (primary and additional) is reachable
+  // uniformly through this list. Additional accounts come from PROTONMAIL_ACCOUNTS_JSON.
+  accounts: AccountConfig[];
 }
 
 export interface EmailAddress {

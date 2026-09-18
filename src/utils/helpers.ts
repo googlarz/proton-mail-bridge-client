@@ -11,6 +11,45 @@ import type {
 const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
 const EMAIL_ID_SEPARATOR = "::";
 
+// Multi-account support (2.1.0): rather than touching parseEmailId/createEmailId's
+// already-delicate, three-generations-deep checksum format, an additional account's
+// ids carry a plain slug prefix using the SAME "::" separator, stripped from the LEFT
+// before handing the remainder to the unchanged, unmodified parseEmailId. The primary
+// account's ids are emitted with NO prefix at all, so every existing single-account id
+// (in drafts.json, snoozed.json, delivery-queue.json, or just a model's own memory of an
+// id from an earlier call) keeps resolving exactly as it always did — this is additive,
+// not a new generation of the format.
+//
+// Collision note: this only misparses if a real IMAP folder's encodeURIComponent output
+// happens to exactly equal a configured account's slug followed by "::" — astronomically
+// unlikely, and even then it fails safe: splitAccountPrefix would misidentify the account,
+// the wrong bundle's mailbox would reject the checksum/uid as not found, and the caller
+// gets a clear "invalid email id" error rather than silently touching the wrong message.
+export function slugifyAccountAddress(address: string): string {
+  return address
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function withAccountPrefix(accountSlug: string | undefined, emailId: string): string {
+  return accountSlug ? `${accountSlug}${EMAIL_ID_SEPARATOR}${emailId}` : emailId;
+}
+
+export function splitAccountPrefix(
+  emailId: string,
+  knownSlugs: string[],
+): { accountSlug?: string; rest: string } {
+  for (const slug of knownSlugs) {
+    const prefix = `${slug}${EMAIL_ID_SEPARATOR}`;
+    if (emailId.startsWith(prefix)) {
+      return { accountSlug: slug, rest: emailId.slice(prefix.length) };
+    }
+  }
+  return { rest: emailId };
+}
+
 export function parseEmails(value?: string): string[] {
   if (!value) {
     return [];

@@ -29,6 +29,7 @@ import { applySignature, SMTPService } from "./services/smtp-service.js";
 import { SnoozeService } from "./services/snooze-service.js";
 import { TemplateService } from "./services/template-service.js";
 import type {
+  AccountConfig,
   BatchActionEntry,
   BatchActionResult,
   BulkMatchCriteria,
@@ -56,8 +57,12 @@ import {
   parseEmails,
   projectFields,
   renderMarkdown,
+  slugifyAccountAddress,
+  splitAccountPrefix,
   stringifyForJson,
+  withAccountPrefix,
 } from "./utils/helpers.js";
+import { AccountManager, type AccountBundle } from "./services/account-manager.js";
 import { logger } from "./utils/logger.js";
 import {
   ensureDestructiveConfirmed,
@@ -1308,6 +1313,17 @@ const TOOLS = [
     description: "Return the server's current runtime state: policy flags (read-only, allow-send, allowed actions), background sync schedule and last-run time, IMAP IDLE watch state, draft store statistics, and local index freshness. Use to understand how the server is configured and whether sync is actively running. Prefer get_connection_status for protocol reachability only.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_accounts",
+    description: "List every configured Proton address (the primary Bridge login plus any additional addresses from PROTONMAIL_ACCOUNTS_JSON), each with its own IMAP/SMTP connection status and local index freshness. Use to see which accounts this server is managing, and each account's `slug` — prefix an emailId/draftId with `<slug>::` to target that account explicitly in any other tool (a plain, unprefixed id always means the primary account). Set checkConnections:true to verify each account's IMAP/SMTP reachability live (slower).",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        checkConnections: { type: "boolean", description: "Verify IMAP/SMTP connectivity for every account (adds a real connection attempt per account).", default: false },
+      },
+    },
   },
   {
     name: "run_doctor",
@@ -3072,6 +3088,91 @@ function isMissingTargetFolderError(error: unknown): boolean {
   return /TRYCREATE|NONEXISTENT/i.test(message);
 }
 
+// PROTONMAIL_ACCOUNTS_JSON: a JSON array of additional Proton addresses on the same
+// account, exposed by Bridge's Split Addresses feature as their own IMAP/SMTP logins.
+// Each entry only needs `address` and `password` — Bridge issues each split address its
+// own Bridge-generated password but keeps the SAME host/ports as the primary connection,
+// and the IMAP/SMTP username for a split address is the address itself. Any of
+// imapHost/imapPort/imapSecure/imapUsername/smtpHost/smtpPort/smtpSecure/smtpUsername may
+// still be overridden explicitly for setups that don't follow that default.
+// Example: [{"address":"me@pm.me","password":"..."},{"address":"me@example.com","password":"...","imapUsername":"me@example.com"}]
+function parseAdditionalAccountsEnv(primary: AccountConfig): AccountConfig[] {
+  const raw = process.env.PROTONMAIL_ACCOUNTS_JSON?.trim();
+  if (!raw) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `PROTONMAIL_ACCOUNTS_JSON is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("PROTONMAIL_ACCOUNTS_JSON must be a JSON array.");
+  }
+
+  const seenAddresses = new Set([primary.address.toLowerCase()]);
+  const seenSlugs = new Set([primary.slug]);
+
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(`PROTONMAIL_ACCOUNTS_JSON[${index}] must be an object.`);
+    }
+    const value = entry as Record<string, unknown>;
+    const address = typeof value.address === "string" ? value.address.trim() : "";
+    const password = typeof value.password === "string" ? value.password : "";
+    if (!address || !isValidEmail(address)) {
+      throw new Error(`PROTONMAIL_ACCOUNTS_JSON[${index}].address must be a valid email address.`);
+    }
+    if (!password) {
+      throw new Error(`PROTONMAIL_ACCOUNTS_JSON[${index}].password is required.`);
+    }
+    const lowerAddress = address.toLowerCase();
+    if (seenAddresses.has(lowerAddress)) {
+      throw new Error(`PROTONMAIL_ACCOUNTS_JSON[${index}]: duplicate address "${address}".`);
+    }
+    seenAddresses.add(lowerAddress);
+
+    const slug = slugifyAccountAddress(address);
+    if (!slug || seenSlugs.has(slug)) {
+      throw new Error(
+        `PROTONMAIL_ACCOUNTS_JSON[${index}]: address "${address}" produces an empty or duplicate account slug ("${slug}").`,
+      );
+    }
+    seenSlugs.add(slug);
+
+    const stringField = (key: string, fallback: string) =>
+      typeof value[key] === "string" && (value[key] as string).trim() ? (value[key] as string).trim() : fallback;
+    const numberField = (key: string, fallback: number) =>
+      typeof value[key] === "number" && Number.isInteger(value[key]) ? (value[key] as number) : fallback;
+    const boolField = (key: string, fallback: boolean) =>
+      typeof value[key] === "boolean" ? (value[key] as boolean) : fallback;
+
+    return {
+      address,
+      slug,
+      dataDir: join(primary.dataDir, "accounts", slug),
+      imap: {
+        host: stringField("imapHost", primary.imap.host),
+        port: numberField("imapPort", primary.imap.port),
+        secure: boolField("imapSecure", primary.imap.secure),
+        username: stringField("imapUsername", address),
+        password: stringField("imapPassword", password),
+      },
+      smtp: {
+        host: stringField("smtpHost", primary.smtp.host),
+        port: numberField("smtpPort", primary.smtp.port),
+        secure: boolField("smtpSecure", primary.smtp.secure),
+        username: stringField("smtpUsername", address),
+        password: stringField("smtpPassword", password),
+      },
+    };
+  });
+}
+
 export function buildConfigFromEnv(): ProtonMailConfig {
   const username = readEnvValue("PROTONMAIL_USERNAME");
   const password = readEnvValue("PROTONMAIL_PASSWORD");
@@ -3126,27 +3227,27 @@ export function buildConfigFromEnv(): ProtonMailConfig {
     logger.warn("TLS verification is disabled for local Bridge IMAP connections.", "MCPServer", { host: imapHost });
   }
 
+  const primarySmtp = { host: smtpHost, port: smtpPort, secure: smtpSecure, username, password };
+  const primaryImap = { host: imapHost, port: imapPort, secure: imapSecure, username: imapUsername, password: imapPassword };
+  const primaryAccount: AccountConfig = {
+    address: username,
+    slug: slugifyAccountAddress(username),
+    imap: primaryImap,
+    smtp: primarySmtp,
+    dataDir,
+  };
+  const accounts: AccountConfig[] = [primaryAccount, ...parseAdditionalAccountsEnv(primaryAccount)];
+
   return {
-    smtp: {
-      host: smtpHost,
-      port: smtpPort,
-      secure: smtpSecure,
-      username,
-      password,
-    },
-    imap: {
-      host: imapHost,
-      port: imapPort,
-      secure: imapSecure,
-      username: imapUsername,
-      password: imapPassword,
-    },
+    smtp: primarySmtp,
+    imap: primaryImap,
     dataDir,
     debug,
     cacheEnabled: true,
     analyticsEnabled: true,
     autoSync,
     syncInterval,
+    accounts,
     runtime: {
       readOnly,
       allowSend,
@@ -3178,40 +3279,55 @@ export function createServer(
     startBackgroundSync?: boolean;
   } = {},
 ) {
-  const smtpService = new SMTPService(config);
-  const imapService = new SimpleIMAPService(config, logger, config.runtime.opDelayMs);
+  // AccountManager builds one full, isolated service stack per configured account
+  // (config.accounts — primary plus any PROTONMAIL_ACCOUNTS_JSON entries). The bare
+  // names below stay bound to the PRIMARY account's stack so every existing
+  // single-account tool handler keeps working completely unchanged; only handlers that
+  // need to act on a specific (possibly non-primary) account resolve through
+  // accountManager instead — see resolveAccountForEmailId/resolveAccountForDraft below.
+  const accountManager = new AccountManager(config, logger);
+  const primaryBundle = accountManager.primary();
+  const smtpService = primaryBundle.smtpService;
+  const imapService = primaryBundle.imapService;
   const analyticsService = new AnalyticsService();
-  const auditService = new AuditService(config);
-  const localIndexService = new LocalIndexService(config, logger);
-  const draftStore = new DraftStoreService(config, logger);
-  const backgroundSyncService = new BackgroundSyncService(
-    config,
-    imapService,
-    localIndexService,
-    logger,
-  );
-  const deliveryQueueService = new DeliveryQueueService(config, smtpService, logger);
-  // Lets a fired scheduled_send close the loop back to its source draft —
-  // see DeliveryQueueService.checkDue()'s draftStore usage.
-  deliveryQueueService.setDraftStore(draftStore);
-  const snoozeService = new SnoozeService(config, imapService, logger);
-  const templateService = new TemplateService(config, logger);
+  const auditService = primaryBundle.auditService;
+  const localIndexService = primaryBundle.localIndexService;
+  const draftStore = primaryBundle.draftStore;
+  const backgroundSyncService = primaryBundle.backgroundSyncService;
+  const deliveryQueueService = primaryBundle.deliveryQueueService;
+  const snoozeService = primaryBundle.snoozeService;
+  const templateService = primaryBundle.templateService;
+
+  // Resolves an emailId's optional account-slug prefix (see splitAccountPrefix) to its
+  // owning AccountBundle, defaulting to the primary account for a plain, unprefixed id —
+  // which covers every id that existed before multi-account support, unchanged.
+  function resolveAccountForEmailId(emailId: string): { bundle: AccountBundle; rest: string } {
+    const { accountSlug, rest } = splitAccountPrefix(emailId, accountManager.additionalSlugs());
+    return { bundle: accountManager.bySlugOrPrimary(accountSlug), rest };
+  }
 
   if (options.startBackgroundSync) {
-    backgroundSyncService.start();
-    // start()'s first real work is awaiting recoverInterruptedSends(), which
-    // can throw a lock-acquisition-timeout error (see file-lock.ts). Bare
-    // `void` here would turn that into an unhandled rejection, and the
-    // process-wide unhandledRejection handler below calls process.exit(1) —
-    // crashing the whole server before it serves a single request over
-    // nothing worse than startup lock contention. Log and degrade instead:
-    // the delivery queue just won't be running yet.
-    deliveryQueueService.start().catch((error) => {
-      logger.error("deliveryQueueService.start() failed", "MCPServer", error);
-    });
-    // snoozeService.start() is synchronous (returns void, not a Promise) —
-    // nothing to catch here.
-    snoozeService.start();
+    // Every configured account gets its own independent sync/delivery-queue/snooze
+    // loop — additional accounts are not just readable, they stay live-synced exactly
+    // like the primary. The primary's own start() call below is intentionally
+    // redundant with this loop (primaryBundle is included in accountManager.all()) so
+    // this doesn't silently change primary-only behavior if that ever stops holding.
+    for (const bundle of accountManager.all()) {
+      bundle.backgroundSyncService.start();
+      // start()'s first real work is awaiting recoverInterruptedSends(), which
+      // can throw a lock-acquisition-timeout error (see file-lock.ts). Bare
+      // `void` here would turn that into an unhandled rejection, and the
+      // process-wide unhandledRejection handler below calls process.exit(1) —
+      // crashing the whole server before it serves a single request over
+      // nothing worse than startup lock contention. Log and degrade instead:
+      // the delivery queue just won't be running yet.
+      bundle.deliveryQueueService.start().catch((error) => {
+        logger.error("deliveryQueueService.start() failed", "MCPServer", { account: bundle.account.slug, error });
+      });
+      // snoozeService.start() is synchronous (returns void, not a Promise) —
+      // nothing to catch here.
+      bundle.snoozeService.start();
+    }
   }
 
   const server = new Server(
@@ -5586,6 +5702,41 @@ export function createServer(
               remoteSynced: drafts.filter((draft) => draft.remoteSyncState === "synced").length,
               syncFailed: drafts.filter((draft) => draft.remoteSyncState === "sync_failed").length,
             },
+          });
+        }
+
+        case "list_accounts": {
+          const checkConnections = normalizeBoolean(args.checkConnections, false);
+          const accountsInfo = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const [indexStatus, connection] = await Promise.all([
+                bundle.localIndexService.getStatus(),
+                checkConnections
+                  ? Promise.allSettled([bundle.smtpService.verifyConnection(), bundle.imapService.ping()]).then(
+                      ([smtpResult, imapResult]) => ({
+                        smtp: smtpResult.status === "fulfilled" ? { ok: true } : { ok: false, error: describeImapError(smtpResult.reason) },
+                        imap: imapResult.status === "fulfilled" ? { ok: true } : { ok: false, error: describeImapError(imapResult.reason) },
+                      }),
+                    )
+                  : Promise.resolve(undefined),
+              ]);
+              return {
+                slug: bundle.account.slug,
+                address: bundle.account.address,
+                isPrimary: bundle.account.slug === accountManager.primary().account.slug,
+                imapUsername: bundle.account.imap.username,
+                smtpUsername: bundle.account.smtp.username,
+                dataDir: bundle.account.dataDir,
+                index: { storedMessageCount: indexStatus.storedMessageCount, updatedAt: indexStatus.updatedAt, isStale: indexStatus.isStale },
+                connection,
+              };
+            }),
+          );
+          return createTextResult({
+            checkedAt: new Date().toISOString(),
+            total: accountsInfo.length,
+            accounts: accountsInfo,
+            note: "Prefix an emailId/draftId with '<slug>::' to target a non-primary account in any other tool; a plain id always means the primary account.",
           });
         }
 
