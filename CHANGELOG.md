@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.11] — 2026-09-18
+
+Continued the token-efficiency pass (per-call cost during actual day-to-day use, not just session-start tool-schema cost — see 2.1.9/2.1.10).
+
+### Fixed
+- **Every attachment on every search/list result carried all 12 `EmailAttachmentSummary` fields** (id, filename, contentType, size, disposition, part, cid, checksum, isInline, kind, isCalendarInvite, isSignature), on every call, regardless of whether the caller used the extra 7. Now trimmed to the 5 actually needed to see and act on a result — `id` (required for `get_attachment_content`/`save_attachment`/`list_attachments`), `filename`/`contentType`/`size` (triage), `disposition` (inline vs attachment). Full detail remains available via `list_attachments(emailId)` or `get_email_by_id` (unaffected — the "look at this one message" calls). Applies to `get_emails`, `search_emails`, `search_indexed_emails`, `list_remote_drafts` (previously didn't even route through the shared trimming function), and `get_thread_by_id`'s per-message attachments.
+- **`attachmentText` — up to 8,000 characters of extracted text per text/html, text/calendar, or plain-text attachment** (populated by default during indexing so keyword search can match document content against it; PDFs and other binary formats are never extracted here, so this specifically affects calendar invites and .txt/.html attachments) — was echoed in full on every search/list result that had one. Dropped entirely from list-style results (the key is now absent, not merely empty); `get_email_by_id` is unaffected and still returns it in full.
+
+### Investigated and left unchanged
+- `seq` (raw IMAP sequence number — an internal protocol detail with no use to an MCP caller; low value either way) and `flags` (the raw IMAP flags array like `\Seen` — partially redundant with `isRead`/`isStarred`, but can carry information those two booleans don't, like `\Answered` or custom flags) were considered and left alone: `seq` is negligible savings, and trimming `flags` risks silently losing real information for a modest gain.
+
+### Added
+- New cases in `test/attachment-metadata-trimming.test.mjs` — regression coverage for the `attachmentText` fix above.
+
 ## [2.1.10] — 2026-09-18
 
 ### Changed

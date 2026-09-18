@@ -61,6 +61,7 @@ import {
   parseEmailId,
   parseEmails,
   projectFields,
+  trimAttachmentsForListing,
   renderMarkdown,
   slugifyAccountAddress,
   splitAccountPrefix,
@@ -598,7 +599,7 @@ const TOOLS = [
   },
   {
     name: "get_emails",
-    description: "Fetch emails from a mailbox folder via live IMAP, defaults to newest first; set sortByUid to asc for oldest first. Use to browse or paginate recent messages in a specific folder. Prefer search_emails to filter by sender, subject, or date. Prefer search_indexed_emails for fast repeated queries when the local SQLite index is populated and Bridge availability is uncertain.",
+    description: "Fetch emails from a mailbox folder via live IMAP, defaults to newest first; set sortByUid to asc for oldest first. Use to browse or paginate recent messages in a specific folder. Prefer search_emails to filter by sender, subject, or date. Prefer search_indexed_emails for fast repeated queries when the local SQLite index is populated and Bridge availability is uncertain. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -647,7 +648,7 @@ const TOOLS = [
   },
   {
     name: "search_emails",
-    description: "Search emails via live IMAP filters with optional local post-processing for attachments and labels. Use when you need real-time results or must find messages received after the last sync. Prefer search_indexed_emails when the local index is current — it is significantly faster and works even when Bridge IMAP is unavailable.",
+    description: "Search emails via live IMAP filters with optional local post-processing for attachments and labels. Use when you need real-time results or must find messages received after the last sync. Prefer search_indexed_emails when the local index is current — it is significantly faster and works even when Bridge IMAP is unavailable. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -1403,7 +1404,7 @@ const TOOLS = [
   {
     name: "search_indexed_emails",
     description:
-      "Search the local SQLite mailbox index without making any IMAP connection. Supports free-text and field shortcuts inline: from:alice@example.com, to:bob, subject:invoice, label:Archive, domain:acme.com. Use for fast, offline-capable searches when the index is populated. Prefer search_emails when you need live IMAP results or when the index is stale or empty. Prefer this over search_emails when the index is current. Use search_emails if messages were received after the last sync.",
+      "Search the local SQLite mailbox index without making any IMAP connection. Supports free-text and field shortcuts inline: from:alice@example.com, to:bob, subject:invoice, label:Archive, domain:acme.com. Use for fast, offline-capable searches when the index is populated. Prefer search_emails when you need live IMAP results or when the index is stale or empty. Prefer this over search_emails when the index is current. Use search_emails if messages were received after the last sync. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -4919,7 +4920,10 @@ export function createServer(
             normalizeLimit(args.limit, 50),
             normalizeLimit(args.offset, 0, 0, 10_000),
           );
-          return createTextResult(result, false, result.emails.map(emailSource));
+          // projectFields (called with no fields arg) still trims each email's
+          // attachments to the essentials — same fix as every other list-style
+          // tool, this one just didn't route through projectFields at all before.
+          return createTextResult({ ...result, emails: projectFields(result.emails) }, false, result.emails.map(emailSource));
         }
 
         case "get_draft": {
@@ -7611,7 +7615,7 @@ export function createServer(
                 messageIds: rawThread.messageIds.map((id) => withAccountPrefix(threadAccountSlug, id)),
               }
             : rawThread;
-          const result = threadFolders && threadFolders.length > 0
+          const filteredThread = threadFolders && threadFolders.length > 0
             ? {
                 ...thread,
                 messages: thread.messages.filter((message) => threadFolders.includes(message.folder)),
@@ -7619,6 +7623,11 @@ export function createServer(
                 unreadCount: thread.messages.filter((message) => threadFolders.includes(message.folder) && !message.isRead).length,
               }
             : thread;
+          // Same per-call attachment trimming as every search/list tool — see
+          // projectFields' comment. get_thread_by_id's messages carry full
+          // MailboxMessage/EmailSummary objects (unlike get_threads' lean
+          // ThreadSummary list, which has no per-message attachments at all).
+          const result = { ...filteredThread, messages: filteredThread.messages.map(trimAttachmentsForListing) };
           return createTextResult(
             result,
             false,

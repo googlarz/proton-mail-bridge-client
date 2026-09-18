@@ -929,16 +929,69 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string)
   ]).finally(() => clearTimeout(timer));
 }
 
+// Trims each attachment in a search/list result down to the fields a caller
+// actually needs just to SEE the result and act on it: id (required for
+// get_attachment_content/save_attachment/list_attachments), filename/
+// contentType/size (triage), disposition (inline vs attachment). part/cid/
+// checksum/kind/isCalendarInvite/isSignature are internal-matching/dedup
+// fields — still available in full via list_attachments(emailId) or
+// get_email_by_id (the dedicated "look at this one message" calls, left
+// untouched) — never needed just to browse search/list results. Found live:
+// every attachment on every search/list result carried all 12 fields
+// regardless of whether the caller ever used the extra 6, on every call, not
+// just once per session (unlike the tool-schema/tier question, this is a
+// per-call cost that scales with how much searching/listing actually happens).
+//
+// Also drops attachmentText — up to 8,000 chars of extracted text PER
+// text/html, text/calendar, or plain-text attachment (populated by default
+// during indexing so keyword search can match document content; PDFs and
+// other binary formats are never extracted here, so this only fires for
+// calendar invites / .txt / .html attachments specifically). It exists to
+// make search MATCHING work, not to be re-echoed in every result that has
+// one — get_email_by_id (formatEmailDetailOutput, which doesn't go through
+// this function) still returns it in full for the "let me read this one
+// message's attachment text" case.
+export function trimAttachmentsForListing<T>(item: T): T {
+  const record = item as unknown as { attachments?: unknown; attachmentText?: unknown };
+  const hasAttachments = Array.isArray(record.attachments) && record.attachments.length > 0;
+  const hasAttachmentText = record.attachmentText !== undefined;
+  if (!hasAttachments && !hasAttachmentText) {
+    return item;
+  }
+  // Destructure attachmentText out rather than setting it to undefined — the
+  // key must actually be ABSENT, not present-with-an-undefined-value, so it
+  // drops the same way regardless of whether a given serialization path
+  // treats an undefined property as "omit" or "keep as null".
+  const { attachmentText: _attachmentText, ...rest } = item as unknown as Record<string, unknown>;
+  return {
+    ...(rest as T),
+    ...(hasAttachments
+      ? {
+          attachments: (record.attachments as unknown[]).map((attachment) => {
+            const a = attachment as Record<string, unknown>;
+            return {
+              id: a.id,
+              filename: a.filename,
+              contentType: a.contentType,
+              size: a.size,
+              disposition: a.disposition,
+            };
+          }),
+        }
+      : {}),
+  } as T;
+}
+
 export function projectFields<T extends { id: string }>(
   items: T[],
   fields?: string[],
 ): T[] | Array<Partial<T>> {
   if (!fields || fields.length === 0) {
-    return items;
+    return items.map(trimAttachmentsForListing);
   }
 
   const keep = new Set(["id", ...fields]);
-  return items.map((item) =>
+  return items.map(trimAttachmentsForListing).map((item) =>
     Object.fromEntries(
       Object.entries(item).filter(([key]) => keep.has(key)),
     ) as Partial<T>,
