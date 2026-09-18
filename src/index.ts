@@ -41,8 +41,11 @@ import type {
   EmailAttachmentInput,
   EmailDetail,
   EmailSummary,
+  ContactStats,
+  MailboxLabel,
   ProtonMailConfig,
   SendEmailInput,
+  VolumeTrendPoint,
 } from "./types/index.js";
 import {
   ensureValidEmails,
@@ -2646,6 +2649,118 @@ async function getAnalyticsSampleFromIndex(
   return result.emails;
 }
 
+// --- Multi-account fan-out helpers (2.2.0) -------------------------------
+//
+// Every helper below is only ever invoked from the ">1 configured account"
+// branch of its call site; the "exactly 1 account" branch always keeps
+// running the original single-bundle code path unchanged, so a
+// single-account setup produces byte-for-byte the same response it always
+// did. These helpers exist purely to keep each case-block's merge logic
+// short and readable.
+
+function accountSlugForTag(bundle: AccountBundle, primarySlug: string): string | undefined {
+  return bundle.account.slug === primarySlug ? undefined : bundle.account.slug;
+}
+
+// Re-sorts a merged, cross-account list of date-bearing items newest-first.
+// Each account's own list already arrives pre-sorted (by relevance, then
+// recency) — this is a reasonable global approximation once several
+// independently-sorted lists are interleaved, not a re-derivation of each
+// service's original relevance score.
+function sortByDateDesc<T>(items: T[], dateOf: (item: T) => string | undefined): T[] {
+  return [...items].sort((left, right) => {
+    const leftTime = new Date(dateOf(left) || 0).getTime();
+    const rightTime = new Date(dateOf(right) || 0).getTime();
+    return rightTime - leftTime;
+  });
+}
+
+function mergeMailboxLabels(perAccountLabels: MailboxLabel[][]): MailboxLabel[] {
+  const merged = new Map<string, MailboxLabel>();
+  for (const labels of perAccountLabels) {
+    for (const label of labels) {
+      const key = `${label.type}:${label.name}`;
+      const existing = merged.get(key);
+      if (existing) {
+        existing.messageCount += label.messageCount;
+        existing.unreadCount += label.unreadCount;
+        existing.threadCount += label.threadCount;
+      } else {
+        merged.set(key, { ...label });
+      }
+    }
+  }
+  return [...merged.values()];
+}
+
+function mergeContactStats(perAccountContacts: ContactStats[][], limit: number): ContactStats[] {
+  const merged = new Map<string, ContactStats>();
+  for (const contacts of perAccountContacts) {
+    for (const contact of contacts) {
+      const existing = merged.get(contact.address);
+      if (existing) {
+        existing.incoming += contact.incoming;
+        existing.outgoing += contact.outgoing;
+        existing.totalMessages += contact.totalMessages;
+        if (
+          contact.lastContactAt &&
+          (!existing.lastContactAt || new Date(contact.lastContactAt).getTime() > new Date(existing.lastContactAt).getTime())
+        ) {
+          existing.lastContactAt = contact.lastContactAt;
+        }
+      } else {
+        merged.set(contact.address, { ...contact });
+      }
+    }
+  }
+  return [...merged.values()]
+    .sort((left, right) => {
+      if (right.totalMessages !== left.totalMessages) {
+        return right.totalMessages - left.totalMessages;
+      }
+      return (right.lastContactAt ?? "").localeCompare(left.lastContactAt ?? "");
+    })
+    .slice(0, limit);
+}
+
+function mergeCountedEntries<T extends { count: number }>(
+  perAccountEntries: T[][],
+  keyOf: (entry: T) => string,
+  topN: number,
+): T[] {
+  const merged = new Map<string, T>();
+  for (const entries of perAccountEntries) {
+    for (const entry of entries) {
+      const key = keyOf(entry);
+      const existing = merged.get(key);
+      if (existing) {
+        existing.count += entry.count;
+      } else {
+        merged.set(key, { ...entry });
+      }
+    }
+  }
+  return [...merged.values()].sort((left, right) => right.count - left.count).slice(0, topN);
+}
+
+function mergeVolumeTrends(perAccountTrends: VolumeTrendPoint[][]): VolumeTrendPoint[] {
+  const merged = new Map<string, VolumeTrendPoint>();
+  for (const trends of perAccountTrends) {
+    for (const point of trends) {
+      const existing = merged.get(point.date);
+      if (existing) {
+        existing.count += point.count;
+        existing.unreadCount += point.unreadCount;
+        existing.starredCount += point.starredCount;
+        existing.attachmentCount += point.attachmentCount;
+      } else {
+        merged.set(point.date, { ...point });
+      }
+    }
+  }
+  return [...merged.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
 async function runEmailAction(
   imapService: SimpleIMAPService,
   emailId: string,
@@ -4748,23 +4863,56 @@ export function createServer(
 
         case "get_emails": {
           const effectiveLimit = normalizeLimit(args.limit, 50);
-          const result = await imapService.getEmails({
+          const getEmailsInput = {
             folder: optionalString(args, "folder"),
             limit: effectiveLimit,
             offset: typeof args.offset === "number" ? args.offset : undefined,
             beforeUid: typeof args?.beforeUid === "number" ? args.beforeUid : undefined,
-            sortByUid: args?.sortByUid === "asc" || args?.sortByUid === "desc" ? args.sortByUid : undefined,
+            sortByUid: (args?.sortByUid === "asc" || args?.sortByUid === "desc" ? args.sortByUid : undefined) as "asc" | "desc" | undefined,
             includeSnippet: normalizeBoolean(args.includeSnippet, false),
-          });
+          };
+          if (accountManager.all().length === 1) {
+            const result = await imapService.getEmails(getEmailsInput);
+            return createTextResult(
+              {
+                ...result,
+                emails: projectFields(result.emails, parseFieldsArg(args.fields)),
+                returned: result.emails.length,
+                hasMore: result.emails.length === effectiveLimit,
+              },
+              false,
+              result.emails.map(emailSource),
+            );
+          }
+          // Merge strategy: live-fetch each account's own folder page (LIVE IMAP,
+          // one call per account), tag ids with the account slug, concatenate,
+          // re-sort newest-first, then re-apply the original limit across the
+          // merged set (not per account) and sum totals across accounts.
+          const primarySlug = accountManager.primary().account.slug;
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const result = await bundle.imapService.getEmails(getEmailsInput);
+              return { bundle, result };
+            }),
+          );
+          const taggedEmails = perAccount.flatMap(({ bundle, result }) =>
+            result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlug), email.id) })),
+          );
+          const merged = sortByDateDesc(taggedEmails, (email) => email.internalDate || email.date).slice(0, effectiveLimit);
+          const total = perAccount.reduce((sum, { result }) => sum + result.total, 0);
           return createTextResult(
             {
-              ...result,
-              emails: projectFields(result.emails, parseFieldsArg(args.fields)),
-              returned: result.emails.length,
-              hasMore: result.emails.length === effectiveLimit,
+              folder: getEmailsInput.folder?.trim() || "INBOX",
+              total,
+              limit: effectiveLimit,
+              offset: getEmailsInput.offset ?? 0,
+              emails: projectFields(merged, parseFieldsArg(args.fields)),
+              returned: merged.length,
+              hasMore: merged.length === effectiveLimit,
+              byAccount: perAccount.map(({ bundle, result }) => ({ slug: bundle.account.slug, total: result.total })),
             },
             false,
-            result.emails.map(emailSource),
+            merged.map(emailSource),
           );
         }
 
@@ -4913,7 +5061,7 @@ export function createServer(
         }
 
         case "count_messages": {
-          const result = await imapService.countMessages({
+          const countInput = {
             folder: optionalString(args, "folder"),
             query: optionalString(args, "query"),
             from: optionalString(args, "from"),
@@ -4930,16 +5078,49 @@ export function createServer(
             dateTo: optionalString(args, "dateTo"),
             sizeLarger: typeof args.sizeLarger === "number" ? args.sizeLarger : undefined,
             sizeSmaller: typeof args.sizeSmaller === "number" ? args.sizeSmaller : undefined,
+          };
+          if (accountManager.all().length === 1) {
+            const result = await imapService.countMessages(countInput);
+            return createTextResult(result);
+          }
+          // Merge strategy: count in every account's mailbox and sum — folder is
+          // reported from the request (all accounts are counted against the same
+          // folder name), with a per-account breakdown alongside the total.
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => ({
+              slug: bundle.account.slug,
+              ...(await bundle.imapService.countMessages(countInput)),
+            })),
+          );
+          return createTextResult({
+            folder: countInput.folder ?? "INBOX",
+            count: perAccount.reduce((sum, entry) => sum + entry.count, 0),
+            byAccount: perAccount,
           });
-          return createTextResult(result);
         }
 
         case "folder_stats": {
-          const result = await imapService.getFolderStats(
-            optionalString(args, "folder"),
-            typeof args.scanLimit === "number" ? args.scanLimit : undefined,
+          const folderStatsFolder = optionalString(args, "folder");
+          const scanLimit = typeof args.scanLimit === "number" ? args.scanLimit : undefined;
+          if (accountManager.all().length === 1) {
+            const result = await imapService.getFolderStats(folderStatsFolder, scanLimit);
+            return createTextResult(result);
+          }
+          // Merge strategy: fetch stats for the same folder in every account and
+          // sum the numeric fields (total/unseen); uidNext/uidValidity are
+          // per-account concepts and only make sense in the breakdown.
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => ({
+              slug: bundle.account.slug,
+              ...(await bundle.imapService.getFolderStats(folderStatsFolder, scanLimit)),
+            })),
           );
-          return createTextResult(result);
+          return createTextResult({
+            folder: folderStatsFolder ?? "INBOX",
+            total: perAccount.reduce((sum, entry) => sum + entry.total, 0),
+            unseen: perAccount.reduce((sum, entry) => sum + entry.unseen, 0),
+            byAccount: perAccount,
+          });
         }
 
         case "empty_folder": {
@@ -5269,15 +5450,46 @@ export function createServer(
         }
 
         case "top_senders": {
-          const result = await imapService.topSenders({
+          const topSendersLimit = typeof args.limit === "number" ? args.limit : undefined;
+          const topSendersInput = {
             folder: optionalString(args, "folder"),
             since: optionalString(args, "since"),
             before: optionalString(args, "before"),
-            limit: typeof args.limit === "number" ? args.limit : undefined,
+            limit: topSendersLimit,
             scanLimit: typeof args.scanLimit === "number" ? args.scanLimit : undefined,
             excludeSelf: normalizeBoolean(args.excludeSelf, true),
+          };
+          if (accountManager.all().length === 1) {
+            const result = await imapService.topSenders(topSendersInput);
+            return createTextResult(result);
+          }
+          // Merge strategy: scan each account's folder independently, merge
+          // sender frequency by address (summing counts across accounts), then
+          // re-sort and re-apply the requested top-N limit over the merged set.
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => ({
+              bundle,
+              result: await bundle.imapService.topSenders(topSendersInput),
+            })),
+          );
+          const senderMap = new Map<string, { address: string; name?: string; count: number; direction: "self" | "received" }>();
+          for (const { result } of perAccount) {
+            for (const sender of result.senders) {
+              const existing = senderMap.get(sender.address);
+              if (existing) {
+                existing.count += sender.count;
+              } else {
+                senderMap.set(sender.address, { ...sender });
+              }
+            }
+          }
+          const mergedSenders = [...senderMap.values()].sort((left, right) => right.count - left.count).slice(0, topSendersLimit ?? 20);
+          return createTextResult({
+            folder: topSendersInput.folder?.trim() || "INBOX",
+            scanned: perAccount.reduce((sum, { result }) => sum + result.scanned, 0),
+            senders: mergedSenders,
+            byAccount: perAccount.map(({ bundle, result }) => ({ slug: bundle.account.slug, scanned: result.scanned })),
           });
-          return createTextResult(result);
         }
 
         case "move_thread": {
@@ -5380,8 +5592,26 @@ export function createServer(
           return createTextResult(result);
         }
 
-        case "get_folders":
-          return createTextResult(await imapService.getFolders());
+        case "get_folders": {
+          if (accountManager.all().length === 1) {
+            return createTextResult(await imapService.getFolders());
+          }
+          // Merge strategy: fetch each account's own folder list (LIVE IMAP) and
+          // tag each folder's path with its account slug (except the primary's,
+          // which is left bare) so the merged list stays unambiguous while a
+          // single-account setup's own folder paths are completely untouched.
+          const primarySlug = accountManager.primary().account.slug;
+          const perAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => ({ bundle, folders: await bundle.imapService.getFolders() })),
+          );
+          const merged = perAccount.flatMap(({ bundle, folders }) =>
+            folders.map((folder) => {
+              const slug = accountSlugForTag(bundle, primarySlug);
+              return slug ? { ...folder, path: `${slug}::${folder.path}`, account: slug } : folder;
+            }),
+          );
+          return createTextResult(merged);
+        }
 
         case "sync_folders":
           return createTextResult(await imapService.syncFolders());
@@ -5727,28 +5957,105 @@ export function createServer(
         }
 
         case "get_email_stats": {
-          const folders = await imapService.getFolders();
-          const sample = await getAnalyticsSampleFromIndex(
-            imapService,
-            localIndexService,
-            typeof args.days === "number" ? args.days : 30,
-            typeof args.limit === "number" ? args.limit : 2000,
+          const statsDays = typeof args.days === "number" ? args.days : 30;
+          const statsLimit = typeof args.limit === "number" ? args.limit : 2000;
+          if (accountManager.all().length === 1) {
+            const folders = await imapService.getFolders();
+            const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, statsDays, statsLimit);
+            return createTextResult(analyticsService.getEmailStats(sample, folders, config.smtp.username));
+          }
+          // Merge strategy: compute each account's own stats independently
+          // (self-detection needs each account's own address), then sum the
+          // numeric mailbox/sample fields and merge folder lists (non-primary
+          // folder paths tagged with their account slug to avoid collisions).
+          const primarySlugForStats = accountManager.primary().account.slug;
+          const statsPerAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const folders = await bundle.imapService.getFolders();
+              const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, statsDays, statsLimit);
+              return {
+                bundle,
+                stats: analyticsService.getEmailStats(sample, folders, bundle.config.smtp.username),
+              };
+            }),
           );
-          return createTextResult(
-            analyticsService.getEmailStats(sample, folders, config.smtp.username),
-          );
+          return createTextResult({
+            generatedAt: new Date().toISOString(),
+            mailbox: {
+              folderCount: statsPerAccount.reduce((sum, { stats }) => sum + stats.mailbox.folderCount, 0),
+              totalMessages: statsPerAccount.reduce((sum, { stats }) => sum + stats.mailbox.totalMessages, 0),
+              unreadMessages: statsPerAccount.reduce((sum, { stats }) => sum + stats.mailbox.unreadMessages, 0),
+            },
+            sample: {
+              size: statsPerAccount.reduce((sum, { stats }) => sum + stats.sample.size, 0),
+              starredMessages: statsPerAccount.reduce((sum, { stats }) => sum + stats.sample.starredMessages, 0),
+              messagesWithAttachments: statsPerAccount.reduce((sum, { stats }) => sum + stats.sample.messagesWithAttachments, 0),
+              uniqueContacts: statsPerAccount.reduce((sum, { stats }) => sum + stats.sample.uniqueContacts, 0),
+            },
+            folders: statsPerAccount.flatMap(({ bundle, stats }) => {
+              const slug = accountSlugForTag(bundle, primarySlugForStats);
+              return stats.folders.map((folder) => (slug ? { ...folder, path: `${slug}::${folder.path}` } : folder));
+            }),
+            byAccount: statsPerAccount.map(({ bundle, stats }) => ({ slug: bundle.account.slug, mailbox: stats.mailbox, sample: stats.sample })),
+          });
         }
 
         case "get_email_analytics": {
-          const sample = await getAnalyticsSampleFromIndex(
-            imapService,
-            localIndexService,
-            typeof args.days === "number" ? args.days : 30,
-            typeof args.limit === "number" ? args.limit : 2000,
+          const analyticsDays = typeof args.days === "number" ? args.days : 30;
+          const analyticsLimit = typeof args.limit === "number" ? args.limit : 2000;
+          if (accountManager.all().length === 1) {
+            const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, analyticsDays, analyticsLimit);
+            return createTextResult(analyticsService.getEmailAnalytics(sample, config.smtp.username));
+          }
+          // Merge strategy: compute each account's own analytics independently
+          // (self-detection needs each account's own address), then merge the
+          // top-N breakdowns (hours/senders/domains) by summing counts per key
+          // and re-sorting, and recompute busiestDay/insights from the merged
+          // results.
+          const analyticsPerAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, analyticsDays, analyticsLimit);
+              return analyticsService.getEmailAnalytics(sample, bundle.config.smtp.username);
+            }),
           );
-          return createTextResult(
-            analyticsService.getEmailAnalytics(sample, config.smtp.username),
+          const busiestHours = mergeCountedEntries(
+            analyticsPerAccount.map((entry) => entry.busiestHours),
+            (entry) => entry.hour,
+            5,
           );
+          const topSenders = mergeCountedEntries(
+            analyticsPerAccount.map((entry) => entry.topSenders),
+            (entry) => entry.address,
+            10,
+          );
+          const topDomains = mergeCountedEntries(
+            analyticsPerAccount.map((entry) => entry.topDomains),
+            (entry) => entry.domain,
+            10,
+          );
+          const busiestDayCandidates = analyticsPerAccount.flatMap((entry) => (entry.busiestDay ? [entry.busiestDay] : []));
+          const busiestDay = busiestDayCandidates.length > 0
+            ? busiestDayCandidates.reduce((best, candidate) => (candidate.count > best.count ? candidate : best))
+            : undefined;
+          return createTextResult({
+            generatedAt: new Date().toISOString(),
+            sampleSize: analyticsPerAccount.reduce((sum, entry) => sum + entry.sampleSize, 0),
+            busiestHours,
+            topSenders,
+            topDomains,
+            busiestDay,
+            insights: [
+              busiestHours[0]
+                ? `Peak sampled activity occurs around ${busiestHours[0].hour}.`
+                : "No recent activity was available for hourly analysis.",
+              topSenders[0]
+                ? `Top sender in the sampled window: ${topSenders[0].address}.`
+                : "No sender data was available in the sampled window.",
+              busiestDay
+                ? `Busiest sampled day was ${busiestDay.date} with ${busiestDay.count} messages.`
+                : "No day-level trend data was available.",
+            ],
+          });
         }
 
         case "get_contacts": {
@@ -5758,16 +6065,40 @@ export function createServer(
           // get_contacts returns a ranked list. Reusing limit as the sample size
           // meant limit: 5 silently ranked contacts from only 5 messages total.
           const limit = normalizeLimit(args.limit, 100);
-          const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, 30, 3000);
-          return createTextResult(
-            analyticsService.getContacts(sample, limit, config.smtp.username),
+          if (accountManager.all().length === 1) {
+            const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, 30, 3000);
+            return createTextResult(analyticsService.getContacts(sample, limit, config.smtp.username));
+          }
+          // Merge strategy: compute each account's own contact list independently
+          // (self-detection needs each account's own address), then merge same
+          // address across accounts by summing incoming/outgoing/totalMessages
+          // and keeping the most recent lastContactAt, and re-apply the
+          // requested limit over the merged, re-sorted set.
+          const contactsPerAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, 30, 3000);
+              return analyticsService.getContacts(sample, Number.MAX_SAFE_INTEGER, bundle.config.smtp.username);
+            }),
           );
+          return createTextResult(mergeContactStats(contactsPerAccount, limit));
         }
 
         case "get_volume_trends": {
           const days = normalizeLimit(args.days, 30, 1, 365);
-          const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, days, 3000);
-          return createTextResult(analyticsService.getVolumeTrends(sample, days));
+          if (accountManager.all().length === 1) {
+            const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, days, 3000);
+            return createTextResult(analyticsService.getVolumeTrends(sample, days));
+          }
+          // Merge strategy: compute each account's own daily trend points
+          // independently, then sum count/unreadCount/starredCount/attachmentCount
+          // for matching dates across accounts.
+          const trendsPerAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, days, 3000);
+              return analyticsService.getVolumeTrends(sample, days);
+            }),
+          );
+          return createTextResult(mergeVolumeTrends(trendsPerAccount));
         }
 
         case "get_connection_status": {
@@ -6101,7 +6432,7 @@ export function createServer(
 
         case "search_indexed_emails":
         {
-          const result = await localIndexService.search({
+          const searchIndexedInput = {
             query: optionalString(args, "query"),
             folder: optionalString(args, "folder"),
             label: optionalString(args, "label"),
@@ -6119,35 +6450,113 @@ export function createServer(
             dateFrom: optionalString(args, "dateFrom"),
             dateTo: optionalString(args, "dateTo"),
             limit: typeof args.limit === "number" ? args.limit : undefined,
-          });
+          };
+          if (accountManager.all().length === 1) {
+            const result = await localIndexService.search(searchIndexedInput);
+            return createTextResult(
+              { ...result, emails: projectFields(result.emails, parseFieldsArg(args.fields)) },
+              false,
+              result.emails.map(emailSource),
+            );
+          }
+          // Merge strategy: search every account's local index independently,
+          // tag ids with the account slug, concatenate, re-sort newest-first
+          // (each account's own list already arrives relevance-sorted, so this
+          // is an approximation of a single global ranking), then re-apply the
+          // requested limit across the merged set and sum totals/hasMore.
+          const primarySlugForSearch = accountManager.primary().account.slug;
+          const searchPerAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => ({ bundle, result: await bundle.localIndexService.search(searchIndexedInput) })),
+          );
+          const searchLimit = searchIndexedInput.limit ?? 100;
+          const taggedSearchEmails = searchPerAccount.flatMap(({ bundle, result }) =>
+            result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlugForSearch), email.id) })),
+          );
+          const mergedSearchEmails = sortByDateDesc(taggedSearchEmails, (email) => email.internalDate || email.date).slice(0, searchLimit);
+          const totalSearch = searchPerAccount.reduce((sum, { result }) => sum + result.total, 0);
+          const warnings = searchPerAccount.flatMap(({ result }) => result.warnings ?? []);
+          const primarySearchEntry = searchPerAccount.find(({ bundle }) => bundle.account.slug === primarySlugForSearch);
           return createTextResult(
-            { ...result, emails: projectFields(result.emails, parseFieldsArg(args.fields)) },
+            {
+              total: totalSearch,
+              hasMore: totalSearch > mergedSearchEmails.length,
+              emails: projectFields(mergedSearchEmails, parseFieldsArg(args.fields)),
+              lastSyncAt: primarySearchEntry?.result.lastSyncAt,
+              ...(warnings.length > 0 ? { warnings } : {}),
+            },
             false,
-            result.emails.map(emailSource),
+            mergedSearchEmails.map(emailSource),
           );
         }
 
         case "get_labels":
         {
-          const labels = await localIndexService.getLabels(normalizeLimit(args.limit, 250));
+          const labelsLimit = normalizeLimit(args.limit, 250);
+          if (accountManager.all().length === 1) {
+            const labels = await localIndexService.getLabels(labelsLimit);
+            return createTextResult({
+              total: labels.length,
+              labels,
+            });
+          }
+          // Merge strategy: fetch each account's own label list and sum
+          // messageCount/unreadCount/threadCount for labels that share the same
+          // name+type across accounts, so e.g. "INBOX" folders from two accounts
+          // combine into one row rather than appearing as unrelated duplicates.
+          const perAccountLabels = await Promise.all(
+            accountManager.all().map((bundle) => bundle.localIndexService.getLabels(labelsLimit)),
+          );
+          const mergedLabels = mergeMailboxLabels(perAccountLabels).slice(0, labelsLimit);
           return createTextResult({
-            total: labels.length,
-            labels,
+            total: mergedLabels.length,
+            labels: mergedLabels,
           });
         }
 
         case "get_threads":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
-            folder: "INBOX",
-            limitPerFolder: 100,
-          });
-          const result = await localIndexService.getThreads({
+          const threadsInput = {
             query: optionalString(args, "query"),
             label: optionalString(args, "label"),
             limit: typeof args.limit === "number" ? args.limit : undefined,
-          });
-          return createTextResult(result, false, result.threads.map(threadSource));
+          };
+          if (accountManager.all().length === 1) {
+            await maybeRefreshLocalIndex(imapService, localIndexService, {
+              folder: "INBOX",
+              limitPerFolder: 100,
+            });
+            const result = await localIndexService.getThreads(threadsInput);
+            return createTextResult(result, false, result.threads.map(threadSource));
+          }
+          // Merge strategy: refresh and query each account's own thread index
+          // independently, tag thread ids with the account slug, concatenate,
+          // re-sort newest-first by latestDate, then re-apply the requested
+          // limit across the merged set and sum totals/hasMore.
+          const primarySlugForThreads = accountManager.primary().account.slug;
+          const threadsPerAccount = await Promise.all(
+            accountManager.all().map(async (bundle) => {
+              await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
+                folder: "INBOX",
+                limitPerFolder: 100,
+              });
+              return { bundle, result: await bundle.localIndexService.getThreads(threadsInput) };
+            }),
+          );
+          const threadsLimit = threadsInput.limit ?? 100;
+          const taggedThreads = threadsPerAccount.flatMap(({ bundle, result }) =>
+            result.threads.map((thread) => ({
+              ...thread,
+              id: withAccountPrefix(accountSlugForTag(bundle, primarySlugForThreads), thread.id),
+              messageIds: thread.messageIds.map((id) => withAccountPrefix(accountSlugForTag(bundle, primarySlugForThreads), id)),
+            })),
+          );
+          const mergedThreads = sortByDateDesc(taggedThreads, (thread) => thread.latestDate).slice(0, threadsLimit);
+          const totalThreads = threadsPerAccount.reduce((sum, { result }) => sum + result.total, 0);
+          return createTextResult(
+            { total: totalThreads, hasMore: totalThreads > mergedThreads.length, threads: mergedThreads },
+            false,
+            mergedThreads.map(threadSource),
+          );
         }
 
         case "get_actionable_threads":
@@ -6313,13 +6722,32 @@ export function createServer(
 
         case "get_thread_by_id":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
+          // A threadId is only ever valid within the single account it was
+          // produced by (see get_threads/search_indexed_emails above) — this is
+          // a routed lookup, not a fan-out/merge: resolve the optional
+          // "<slug>::" prefix (added when the id came from a non-primary
+          // account) back to that account's bundle, defaulting to the primary
+          // for a plain id exactly as before multi-account support existed.
+          const rawThreadId = requireString(args, "threadId");
+          const { accountSlug: threadAccountSlug, rest: unprefixedThreadId } = splitAccountPrefix(
+            rawThreadId,
+            accountManager.additionalSlugs(),
+          );
+          const threadBundle = accountManager.bySlugOrPrimary(threadAccountSlug);
+          await maybeRefreshLocalIndex(threadBundle.imapService, threadBundle.localIndexService, {
             folder: "INBOX",
             limitPerFolder: 100,
           });
           const rawFolders = args?.folders;
           const threadFolders = Array.isArray(rawFolders) ? rawFolders.filter((f): f is string => typeof f === "string") : undefined;
-          const thread = await localIndexService.getThreadById(requireString(args, "threadId"));
+          const rawThread = await threadBundle.localIndexService.getThreadById(unprefixedThreadId);
+          const thread = threadAccountSlug
+            ? {
+                ...rawThread,
+                id: withAccountPrefix(threadAccountSlug, rawThread.id),
+                messageIds: rawThread.messageIds.map((id) => withAccountPrefix(threadAccountSlug, id)),
+              }
+            : rawThread;
           const result = threadFolders && threadFolders.length > 0
             ? {
                 ...thread,
