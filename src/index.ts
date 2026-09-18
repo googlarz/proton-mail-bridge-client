@@ -175,13 +175,14 @@ const TOOLS = [
   },
   {
     name: "list_scheduled_sends",
-    description: "List every item in the local undo-send / scheduled-send queue (from send_email with PROTONMAIL_SEND_DELAY_SECONDS set, or schedule_draft), including its id, status, and sendAt — use this to rediscover the id needed for cancel_send if it was lost with the conversation.",
+    description: "List items in the local undo-send / scheduled-send queue (from send_email with PROTONMAIL_SEND_DELAY_SECONDS set, or schedule_draft), newest first, 50 per page (returns total/hasMore; page with offset, raise limit for more), including id, status, and sendAt — use this to rediscover the id needed for cancel_send if it was lost with the conversation. Message bodies are shortened and HTML/attachments omitted.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
         status: { type: "string", enum: ["pending", "sending", "sent", "canceled", "failed"], description: "Filter to one status. Omit to list everything." },
-        limit: { type: "number", description: "Return at most this many records. Omit for all." },
+        limit: { type: "number", description: "Records per page, newest first. Default 50.", default: 50 },
+        offset: { type: "number", description: "Skip this many records (paging). Check hasMore for more." },
       },
     },
   },
@@ -3856,35 +3857,52 @@ export function createServer(
 
   server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
     const cursor = request.params?.cursor ? Number.parseInt(request.params.cursor, 10) : 0;
-    const [drafts, threadsResult, messages] = await Promise.all([
-      draftStore.listDrafts(false),
-      localIndexService.getThreads({ limit: 25 }),
-      localIndexService.listRecentMessages(25),
-    ]);
-
-    const resources = [
-      ...drafts.map((draft) => ({
-        uri: buildDraftResourceUri(draft.id),
-        name: draft.id,
-        title: draft.subject,
-        description: `${draft.status} · updated ${draft.updatedAt}`,
-        mimeType: "text/markdown",
-      })),
-      ...threadsResult.threads.map((thread) => ({
-        uri: buildThreadResourceUri(thread.id),
-        name: thread.id,
-        title: thread.subject,
-        description: `${thread.messageCount} message(s)`,
-        mimeType: "text/markdown",
-      })),
-      ...messages.map((message) => ({
-        uri: buildEmailResourceUri(message.primaryEmailId),
-        name: message.primaryEmailId,
-        title: message.subject,
-        description: `${message.folder} · ${message.internalDate || message.date || "undated"}`,
-        mimeType: "message/rfc822",
-      })),
-    ];
+    // Fan out across every configured account and prefix non-primary ids exactly as the
+    // tools do (responseSlug is undefined for the primary, so a single-account setup
+    // lists byte-for-byte what it always did).
+    const perAccount = await Promise.all(
+      accountManager.all().map(async (bundle) => {
+        const [drafts, threadsResult, messages] = await Promise.all([
+          bundle.draftStore.listDrafts(false),
+          bundle.localIndexService.getThreads({ limit: 25 }),
+          bundle.localIndexService.listRecentMessages(25),
+        ]);
+        const slug = responseSlug(bundle);
+        return [
+          ...drafts.map((draft) => {
+            const id = withAccountPrefix(slug, draft.id);
+            return {
+              uri: buildDraftResourceUri(id),
+              name: id,
+              title: draft.subject,
+              description: `${draft.status} · updated ${draft.updatedAt}`,
+              mimeType: "text/markdown",
+            };
+          }),
+          ...threadsResult.threads.map((thread) => {
+            const id = withAccountPrefix(slug, thread.id);
+            return {
+              uri: buildThreadResourceUri(id),
+              name: id,
+              title: thread.subject,
+              description: `${thread.messageCount} message(s)`,
+              mimeType: "text/markdown",
+            };
+          }),
+          ...messages.map((message) => {
+            const id = withAccountPrefix(slug, message.primaryEmailId);
+            return {
+              uri: buildEmailResourceUri(id),
+              name: id,
+              title: message.subject,
+              description: `${message.folder} · ${message.internalDate || message.date || "undated"}`,
+              mimeType: "message/rfc822",
+            };
+          }),
+        ];
+      }),
+    );
+    const resources = perAccount.flat();
 
     const pageSize = 50;
     const nextCursor =
@@ -3901,7 +3919,8 @@ export function createServer(
 
     switch (target.kind) {
       case "email": {
-        const detail = await imapService.getEmailById(target.emailId);
+        const { bundle: emailBundle, rest: emailRest } = resolveAccountForEmailId(target.emailId);
+        const detail = await emailBundle.imapService.getEmailById(emailRest);
         return {
           contents: [
             {
@@ -3913,7 +3932,8 @@ export function createServer(
         };
       }
       case "thread": {
-        const thread = await localIndexService.getThreadById(target.threadId);
+        const { bundle: threadBundle, rest: threadRest } = resolveAccountForEmailId(target.threadId);
+        const thread = await threadBundle.localIndexService.getThreadById(threadRest);
         return {
           contents: [
             {
@@ -3938,7 +3958,8 @@ export function createServer(
         };
       }
       case "draft": {
-        const draft = await draftStore.getDraft(target.draftId);
+        const { bundle: draftBundle, rest: draftRest } = resolveAccountForDraftId(target.draftId);
+        const draft = await draftBundle.draftStore.getDraft(draftRest);
         return {
           contents: [
             {
@@ -3950,8 +3971,9 @@ export function createServer(
         };
       }
       case "attachment": {
-        const attachment = await imapService.getAttachmentContent(
-          target.emailId,
+        const { bundle: attachmentBundle, rest: attachmentEmailRest } = resolveAccountForEmailId(target.emailId);
+        const attachment = await attachmentBundle.imapService.getAttachmentContent(
+          attachmentEmailRest,
           target.attachmentId,
           true,
         );
@@ -4138,18 +4160,12 @@ export function createServer(
           const statusFilter = optionalString(args, "status");
           // Fan out across every configured account's own delivery queue and tag each
           // item's id with its owning account's slug — mirrors the read-tool fan-out
-          // pattern (get_emails etc.). Single-account guard keeps byte-identical output
-          // for the common case.
+          // pattern (get_emails etc.). A single account produces the same records, just
+          // untagged.
           // Each record's payload carries the same full base64 attachment content as
           // a draft — see redactQueueRecordAttachments' comment. Redacted for every
           // record regardless of status (including canceled ones, which otherwise
           // stayed just as bloated once queued).
-          if (accountManager.all().length === 1) {
-            const all = await withAudit(auditService, name, args, async () => deliveryQueueService.list());
-            const filtered = (statusFilter ? all.filter((item) => item.status === statusFilter) : all)
-              .map(redactQueueRecordAttachments);
-            return createTextResult(typeof args.limit === "number" ? filtered.slice(0, normalizeLimit(args.limit, filtered.length, 1, 10_000)) : filtered);
-          }
           const perAccount = await withAudit(auditService, name, args, async () =>
             Promise.all(
               accountManager.all().map(async (bundle) => ({
@@ -4161,9 +4177,25 @@ export function createServer(
           const tagged = perAccount.flatMap(({ bundle, items }) =>
             items.map((item) => ({ ...item, id: withAccountPrefix(responseSlug(bundle), item.id) })),
           );
-          const filtered = (statusFilter ? tagged.filter((item) => item.status === statusFilter) : tagged)
-            .map(redactQueueRecordAttachments);
-          return createTextResult(typeof args.limit === "number" ? filtered.slice(0, normalizeLimit(args.limit, filtered.length, 1, 10_000)) : filtered);
+          // Newest first across accounts, then bounded: a stale queue must not turn one
+          // status check into an unbounded response. Sorting happens before slicing so
+          // the page is the same regardless of how many accounts contribute.
+          // (reversed first: the sort is stable, so records sharing a createdAt
+          // millisecond come out latest-inserted first, deterministically)
+          const matching = sortByDateDesc(
+            (statusFilter ? tagged.filter((item) => item.status === statusFilter) : tagged).reverse(),
+            (item) => item.createdAt,
+          );
+          const offset = normalizeLimit(args.offset, 0, 0, 100_000);
+          const limit = normalizeLimit(args.limit, 50, 1, 10_000);
+          const page = matching.slice(offset, offset + limit);
+          return createTextResult({
+            total: matching.length,
+            offset,
+            returned: page.length,
+            hasMore: offset + page.length < matching.length,
+            items: page.map(redactQueueRecordAttachments),
+          });
         }
 
         case "get_unsubscribe_info": {

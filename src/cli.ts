@@ -1082,12 +1082,12 @@ async function runSend(parsed: ParsedCliArgs): Promise<void> {
     }
     for (;;) {
       await new Promise<void>((resolve) => setTimeout(resolve, 2000));
-      const listResult = await client.callTool({ name: "list_scheduled_sends", arguments: {} });
-      // list_scheduled_sends returns an array — MCP's structuredContent must
-      // be an object, so arrays only come back through the text content.
+      // limit 10000 = every record: the id being waited on must be found however old
+      // the queue is (the default page is only the 50 newest).
+      const listResult = await client.callTool({ name: "list_scheduled_sends", arguments: { limit: 10000 } });
       const listContent = (listResult as { content?: Array<{ type: string; text?: string }> }).content ?? [];
-      const rawText = listContent.find((entry) => entry.type === "text")?.text ?? "[]";
-      const items = JSON.parse(rawText) as Array<Record<string, unknown>>;
+      const rawText = listContent.find((entry) => entry.type === "text")?.text ?? "{}";
+      const items = (JSON.parse(rawText) as { items?: Array<Record<string, unknown>> }).items ?? [];
       const item = items.find((entry) => entry.id === id);
       // "sending" is a transient claimed-but-not-finished state (see the
       // atomic pending->sending claim in DeliveryQueueService.checkDue) —

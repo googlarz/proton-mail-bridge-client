@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.19] — 2026-09-18
+
+### Fixed
+- **MCP resources were primary-account-only.** `resources/list` read only the primary account's drafts/threads/messages, and `resources/read` resolved every `email`/`thread`/`draft`/`attachment` URI against the primary account — so a secondary-account draft/message returned by a tool (whose citation link already carries the `<slug>::` id) could not be opened. Listing now fans out across all accounts with prefixed ids (identical output for a single account), and reading routes by the id's prefix.
+- **`list_scheduled_sends` was unbounded.** It now returns the 50 newest records by default, sorted across accounts before slicing, with `offset` paging.
+
+### Changed
+- **`list_scheduled_sends` now returns `{ total, offset, returned, hasMore, items }` instead of a bare array** (needed to report `hasMore`). `limit` (default 50, max 10000) and `offset` are optional. The CLI's `--wait` polling was updated to read `items` and to request `limit: 10000` so the id it waits for is found however old the queue is.
+
+### Added
+- `test/multi-account-server-dispatch.test.mjs` — the first test that drives the real MCP handlers (createServer + in-memory transport) with two accounts: secondary-account resource list/read, and queue bounding/paging.
+
+Found by the final external review of 2.1.18.
+
 ## [2.1.18] — 2026-09-18
 
 ### Fixed
