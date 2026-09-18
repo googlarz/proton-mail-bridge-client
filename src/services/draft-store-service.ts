@@ -165,6 +165,10 @@ export class DraftStoreService {
         references: patch.references ? [...patch.references] : existing.references,
         attachments: patch.attachments ? [...patch.attachments] : existing.attachments,
         notes: patch.notes ?? existing.notes,
+        // A local edit makes the remote copy stale: drop "synced" in the same write so
+        // a later identical update_draft can't be mistaken for "already in sync".
+        // remoteDraft is kept, so the next sync still updates the existing remote copy.
+        remoteSyncState: existing.remoteSyncState === "synced" ? "local_only" : existing.remoteSyncState,
       };
 
       store.updatedAt = updatedAt;

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.17] — 2026-09-18
+
+### Fixed
+- **A local draft edit left `remoteSyncState:"synced"`**, so `update_draft(subject:X, syncToRemote:false)` followed by an identical `update_draft(subject:X)` was treated as a no-op on an in-sync draft and skipped IMAP, leaving the remote copy stale while reporting "already in sync". `updateDraft` now drops `synced` to `local_only` in the same write as the edit (`sync_failed` stays as is; `remoteDraft` is kept so the next sync updates the existing remote copy). Found by external review of 2.1.16.
+
+### Added
+- Two `draft-store.test.mjs` cases covering the state transition.
+
 ## [2.1.16] — 2026-09-18
 
 ### Fixed

@@ -135,3 +135,35 @@ test("a sent draft older than the retention window is pruned on the next write, 
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+// Found by external review of 2.1.16: a local edit made with syncToRemote:false
+// left remoteSyncState:"synced", so a later identical update_draft (a no-op
+// against the local record) was wrongly treated as "remote already in sync".
+test("updateDraft drops synced state on a local edit but keeps the remote ref", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "draft-sync-state-"));
+  try {
+    const store = new DraftStoreService(createConfig(dir));
+    const draft = await store.createDraft({ to: ["a@example.com"], subject: "Before", body: "b" });
+    await store.markRemoteSynced(draft.id, { folder: "Drafts", emailId: "Drafts::1", syncedAt: new Date().toISOString() });
+    assert.equal((await store.getDraft(draft.id)).remoteSyncState, "synced");
+
+    const edited = await store.updateDraft(draft.id, { subject: "After" });
+    assert.equal(edited.remoteSyncState, "local_only");
+    assert.equal(edited.remoteDraft?.emailId, "Drafts::1", "remote ref must survive so the next sync updates the existing copy");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("updateDraft leaves a sync_failed state as sync_failed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "draft-sync-state-"));
+  try {
+    const store = new DraftStoreService(createConfig(dir));
+    const draft = await store.createDraft({ to: ["a@example.com"], subject: "S", body: "b" });
+    await store.markRemoteSyncError(draft.id, "boom");
+    const edited = await store.updateDraft(draft.id, { subject: "S2" });
+    assert.equal(edited.remoteSyncState, "sync_failed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
