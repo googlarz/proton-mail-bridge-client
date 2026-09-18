@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.0] — 2026-09-18
+
+**Multi-account support.** Prompted directly by 2.0.9's `from` field turning out to be insufficient once Bridge's Split Addresses feature is enabled — under Split Addresses each of the account's addresses becomes its own separate Bridge IMAP/SMTP login rather than an alias reachable from one shared connection, so overriding the `From` header on a single connection doesn't actually let you send as another address. This release adds real multi-account support instead: every configured address gets its own fully independent, isolated service stack (own IMAP/SMTP connection, own local SQLite index, own drafts/snoozed/delivery-queue/audit.log), and every tool operates across all of them.
+
+### Added
+- **`PROTONMAIL_ACCOUNTS_JSON`**: a new env var listing additional Proton addresses on the same account (each only needs `address`+`password` — Bridge issues each Split Address its own password but keeps the same host/ports as the primary connection, matching how Bridge's Split Addresses feature actually works). Every configured account gets its own complete, isolated stack built by reusing the existing single-account service classes unmodified — so every account gets the full benefit of the account-identity isolation, file-locking, and TOCTOU hardening already built into those classes over the previous nine releases, with zero new code paths for that to get wrong per account.
+- **`list_accounts`**: lists every configured account (primary plus any additional), its `slug`, index freshness, and (optionally, `checkConnections:true`) a live IMAP/SMTP reachability check.
+- **Every emailId/draftId/threadId can now carry an account prefix** (`<slug>::...`) to target a specific non-primary account — a plain, unprefixed id always means the primary account, exactly as before this release, so nothing changes for a single-account setup. The prefix is stripped from the *left* before handing the rest to the existing, unmodified checksum-verified id parser — deliberately additive rather than a new generation of that already-delicate format.
+- **Every read tool now returns results merged across all configured accounts**, not just the primary: `search_indexed_emails`, `get_emails`, `get_threads`, `get_thread_by_id`, `count_messages`, `get_labels`, `folder_stats`, `top_senders`, `get_contacts`, `get_volume_trends`, `get_email_analytics`, `get_email_stats`, `get_folders`, `get_inbox_digest`, `get_follow_up_candidates`, `get_actionable_threads`, `find_document_threads`, `get_meeting_prep`, `prepare_meeting_context`, `get_thread_brief`. A single-account setup produces byte-for-byte identical output to before this release (explicitly regression-tested). `run_doctor`/`get_runtime_status` gained an additive `accounts` array alongside their existing (unchanged) primary-account fields.
+- **Every write/action tool now resolves and operates on the correct account**: `get_email_by_id`, `mark_email_read`, `star_email`, `move_email`, `delete_email`, `archive_email`, `trash_email`, `restore_email`, `update_message_flags`, `update_message_labels`, `export_email`, attachment tools, `get_unsubscribe_info`/`unsubscribe_sender`, the bulk_* tools (grouping mixed-account id batches by account and merging results), `batch_email_action`/`apply_thread_action`, and `move_thread`/`delete_thread`/`flag_thread` (scoped to the account a threadId names — full cross-account thread resolution is a documented follow-up).
+- **`send_email`, `reply_to_email`, `reply_all_email`, `forward_email`, `send_test_email`, `create_draft`/`update_draft`/`create_reply_draft`/`create_forward_draft`/`create_thread_reply_draft`, `send_draft`, and `schedule_draft` now route through the CORRECT account's own SMTP connection** when `from` matches a configured additional account, instead of only overriding the header on the primary connection (2.0.9's approach, kept as the fallback for a `from` address that isn't a separately-configured account — e.g. a true alias under a merged, non-Split setup).
+
+### Fixed
+- **`run_doctor`/`get_runtime_status`'s `backgroundSync.lastError`/`lastFailureKind`/`lastIdleError` stayed stuck showing a stale failure forever**, even after a later sync attempt succeeded (`lastSuccessAt` moved forward, but the error fields never cleared) — found live while diagnosing an unrelated auth blip right after enabling Split Addresses. A successful run now clears its corresponding error field(s).
+
+### Known limitations (documented in code, follow-up work)
+- `list_drafts`/`list_remote_drafts` stay scoped to the primary account.
+- `move_thread`/`delete_thread`/`flag_thread` scope to the account a threadId's own prefix names rather than resolving thread membership across accounts.
+- `send_email`'s undo-send (delayed) queue still fires through the primary's delivery queue, so a delayed send with a non-primary `from` gets the header-override fallback at fire time rather than that account's own connection.
+
 ## [2.0.9] — 2026-09-18
 
 Prompted by live testing against a Proton account with multiple addresses (main address, a `.pm.me` address, and a custom-domain address, all on the same account with Bridge's Split Addresses feature).
