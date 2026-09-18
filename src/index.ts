@@ -488,12 +488,13 @@ const TOOLS = [
   },
   {
     name: "get_draft",
-    description: "Fetch the full content of a single locally saved draft by its draftId. Use to read or verify a draft before sending or updating. Prefer list_drafts to discover draftIds first. Does NOT fetch drafts from the Proton server — use list_remote_drafts for those.",
+    description: "Fetch the full content of a single locally saved draft by its draftId. Use to read or verify a draft before sending or updating. Prefer list_drafts to discover draftIds first. Does NOT fetch drafts from the Proton server — use list_remote_drafts for those. Attachments are metadata only (filename/contentType/size, no base64 content) by default — set includeAttachmentContent:true if you actually need the raw bytes back (e.g. to re-attach them elsewhere); a large attachment's base64 content can be hundreds of thousands of tokens.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
         draftId: { type: "string", description: "Draft id returned by create_draft, list_drafts, or a create_*_draft call." },
+        includeAttachmentContent: { type: "boolean", description: "Return each attachment's full base64 content instead of just its metadata. Off by default — see the tool description.", default: false },
       },
       required: ["draftId"],
     },
@@ -2446,6 +2447,33 @@ export function redactDraftAttachmentsForListing(draft: DraftRecord) {
   };
 }
 
+// Same fix as redactDraftAttachmentsForListing, for list_scheduled_sends — a
+// queued send's payload carries the same full base64 EmailAttachmentInput
+// content (found live: ~955k tokens for a single 1 MiB attachment on ONE
+// record, canceled records included, and list_scheduled_sends has no filter
+// or cap any more than list_drafts did). No explicit return-type annotation
+// for the same reason as the function above.
+export function redactQueueRecordAttachments<T extends { payload: SendEmailInput }>(record: T) {
+  const attachments = record.payload.attachments;
+  if (!attachments || attachments.length === 0) {
+    return record;
+  }
+  return {
+    ...record,
+    payload: {
+      ...record.payload,
+      attachments: attachments.map((attachment) => ({
+        filename: attachment.filename,
+        contentType: attachment.contentType,
+        cid: attachment.cid,
+        contentDisposition: attachment.contentDisposition,
+        content: "",
+        size: Buffer.byteLength(attachment.content, "base64"),
+      })),
+    },
+  };
+}
+
 function draftSource(draft: DraftRecord): CitationSource {
   return {
     uri: buildDraftResourceUri(draft.id),
@@ -2616,10 +2644,24 @@ async function syncDraftToRemote(
       isHtml: draft.isHtml,
       priority: draft.priority,
       replyTo: draft.replyTo,
+      // Found live (external review): this never passed draft.from, so a draft
+      // saved under an alias (e.g. alias@example.com) previewed in the remote
+      // Drafts mailbox under the primary address instead — the remote preview
+      // and the eventual send_draft/schedule_draft sender didn't match.
+      from: draft.from,
       inReplyTo: draft.inReplyTo,
       references: draft.references,
       messageId: draft.draftMessageId,
       attachments: draft.attachments,
+      // Same reasoning as send_draft's identical appendSignature: false — draft
+      // content is already finalized and reviewed by the time it's synced here.
+      // Found live (external review): this used to omit appendSignature, so the
+      // remote preview auto-added PROTONMAIL_SIGNATURE while send_draft/
+      // schedule_draft never did — the actually-sent message either lacked the
+      // signature the remote preview showed, or, if the caller had also typed a
+      // signature into the draft body themselves, got it appended a second time
+      // on every remote sync.
+      appendSignature: false,
     });
 
     const remoteDraft = await imapService.upsertRemoteDraft({
@@ -3995,9 +4037,14 @@ export function createServer(
           // item's id with its owning account's slug — mirrors the read-tool fan-out
           // pattern (get_emails etc.). Single-account guard keeps byte-identical output
           // for the common case.
+          // Each record's payload carries the same full base64 attachment content as
+          // a draft — see redactQueueRecordAttachments' comment. Redacted for every
+          // record regardless of status (including canceled ones, which otherwise
+          // stayed just as bloated once queued).
           if (accountManager.all().length === 1) {
             const all = await withAudit(auditService, name, args, async () => deliveryQueueService.list());
-            const filtered = statusFilter ? all.filter((item) => item.status === statusFilter) : all;
+            const filtered = (statusFilter ? all.filter((item) => item.status === statusFilter) : all)
+              .map(redactQueueRecordAttachments);
             return createTextResult(filtered);
           }
           const perAccount = await withAudit(auditService, name, args, async () =>
@@ -4011,7 +4058,8 @@ export function createServer(
           const tagged = perAccount.flatMap(({ bundle, items }) =>
             items.map((item) => ({ ...item, id: withAccountPrefix(responseSlug(bundle), item.id) })),
           );
-          const filtered = statusFilter ? tagged.filter((item) => item.status === statusFilter) : tagged;
+          const filtered = (statusFilter ? tagged.filter((item) => item.status === statusFilter) : tagged)
+            .map(redactQueueRecordAttachments);
           return createTextResult(filtered);
         }
 
@@ -4502,8 +4550,11 @@ export function createServer(
             );
           });
 
+          // Same fix as update_draft's identical bloat — see its comment. The
+          // caller already knows what it attached; get_draft is the "let me see
+          // the full attachment content" call, not this one.
           return createTextResult(
-            result,
+            redactDraftAttachmentsForListing(result),
             false,
             [
               draftSource(result),
@@ -4603,8 +4654,9 @@ export function createServer(
             );
           });
 
+          // Same fix as create_draft/update_draft's identical bloat — see their comments.
           return createTextResult(
-            result,
+            redactDraftAttachmentsForListing(result),
             false,
             [
               draftSource(result),
@@ -4704,8 +4756,9 @@ export function createServer(
             );
           });
 
+          // Same fix as create_draft/update_draft's identical bloat — see their comments.
           return createTextResult(
-            result,
+            redactDraftAttachmentsForListing(result),
             false,
             [
               draftSource(result),
@@ -4753,8 +4806,17 @@ export function createServer(
             requireString(args, "draftId"),
           );
           const draft = presentDraft(getDraftBundle, await getDraftBundle.draftStore.getDraft(getDraftIdRest));
+          // Found live (external review): this always echoed every attachment's
+          // full base64 content — ~955k tokens for a single 1 MiB attachment,
+          // serialized twice by createTextResult on top of that. Metadata only by
+          // default now (same redaction as list_drafts/update_draft/create_draft),
+          // with an explicit opt-in for the rare case the caller actually needs
+          // the raw bytes back.
+          const draftResponse = normalizeBoolean(args.includeAttachmentContent, false)
+            ? draft
+            : redactDraftAttachmentsForListing(draft);
           return createTextResult(
-            draft,
+            draftResponse,
             false,
             [
               draftSource(draft),
@@ -4880,8 +4942,9 @@ export function createServer(
             syncDraftToRemote(syncDraftBundle.draftStore, syncDraftBundle.smtpService, syncDraftBundle.imapService, draft),
           );
           const presentedSynced = presentDraft(syncDraftBundle, synced.draft);
+          // Same fix as create_draft/update_draft's identical bloat — see their comments.
           return createTextResult(
-            { ...presentedSynced, remoteSync: synced.remoteSync },
+            { ...redactDraftAttachmentsForListing(presentedSynced), remoteSync: synced.remoteSync },
             false,
             [
               draftSource(presentedSynced),
@@ -7483,8 +7546,9 @@ export function createServer(
             return { ...presented, threadId: thread.id };
           });
 
+          // Same fix as create_draft/update_draft's identical bloat — see their comments.
           return createTextResult(
-            result,
+            redactDraftAttachmentsForListing(result),
             false,
             [
               draftSource(result),

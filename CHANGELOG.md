@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.5] — 2026-09-18
+
+Fixes from two more independent external reviews of v2.1.3 (`7c36bae`): a 30-scenario signature/MIME audit and a 13-scenario performance/response-size audit. Two previously-reported signature bugs (isHtml formatting, markdown HTML quote) were confirmed already fixed by 2.1.4.
+
+### Fixed
+- **`syncDraftToRemote` never passed `draft.from`.** A draft saved under a configured alias (e.g. `alias@example.com`) previewed in the remote Proton Drafts mailbox under the primary address instead — the remote preview and the eventual `send_draft`/`schedule_draft` sender didn't match.
+- **`syncDraftToRemote` auto-added `PROTONMAIL_SIGNATURE` while `send_draft`/`schedule_draft` never did** — violating this codebase's own documented rule that draft content is final by the time it's sent (a signature belongs in the draft body itself, not appended invisibly). The remote preview showed a signature the actually-sent message lacked, and typing a signature into the draft body yourself got it appended a second time on every remote sync. `syncDraftToRemote` now passes `appendSignature: false`, matching `send_draft`.
+- **A signature with an inline logo (`<img src="cid:...">`, referencing an attachment by Content-ID — the standard way a mail client embeds a signature image) never displayed.** The HTML sanitizer didn't allow `<img>` at all. Now allowed, but only for the `cid:` scheme — not `http`/`https`, since this sanitizes outbound content and an externally-hosted image src could let a prompt-injected signature or quoted original exfiltrate data through the URL when the recipient's client loads it.
+- **`create_draft`, `create_reply_draft`, `create_forward_draft`, `create_thread_reply_draft`, and `sync_draft_to_remote` all echoed every attachment's full base64 content** — confirmed live at ~955k tokens for a single 1 MiB attachment, serialized twice by `createTextResult` on top of that. Same fix already applied to `list_drafts`/`update_draft` in earlier releases; these five just weren't using it yet.
+- **`get_draft` had the identical bloat** — now metadata-only by default too, with a new opt-in `includeAttachmentContent: true` for the rare case a caller actually needs the raw bytes back (unlike the other five above, `get_draft` is a deliberate "let me look at this one draft" call rather than a repeated-edit loop, so an escape hatch is provided instead of just cutting the capability).
+- **`list_scheduled_sends` returned every queue record's full base64 attachment content**, canceled records included, with no filter or cap — same ~955k-token-per-record bloat as the draft tools above, for the delivery queue's own record shape.
+
+### Not changed (reviewer findings, deliberately out of scope for this pass)
+- The delivery queue applies `PROTONMAIL_SIGNATURE` from config at send time, not enqueue time — a config change between `schedule_draft`/`send_email`'s undo-send and the send actually firing changes which signature goes out. The reviewer flagged this as a gap against a *proposed* content-persistence plan, not a broken documented guarantee.
+- `list_drafts` has no pagination (full bodies, ~262k tokens at 107 drafts); `update_draft` still echoes the full current body/history even when only the subject changed (~40k tokens for a 202 KB body); all drafts share one `drafts.json` file, so a small edit's write cost scales with total store size (median 1.06ms empty → 48ms with an unrelated 10 MiB attachment elsewhere in the store). These are real, reviewer-confirmed costs, but each is an API/storage design question (pagination contract, partial-update semantics, moving to per-draft files or SQLite) rather than a single-tool bug fix — worth a deliberate follow-up pass rather than folding into this one.
+
+### Added
+- `test/list-scheduled-sends-attachment-redaction.test.mjs`, plus new cases in `test/smtp.test.mjs` — regression coverage for the queue-attachment-redaction and CID-image-sanitizer fixes above.
+
 ## [2.1.4] — 2026-09-18
 
 Four more issues found by the same independent external code review, this round against v2.1.3 (commit `7c36bae`) — two were the previous round's fixes only partially closing the gap, two were newly surfaced.

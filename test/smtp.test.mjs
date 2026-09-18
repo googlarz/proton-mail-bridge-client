@@ -109,6 +109,32 @@ test("buildRawMessage falls back to the Bridge login when from is not a valid em
   assert.ok(/^from: owner@example\.com/im.test(headerBlock));
 });
 
+// Regression test for an externally-reported bug (review of 7c36bae / v2.1.3): a
+// signature with an inline logo (attached with a Content-ID, referenced as
+// <img src="cid:...">) survived as an attachment, but its <img> tag was stripped
+// entirely by the sanitizer — img wasn't in allowedTags at all — so the logo never
+// displayed. Now allowed, but ONLY for the cid: scheme (via allowedSchemesByTag) —
+// not http/https, since this sanitizes OUTBOUND content and an http(s) img src
+// could let a prompt-injected signature/quoted-original exfiltrate data through
+// the URL when the recipient's client loads it.
+test("buildRawMessage keeps an inline <img src=\"cid:...\"> (e.g. a signature logo) but strips an http(s) img src", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "Logo test",
+    body: "fallback text",
+    isHtml: true,
+    htmlBody: '<p>Best,</p><img src="cid:logo123" alt="Logo"><img src="http://evil.example.com/track.png">',
+    attachments: [
+      { filename: "logo.png", content: Buffer.from("fake-png-bytes").toString("base64"), contentType: "image/png", cid: "logo123", contentDisposition: "inline" },
+    ],
+  });
+  const message = raw.toString("utf8");
+
+  assert.ok(message.includes('src="cid:logo123"'), "an inline cid: image reference must survive sanitization");
+  assert.ok(!message.includes("evil.example.com"), "an http(s) image src must still be stripped");
+});
+
 test("buildRawMessage sanitizes script tags out of HTML bodies by default", async () => {
   const service = new SMTPService(createConfig());
   const raw = await service.buildRawMessage({

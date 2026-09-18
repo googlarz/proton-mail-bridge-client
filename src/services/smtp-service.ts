@@ -184,12 +184,32 @@ export class SMTPService {
         "td",
         "span",
         "div",
+        "img",
       ],
       allowedAttributes: {
         a: ["href"],
+        // width/height are cosmetic sizing hints for an inline image (e.g. a
+        // signature logo), not something that can carry an exfiltration risk
+        // the way src's scheme can.
+        img: ["src", "alt", "width", "height"],
         "*": [],
       },
       allowedSchemes: ["http", "https", "mailto"],
+      // Found live (external review): a signature configured with an inline
+      // logo (attached with a Content-ID, referenced as <img src="cid:...">,
+      // the standard way a mail client embeds a signature image) survived as
+      // an attachment but its <img> tag was stripped entirely — img wasn't in
+      // allowedTags at all — so the logo was never displayed. Allowed now, but
+      // ONLY for the "cid" scheme (via allowedSchemesByTag, overriding the
+      // general allowedSchemes above for this one tag) — not http/https. This
+      // is OUTBOUND content sanitization: an img src reaching an external
+      // http(s) URL would let a prompt-injected "signature" or quoted
+      // original exfiltrate data through the URL when the recipient's client
+      // loads it. cid: only ever resolves to this message's own attached
+      // parts, so it carries none of that risk.
+      allowedSchemesByTag: {
+        img: ["cid"],
+      },
       allowedSchemesAppliedToAttributes: ["href", "src"],
     });
   }
