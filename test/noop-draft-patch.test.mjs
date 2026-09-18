@@ -22,3 +22,10 @@ test("clearing an unset string field with '' is a no-op, clearing a set one is n
   assert.equal(isNoopDraftPatch(draft, { replyTo: "" }), true);
   assert.equal(isNoopDraftPatch(draft, { body: "" }), false);
 });
+
+// The handler skips the IMAP resync only for a no-op on a draft whose
+// remoteSyncState is "synced"; the predicate itself stays state-agnostic so a
+// failed/never-synced draft can still retry its sync on an identical request.
+test("isNoopDraftPatch ignores sync state (handler decides on remoteSyncState)", () => {
+  assert.equal(isNoopDraftPatch({ ...draft, remoteSyncState: "sync_failed" }, { subject: "Hi" }), true);
+});

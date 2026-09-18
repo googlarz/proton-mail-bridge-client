@@ -5031,13 +5031,17 @@ export function createServer(
 
           const result = await withAudit(auditService, name, args, async () => {
             const existingDraft = await updateDraftBundle.draftStore.getDraft(updateDraftIdRest);
-            if (isNoopDraftPatch(existingDraft, draftPatch)) {
+            const noop = isNoopDraftPatch(existingDraft, draftPatch);
+            // Only skip the resync when the remote copy is known to be current. A
+            // draft whose last sync failed (or never ran) must still retry it, even
+            // if this particular call changes nothing locally.
+            if (noop && existingDraft.remoteSyncState === "synced") {
               return presentDraft(updateDraftBundle, {
                 ...existingDraft,
-                remoteSync: { ok: true, skipped: true, message: "No changes — draft left as is, remote sync skipped." },
+                remoteSync: { ok: true, skipped: true, message: "No changes — draft left as is, remote copy already in sync." },
               });
             }
-            const draft = await updateDraftBundle.draftStore.updateDraft(updateDraftIdRest, draftPatch);
+            const draft = noop ? existingDraft : await updateDraftBundle.draftStore.updateDraft(updateDraftIdRest, draftPatch);
 
             const remoteSyncDecision = resolveRemoteDraftSync(
               config.runtime,
@@ -7212,7 +7216,7 @@ export function createServer(
           const searchPerAccount = await Promise.all(
             accountManager.all().map(async (bundle) => ({ bundle, result: await bundle.localIndexService.search(searchIndexedInput) })),
           );
-          const searchLimit = searchIndexedInput.limit ?? 100;
+          const searchLimit = searchIndexedInput.limit ?? 50;
           const taggedSearchEmails = searchPerAccount.flatMap(({ bundle, result }) =>
             result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlugForSearch), email.id) })),
           );

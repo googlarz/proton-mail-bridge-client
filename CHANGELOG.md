@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.16] — 2026-09-18
+
+### Fixed
+- **`update_draft` no-op skipped the IMAP resync even after a failed sync.** A change saved locally + IMAP failure, then an identical retry, returned `remoteSync.ok:true` without contacting IMAP, leaving the remote draft stale. The resync is now skipped only when the draft's `remoteSyncState` is `synced`; a `sync_failed`/`local_only` draft still retries on an otherwise identical request (without rewriting the local record).
+- **Multi-account `search_indexed_emails` still merged up to 100 results** (each account returned 50, the merge cap was hard-coded 100). The shared default is now 50 for the whole response.
+
 ## [2.1.15] — 2026-09-18
 
 ### Fixed
