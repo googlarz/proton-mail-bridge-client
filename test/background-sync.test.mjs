@@ -144,6 +144,101 @@ test("background sync passes the full folder list to indexing but only the first
   }
 });
 
+test("a later successful sync clears lastError/lastFailureKind left by an earlier failed sync attempt", async () => {
+  let shouldFail = true;
+  const imapService = {
+    async collectEmailsForIndex() {
+      if (shouldFail) {
+        throw new Error("Temporary network hiccup");
+      }
+      return { syncedAt: "2026-03-24T12:00:00.000Z", full: false, folders: [], folderStats: [], emails: [] };
+    },
+    async waitForMailboxChanges() {
+      return { folder: "INBOX", timeoutMs: 1000, checkedAt: "2026-03-24T12:00:01.000Z", changed: false, events: [] };
+    },
+  };
+  const localIndexService = {
+    async getSyncCheckpointMap() {
+      return {};
+    },
+    async recordSnapshot(snapshot) {
+      return { updatedAt: snapshot.syncedAt };
+    },
+  };
+
+  const service = new BackgroundSyncService(createConfig(), imapService, localIndexService);
+  service.start();
+
+  try {
+    // First attempt fails: error fields get set.
+    const failedStatus = await service.runNow("unit-test-fail");
+    assert.equal(failedStatus.lastFailureKind, "transient");
+    assert.match(failedStatus.lastError, /temporary network hiccup/i);
+
+    // Second attempt succeeds: every stale error field must be cleared, not left
+    // over from the earlier failed attempt, even though lastSuccessAt moves
+    // forward.
+    shouldFail = false;
+    const successStatus = await service.runNow("unit-test-success");
+    assert.equal(successStatus.lastSuccessAt, "2026-03-24T12:00:00.000Z");
+    assert.equal(successStatus.lastError, undefined);
+    assert.equal(successStatus.lastFailureKind, undefined);
+    assert.equal(successStatus.lastFailureMessage, undefined);
+  } finally {
+    service.stop();
+  }
+});
+
+test("a later successful sync clears a stale lastIdleError left by an earlier failed IDLE watch", async () => {
+  const imapService = {
+    async collectEmailsForIndex() {
+      return { syncedAt: "2026-03-24T12:00:00.000Z", full: false, folders: [], folderStats: [], emails: [] };
+    },
+    // Always fails (transient — not an auth error, so the IDLE loop keeps
+    // retrying instead of breaking out) — lastIdleError can only be cleared by
+    // a real, successful sync attempt (runNow) below, never by the IDLE loop's
+    // own next iteration succeeding, isolating the exact bug being tested.
+    async waitForMailboxChanges() {
+      throw new Error("IDLE connection reset");
+    },
+  };
+  const localIndexService = {
+    async getSyncCheckpointMap() {
+      return {};
+    },
+    async recordSnapshot(snapshot) {
+      return { updatedAt: snapshot.syncedAt };
+    },
+  };
+
+  const config = createConfig();
+  config.runtime.idleWatchEnabled = true;
+
+  const service = new BackgroundSyncService(config, imapService, localIndexService);
+  service.start();
+
+  try {
+    // A successful sync starts the IDLE loop; its first iteration throws
+    // (simulated transient IDLE failure) and records lastIdleError.
+    await service.runNow("unit-test-start");
+    let status = service.getStatus();
+    for (let attempt = 0; attempt < 50 && !status.lastIdleError; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      status = service.getStatus();
+    }
+    assert.match(status.lastIdleError, /idle connection reset/i);
+
+    // A later successful sync attempt must clear that stale lastIdleError too —
+    // previously only a further successful IDLE iteration cleared it, so
+    // lastIdleError stayed visible forever even after lastSuccessAt moved
+    // forward via a real, successful sync.
+    status = await service.runNow("unit-test-success");
+    assert.equal(status.lastIdleError, undefined);
+  } finally {
+    service.stop();
+  }
+});
+
 test("background sync backs off cleanly on auth failures", async () => {
   const imapService = {
     attempts: 0,
