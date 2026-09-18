@@ -264,6 +264,82 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 
 ---
 
+## Multi-account support (v2.1.0+)
+
+Support multiple Proton Mail addresses configured in Bridge (using Bridge's **Split Addresses** feature). Each address gets its own isolated service stack, local index, and drafts storage.
+
+### Setup
+
+First, enable **Split Addresses** in Proton Bridge and configure each address as a separate account. Bridge will generate a separate password for each address. Then set `PROTONMAIL_ACCOUNTS_JSON`:
+
+```json
+{
+  "mcpServers": {
+    "proton-mail-bridge": {
+      "command": "proton-mail-bridge-mcp",
+      "env": {
+        "PROTONMAIL_USERNAME": "primary@proton.me",
+        "PROTONMAIL_PASSWORD": "primary-bridge-password",
+        "PROTONMAIL_IMAP_HOST": "127.0.0.1",
+        "PROTONMAIL_IMAP_PORT": "1143",
+        "PROTONMAIL_IMAP_SECURE": "false",
+        "PROTONMAIL_SMTP_HOST": "127.0.0.1",
+        "PROTONMAIL_SMTP_PORT": "1025",
+        "PROTONMAIL_ACCOUNTS_JSON": "[
+          { \"address\": \"primary@proton.me\", \"password\": \"primary-bridge-password\" },
+          { \"address\": \"alias@proton.me\", \"password\": \"alias-bridge-password\" },
+          { \"address\": \"business@custom.com\", \"password\": \"business-bridge-password\" }
+        ]"
+      }
+    }
+  }
+}
+```
+
+**Note:** The password is the **Bridge password for each address**, not your Proton account password. Bridge generates a unique password for each Split Address.
+
+### How it works
+
+- **Primary account:** the first entry in `PROTONMAIL_ACCOUNTS_JSON` (or the main `PROTONMAIL_USERNAME`/`PROTONMAIL_PASSWORD` pair if not set). Email IDs from the primary account have no prefix.
+- **Additional accounts:** each has an auto-generated slug (e.g., `alias`, `business`). Email IDs carry an account prefix: `alias::message-id`, `business::message-id`.
+- **Sending:** `send_email`, `reply_to_email`, etc. route through the account matching the `from` address. If no account matches, the primary connection is used with a header override (for non-configured aliases).
+- **Search and read:** all read tools (search, threads, analytics, digest) automatically fan out across all configured accounts and merge results, preserving the account prefix in returned IDs.
+
+### Tools across accounts
+
+**Fan out across all accounts:**
+- Search & read: `search_indexed_emails`, `get_emails`, `get_threads`, `get_thread_by_id`, `count_messages`, `get_labels`, `folder_stats`, `top_senders`, `get_contacts`, `get_volume_trends`, `get_email_analytics`, `get_email_stats`, `get_folders`
+- Triage: `get_inbox_digest`, `get_follow_up_candidates`, `get_actionable_threads`, `find_document_threads`, `prepare_meeting_context`
+- Diagnostics: `get_connection_status`, `get_runtime_status`, `run_doctor` (include an `accounts` array showing per-account status)
+
+**Account-specific (prefix to target):**
+- Actions: `mark_email_read`, `star_email`, `move_email`, `delete_email`, etc. — prefix the `emailId` with account slug if targeting a non-primary account
+- Drafts: `create_draft`, `get_draft`, `send_draft`, etc. — drafts live per account; prefix `draftId` to access non-primary drafts
+- Send: `send_email`, `reply_to_email`, `forward_email` — match the `from` address to route through the correct account's SMTP
+
+**Primary-only (for now):**
+- `list_drafts`, `list_remote_drafts` — show primary account drafts only
+- Thread actions (`move_thread`, `delete_thread`, `flag_thread`) — operate on the account the thread ID's prefix names
+
+### Verify setup
+
+Use `list_accounts` to check configured accounts and verify connection status:
+
+```bash
+proton-mail-bridge-client list_accounts --json
+```
+
+Output:
+```json
+[
+  { "slug": "primary", "address": "primary@proton.me", "isPrimary": true, "index": "fresh", "imap": "ok", "smtp": "ok" },
+  { "slug": "alias", "address": "alias@proton.me", "isPrimary": false, "index": "fresh", "imap": "ok", "smtp": "ok" },
+  { "slug": "business", "address": "business@custom.com", "isPrimary": false, "index": "stale", "imap": "timeout", "smtp": "ok" }
+]
+```
+
+---
+
 ## Try it: example Claude prompts
 
 **Morning triage**
