@@ -2735,6 +2735,24 @@ function sortByDateDesc<T>(items: T[], dateOf: (item: T) => string | undefined):
   });
 }
 
+// get_emails' multi-account offset/limit pagination math, pulled out for direct
+// testing. Applying `offset` separately to EACH account's own page before merging
+// is wrong — page 2 (offset=25,limit=25) would skip each account's own first 25
+// messages independently, then concatenate their page-2 results, which drops
+// items relative to page 2 of the globally-merged, newest-first timeline (found
+// live with interleaved messages across two accounts: page 2 skipped the
+// second-newest message overall). The caller is expected to have already fetched
+// each account from offset 0 up to (offset + limit) — since every account's own
+// list already arrives newest-first, that's guaranteed to include every item that
+// could rank in the global top (offset + limit) — and passes the sorted,
+// concatenated superset in here to be paginated as one timeline.
+export function paginateMergedAccountResults<T>(sortedMerged: T[], offset: number, limit: number): { page: T[]; hasMore: boolean } {
+  return {
+    page: sortedMerged.slice(offset, offset + limit),
+    hasMore: sortedMerged.length > offset + limit,
+  };
+}
+
 function mergeMailboxLabels(perAccountLabels: MailboxLabel[][]): MailboxLabel[] {
   const merged = new Map<string, MailboxLabel>();
   for (const labels of perAccountLabels) {
@@ -3558,6 +3576,12 @@ export function createServer(
   // string-prefix stripping over the non-primary slugs), so draftId resolution reuses
   // resolveAccountForEmailId itself rather than a second, parallel mechanism.
   const resolveAccountForDraftId = resolveAccountForEmailId;
+  // Same scheme again for delivery-queue ids (cancel_send/list_scheduled_sends) and
+  // snooze ids (cancel_snooze/list_snoozed) — both are per-account services (their own
+  // JSON file under that account's dataDir), so a queued/snoozed item's id needs the
+  // same slug-prefix round-trip as an emailId/draftId to be found again by account.
+  const resolveAccountForQueueId = resolveAccountForEmailId;
+  const resolveAccountForSnoozeId = resolveAccountForEmailId;
 
   // The slug to prefix a response id with for this bundle — undefined for the
   // primary account, so a primary-account id round-trips with NO prefix at all,
@@ -3847,25 +3871,6 @@ export function createServer(
             }
             undoWindowSeconds = requested;
           }
-          if (undoWindowSeconds > 0) {
-            // Scope limitation (follow-up round): the undo-send queue is always the
-            // primary's deliveryQueueService, so a delayed send with a non-primary
-            // `from` still only gets the header-override-on-primary fallback at fire
-            // time, not this account's own SMTP connection — unlike the immediate-send
-            // path above. Fine for now since `from` is still passed through in the
-            // payload and Proton accepts any verified address on the account.
-            const sendAt = new Date(Date.now() + undoWindowSeconds * 1000).toISOString();
-            const queued = await withAudit(auditService, name, args, async () =>
-              deliveryQueueService.enqueue(emailPayload, sendAt, "undo_send"),
-            );
-            return createTextResult({
-              queued: true,
-              id: queued.id,
-              sendAt: queued.sendAt,
-              note: `Not sent yet — will send in ~${undoWindowSeconds}s unless canceled with cancel_send. This server must stay running for the send to fire; if it's restarted before sendAt, the send fires on next startup instead.`,
-            });
-          }
-
           // A `from` matching a configured additional account routes through that
           // account's own SMTP connection — required under Bridge's Split Addresses
           // feature, where each address is its own separate IMAP/SMTP login, not just
@@ -3874,8 +3879,29 @@ export function createServer(
           // the primary connection with `from` passed through as a plain header
           // override (still valid for a genuine alias only reachable that way).
           const sendBundle = from ? accountManager.byAddress(from) : undefined;
+          const effectiveSendBundle = sendBundle ?? primaryBundle;
           const sendSmtp = sendBundle ? sendBundle.smtpService : smtpService;
           const sendImap = sendBundle ? sendBundle.imapService : imapService;
+
+          if (undoWindowSeconds > 0) {
+            // The undo-send queue now goes through the resolved account's OWN
+            // deliveryQueueService (same routing as the immediate-send path above),
+            // so it fires later via that account's real SMTP connection rather than
+            // always the primary's — a delayed send with a non-primary `from` used
+            // to only ever get the header-override-on-primary fallback at fire time.
+            // The returned id is prefixed with that account's slug (same scheme as
+            // emailId/draftId) so cancel_send/list_scheduled_sends can find it again.
+            const sendAt = new Date(Date.now() + undoWindowSeconds * 1000).toISOString();
+            const queued = await withAudit(auditService, name, args, async () =>
+              effectiveSendBundle.deliveryQueueService.enqueue(emailPayload, sendAt, "undo_send"),
+            );
+            return createTextResult({
+              queued: true,
+              id: withAccountPrefix(responseSlug(effectiveSendBundle), queued.id),
+              sendAt: queued.sendAt,
+              note: `Not sent yet — will send in ~${undoWindowSeconds}s unless canceled with cancel_send. This server must stay running for the send to fire; if it's restarted before sendAt, the send fires on next startup instead.`,
+            });
+          }
 
           const result = await withAudit(auditService, name, args, async () =>
             sendSmtp.sendEmail(emailPayload),
@@ -3900,16 +3926,42 @@ export function createServer(
         }
 
         case "cancel_send": {
-          const result = await withAudit(auditService, name, args, async () =>
-            deliveryQueueService.cancel(requireString(args, "id")),
+          // The queue id carries an account-slug prefix when the item was enqueued
+          // through a non-primary account (see send_email/schedule_draft) — resolve
+          // it back to that account's own deliveryQueueService, same as an
+          // emailId/draftId, instead of always checking the primary's queue.
+          const { bundle: cancelSendBundle, rest: cancelSendIdRest } = resolveAccountForQueueId(
+            requireString(args, "id"),
           );
-          return createTextResult(result);
+          const result = await withAudit(auditService, name, args, async () =>
+            cancelSendBundle.deliveryQueueService.cancel(cancelSendIdRest),
+          );
+          return createTextResult({ ...result, id: withAccountPrefix(responseSlug(cancelSendBundle), result.id) });
         }
 
         case "list_scheduled_sends": {
           const statusFilter = optionalString(args, "status");
-          const all = await withAudit(auditService, name, args, async () => deliveryQueueService.list());
-          const filtered = statusFilter ? all.filter((item) => item.status === statusFilter) : all;
+          // Fan out across every configured account's own delivery queue and tag each
+          // item's id with its owning account's slug — mirrors the read-tool fan-out
+          // pattern (get_emails etc.). Single-account guard keeps byte-identical output
+          // for the common case.
+          if (accountManager.all().length === 1) {
+            const all = await withAudit(auditService, name, args, async () => deliveryQueueService.list());
+            const filtered = statusFilter ? all.filter((item) => item.status === statusFilter) : all;
+            return createTextResult(filtered);
+          }
+          const perAccount = await withAudit(auditService, name, args, async () =>
+            Promise.all(
+              accountManager.all().map(async (bundle) => ({
+                bundle,
+                items: await bundle.deliveryQueueService.list(),
+              })),
+            ),
+          );
+          const tagged = perAccount.flatMap(({ bundle, items }) =>
+            items.map((item) => ({ ...item, id: withAccountPrefix(responseSlug(bundle), item.id) })),
+          );
+          const filtered = statusFilter ? tagged.filter((item) => item.status === statusFilter) : tagged;
           return createTextResult(filtered);
         }
 
@@ -4790,7 +4842,7 @@ export function createServer(
           if (pendingScheduled) {
             throw new McpError(
               ErrorCode.InvalidParams,
-              `This draft already has a pending scheduled send (id ${pendingScheduled.id}, sendAt ${pendingScheduled.sendAt}). Sending now would deliver it twice. Cancel that scheduled send with cancel_send first, or wait for it to fire.`,
+              `This draft already has a pending scheduled send (id ${withAccountPrefix(responseSlug(sendDraftBundle), pendingScheduled.id)}, sendAt ${pendingScheduled.sendAt}). Sending now would deliver it twice. Cancel that scheduled send with cancel_send first, or wait for it to fire.`,
             );
           }
           ensureValidEmails(draft.to, "to");
@@ -4995,7 +5047,7 @@ export function createServer(
           if (alreadyPendingScheduled) {
             throw new McpError(
               ErrorCode.InvalidParams,
-              `This draft already has a pending scheduled send (id ${alreadyPendingScheduled.id}, sendAt ${alreadyPendingScheduled.sendAt}). Scheduling it again would deliver it twice. Cancel the existing one with cancel_send first if you want a different sendAt.`,
+              `This draft already has a pending scheduled send (id ${withAccountPrefix(responseSlug(scheduleDraftBundle), alreadyPendingScheduled.id)}, sendAt ${alreadyPendingScheduled.sendAt}). Scheduling it again would deliver it twice. Cancel the existing one with cancel_send first if you want a different sendAt.`,
             );
           }
           const sendAt = requireString(args, "sendAt");
@@ -5047,7 +5099,7 @@ export function createServer(
 
           return createTextResult({
             queued: true,
-            id: queued.id,
+            id: withAccountPrefix(responseSlug(scheduleDraftBundle), queued.id),
             draftId: withAccountPrefix(responseSlug(scheduleDraftBundle), draft.id),
             sendAt: queued.sendAt,
             note: "The draft's content was snapshotted now and queued. This server must stay running for the send to fire at sendAt — if restarted first, it fires on next startup instead. The draft record itself is not automatically marked sent; use cancel_send with this id to abort before it fires.",
@@ -5106,31 +5158,41 @@ export function createServer(
               result.emails.map(emailSource),
             );
           }
-          // Merge strategy: live-fetch each account's own folder page (LIVE IMAP,
-          // one call per account), tag ids with the account slug, concatenate,
-          // re-sort newest-first, then re-apply the original limit across the
-          // merged set (not per account) and sum totals across accounts.
+          // Merge strategy: an `offset` applied separately to each account's own page
+          // BEFORE merging is wrong — e.g. offset=25,limit=25 (page 2) would skip each
+          // account's own first 25 messages independently, then concatenate their
+          // page-2 results, which is not the same as page 2 of the globally-merged,
+          // newest-first timeline (found live with interleaved messages across two
+          // accounts: page 2 skipped the second-newest message overall). Fixed by
+          // always fetching from offset 0 up to (requestedOffset + limit) from EVERY
+          // account — enough that each account's true contribution to the global top
+          // (requestedOffset + limit) is fully captured, since getEmails already
+          // returns newest-first — then merging, re-sorting, and applying the
+          // requested offset/limit to that merged superset instead of per account.
           const primarySlug = accountManager.primary().account.slug;
+          const requestedOffset = getEmailsInput.offset ?? 0;
+          const perAccountFetchLimit = requestedOffset + effectiveLimit;
           const perAccount = await Promise.all(
             accountManager.all().map(async (bundle) => {
-              const result = await bundle.imapService.getEmails(getEmailsInput);
+              const result = await bundle.imapService.getEmails({ ...getEmailsInput, offset: 0, limit: perAccountFetchLimit });
               return { bundle, result };
             }),
           );
           const taggedEmails = perAccount.flatMap(({ bundle, result }) =>
             result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlug), email.id) })),
           );
-          const merged = sortByDateDesc(taggedEmails, (email) => email.internalDate || email.date).slice(0, effectiveLimit);
+          const mergedAll = sortByDateDesc(taggedEmails, (email) => email.internalDate || email.date);
+          const { page: merged, hasMore } = paginateMergedAccountResults(mergedAll, requestedOffset, effectiveLimit);
           const total = perAccount.reduce((sum, { result }) => sum + result.total, 0);
           return createTextResult(
             {
               folder: getEmailsInput.folder?.trim() || "INBOX",
               total,
               limit: effectiveLimit,
-              offset: getEmailsInput.offset ?? 0,
+              offset: requestedOffset,
               emails: projectFields(merged, parseFieldsArg(args.fields)),
               returned: merged.length,
-              hasMore: merged.length === effectiveLimit,
+              hasMore,
               byAccount: perAccount.map(({ bundle, result }) => ({ slug: bundle.account.slug, total: result.total })),
             },
             false,
@@ -6025,12 +6087,19 @@ export function createServer(
           if (wakeAtTime <= Date.now()) {
             throw new McpError(ErrorCode.InvalidParams, "wakeAt must be in the future.");
           }
+          // emailId carries the same "<slug>::" prefix as everywhere else — resolve it
+          // to that account's own snoozeService instead of always the primary's, and
+          // prefix the returned ids (the snooze's own id, and the email id) the same
+          // way so cancel_snooze/list_snoozed can find them again by account.
+          const { bundle: snoozeBundle, rest: snoozeEmailIdRest } = resolveAccountForSnoozeId(
+            requireString(args, "emailId"),
+          );
           const snoozed = await withAudit(auditService, name, args, async () =>
-            snoozeService.snooze(requireString(args, "emailId"), new Date(wakeAtTime).toISOString()),
+            snoozeBundle.snoozeService.snooze(snoozeEmailIdRest, new Date(wakeAtTime).toISOString()),
           );
           return createTextResult({
-            id: snoozed.id,
-            emailId: snoozed.currentEmailId,
+            id: withAccountPrefix(responseSlug(snoozeBundle), snoozed.id),
+            emailId: withAccountPrefix(responseSlug(snoozeBundle), snoozed.currentEmailId),
             wakeAt: snoozed.wakeAt,
             note: "This server must stay running for the wake to fire at wakeAt — if restarted first, it wakes on next startup instead. Cancelable via cancel_snooze.",
           });
@@ -6040,16 +6109,45 @@ export function createServer(
           // cancel moves the mailbox back to its original folder, same as
           // snooze_email's own move — gate it the same way.
           ensureEmailActionAllowed(config.runtime, "archive");
-          const result = await withAudit(auditService, name, args, async () =>
-            snoozeService.cancel(requireString(args, "id")),
+          const { bundle: cancelSnoozeBundle, rest: cancelSnoozeIdRest } = resolveAccountForSnoozeId(
+            requireString(args, "id"),
           );
-          return createTextResult(result);
+          const result = await withAudit(auditService, name, args, async () =>
+            cancelSnoozeBundle.snoozeService.cancel(cancelSnoozeIdRest),
+          );
+          return createTextResult({
+            ...result,
+            id: withAccountPrefix(responseSlug(cancelSnoozeBundle), result.id),
+            currentEmailId: withAccountPrefix(responseSlug(cancelSnoozeBundle), result.currentEmailId),
+          });
         }
 
         case "list_snoozed": {
           const statusFilter = optionalString(args, "status");
-          const all = await withAudit(auditService, name, args, async () => snoozeService.list());
-          const filtered = statusFilter ? all.filter((item) => item.status === statusFilter) : all;
+          // Same fan-out pattern as list_scheduled_sends — each account has its own
+          // independent snoozeService/JSON file. Single-account guard keeps
+          // byte-identical output for the common case.
+          if (accountManager.all().length === 1) {
+            const all = await withAudit(auditService, name, args, async () => snoozeService.list());
+            const filtered = statusFilter ? all.filter((item) => item.status === statusFilter) : all;
+            return createTextResult(filtered);
+          }
+          const perAccount = await withAudit(auditService, name, args, async () =>
+            Promise.all(
+              accountManager.all().map(async (bundle) => ({
+                bundle,
+                items: await bundle.snoozeService.list(),
+              })),
+            ),
+          );
+          const tagged = perAccount.flatMap(({ bundle, items }) =>
+            items.map((item) => ({
+              ...item,
+              id: withAccountPrefix(responseSlug(bundle), item.id),
+              currentEmailId: withAccountPrefix(responseSlug(bundle), item.currentEmailId),
+            })),
+          );
+          const filtered = statusFilter ? tagged.filter((item) => item.status === statusFilter) : tagged;
           return createTextResult(filtered);
         }
 
@@ -7198,16 +7296,26 @@ export function createServer(
 
         case "create_thread_reply_draft":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
+          // A threadId is only ever valid within the single account it was produced
+          // by — same "<slug>::" resolution as get_thread_by_id/move_thread. This was
+          // previously always reading via the PRIMARY account's localIndexService/
+          // imapService regardless of the threadId's own prefix, so a reply drafted
+          // against a non-primary account's thread either resolved the wrong thread
+          // (if the primary happened to have a same-shaped local id) or threw not
+          // found. Every read below now goes through the resolved threadBundle.
+          const { bundle: threadReplyBundle, rest: threadReplyIdRest } = resolveAccountForEmailId(
+            requireString(args, "threadId"),
+          );
+          await maybeRefreshLocalIndex(threadReplyBundle.imapService, threadReplyBundle.localIndexService, {
             force: normalizeBoolean(args.syncBefore, false),
             folder: "INBOX",
             limitPerFolder: 100,
           });
 
-          const thread = await localIndexService.getThreadById(requireString(args, "threadId"));
+          const thread = await threadReplyBundle.localIndexService.getThreadById(threadReplyIdRest);
           const targetMessage = pickReplyTargetFromThread(
             thread,
-            config.smtp.username,
+            threadReplyBundle.config.smtp.username,
             normalizeBoolean(args.preferLatestInbound, true),
           );
 
@@ -7215,14 +7323,14 @@ export function createServer(
             throw new McpError(ErrorCode.InvalidParams, "Unable to resolve a reply target from the thread.");
           }
 
-          const detail = await imapService.getEmailById(targetMessage.primaryEmailId);
+          const detail = await threadReplyBundle.imapService.getEmailById(targetMessage.primaryEmailId);
           const body = requireString(args, "body");
           const isHtml = normalizeBoolean(args.isHtml, false);
           const replyAll = normalizeBoolean(args.replyAll, false);
           const attachments = optionalAttachmentList(args.attachments);
           const extraCc = parseEmails(optionalString(args, "cc"));
           const extraBcc = parseEmails(optionalString(args, "bcc"));
-          const recipients = getReplyRecipients(detail, config.smtp.username, replyAll);
+          const recipients = getReplyRecipients(detail, threadReplyBundle.config.smtp.username, replyAll);
           const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
           const to = uniqueAddresses(recipients.to);
 

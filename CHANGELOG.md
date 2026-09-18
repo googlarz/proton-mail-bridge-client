@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.3] — 2026-09-18
+
+Five multi-account bugs found and confirmed by an independent external code review of v2.1.2 (commit `95d1d2c`), reproduced with fake mail services, and fixed.
+
+### Fixed
+- **Scheduled sends from a non-primary account could not be listed or canceled.** `schedule_draft`/`send_email`'s undo-send correctly enqueue into the *resolved* account's own delivery queue, but `cancel_send` and `list_scheduled_sends` only ever read the primary's queue — so a scheduled item on another account was invisible and uncancelable while it sat pending. Queue ids now carry the same `<slug>::` account prefix as an emailId/draftId; `cancel_send` resolves it back to the owning account, and `list_scheduled_sends` fans out across every account's queue (same pattern as the other multi-account list tools).
+- **`send_email`'s undo-send (delayed) queue always used the primary account's connection**, even when `from` matched a different configured account — so the immediate-send path correctly used that account's own SMTP, but the delayed path silently fell back to a primary-connection header override at fire time. It now enqueues into the resolved account's own delivery queue, which fires through that account's own SMTP connection.
+- **`get_emails`' cross-account pagination skipped messages.** `offset` was applied separately to each account's own page *before* merging into one newest-first timeline — reproduced with four interleaved messages across two accounts, where page 2 skipped the second-newest message overall. Each account is now fetched from offset 0 up to (offset + limit) — sufficient to capture everything that could rank in the global top page, since each account's own list already arrives newest-first — merged, and paginated as one timeline.
+- **`create_thread_reply_draft` failed on a non-primary account's thread.** `threadId` was read via the primary account's local index and IMAP connection regardless of its own `<slug>::` prefix, instead of being resolved to the owning account first — the same convention already used by `get_thread_by_id`/`move_thread`.
+- **`snooze_email` (and its `cancel_snooze`/`list_snoozed` siblings) ignored a non-primary account's `emailId`.** All three passed prefixed ids straight to the primary's snoozeService without resolving the owning account — the identical bug pattern as the delivery queue, in the parallel subsystem right next to it, fixed the same way (resolve the account, prefix the returned ids, fan out `list_snoozed` across accounts).
+
+### Added
+- `test/get-emails-cross-account-pagination.test.mjs` — regression coverage for the pagination fix above, reproducing the exact interleaved-messages scenario from the report.
+
 ## [2.1.2] — 2026-09-18
 
 ### Fixed
