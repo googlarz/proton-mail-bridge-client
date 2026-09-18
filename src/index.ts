@@ -1831,14 +1831,26 @@ function normalizeStructuredContent(value: unknown): Record<string, unknown> | u
   return normalized as Record<string, unknown>;
 }
 
-function withSources<T>(value: T, sources: CitationSource[]): T | (T & { sources: CitationSource[] }) {
-  if (sources.length === 0 || !value || typeof value !== "object" || Array.isArray(value)) {
-    return value;
-  }
-  return {
-    ...(value as Record<string, unknown>),
-    sources,
-  } as T & { sources: CitationSource[] };
+// Found live (self-review, token-efficiency pass): this used to merge the full
+// CitationSource[] (uri, name, title, description, mimeType, provider, AND a
+// locator object repeating id/folder/from/subject/date) into the returned
+// payload — which then got serialized into content[0].text AND, separately,
+// into structuredContent (createTextResult always builds both). For a
+// search/list-style tool, almost every field in each source is ALREADY present
+// on the corresponding item in the tool's own result array (e.g.
+// search_indexed_emails' sources[].snippet duplicates emails[].preview
+// character-for-character, sources[].locator.subject duplicates
+// emails[].subject, etc.) — confirmed live at roughly doubling a 10-result
+// search's response size for zero new information. The same citation data is
+// already emitted, far more compactly, as its own resource_link content block
+// per source (see citationToResourceLink below) — no code in this repo (CLI,
+// tests, or index.ts itself) ever reads a result's `.sources` field back, so
+// nothing depends on it being embedded in the payload too. Kept as a
+// pass-through function (not deleted) so createTextResult's call sites don't
+// all need touching if a real reason to re-add a *trimmed* sources field ever
+// comes up.
+export function withSources<T>(value: T, _sources: CitationSource[]): T {
+  return value;
 }
 
 function createTextResult(

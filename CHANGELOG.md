@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.9] — 2026-09-18
+
+Self-initiated token-efficiency review (requested follow-up testing), found live against the user's real mailbox rather than by an external reviewer.
+
+### Fixed
+- **Every tool response carrying citations embedded the full `CitationSource[]` a second time inside its own JSON payload** — on top of the same data already being serialized twice by `createTextResult` (`content[0].text` and `structuredContent`), and on top of a third, compact copy already emitted separately as `resource_link` content blocks. For a search/list-style tool, nearly every field in each embedded source duplicated a field already present on the corresponding item in the tool's own result array — confirmed live on `search_indexed_emails`: `sources[].snippet` was character-for-character identical to `emails[].preview`, `sources[].locator.subject`/`.from`/`.date` duplicated `emails[].subject`/`.from`/`.date`, roughly doubling a 10-result search's response for zero new information. No code anywhere in this repo (CLI, tests, or the server itself) ever read a result's `.sources` field back — only the `resource_link` blocks are actually consumed for citation purposes. This affects essentially every read tool that returns citations (search, list, digest, thread, and draft tools alike), so it's one of the highest-leverage token reductions made this cycle.
+
+### Added
+- `test/response-sources-deduplication.test.mjs` — regression coverage for the fix above.
+
+### Investigated and left unchanged
+- The `content[0].text` / `structuredContent` double-serialization itself (distinct from the `sources` duplication above) is real but load-bearing: the CLI's `--json` output and several internal CLI code paths read `structuredContent` directly. Removing it would break `src/cli.ts`. Both external performance reviews this cycle also explicitly declined to assume a client bills tokens for both copies. Left as-is; the established mitigation (shrinking the payload itself — attachment/body redaction, pagination) is the safe lever here, not removing the mechanism.
+- Attachment/export tools (`get_attachment_content`, `save_attachment`, `save_attachments`, `export_email`) were re-checked and are already well-guarded: base64 content requires explicit opt-in and is capped by `PROTONMAIL_MAX_INLINE_BYTES`, and disk-writing paths return only metadata. Audit logs (`get_audit_logs`) already redact body/html/text/base64/attachment content and truncate long strings. No changes needed.
+
 ## [2.1.8] — 2026-09-18
 
 Six issues from an external "everyday scenarios" review (16 integration-level MCP scenarios against v2.1.6/`e9773e4`).
