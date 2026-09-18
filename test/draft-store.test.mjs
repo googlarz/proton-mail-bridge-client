@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { DraftStoreService } from "../dist/services/draft-store-service.js";
+import { DraftStoreService, draftSyncFingerprint } from "../dist/services/draft-store-service.js";
 
 function createConfig(dataDir) {
   return {
@@ -163,6 +163,46 @@ test("updateDraft leaves a sync_failed state as sync_failed", async () => {
     await store.markRemoteSyncError(draft.id, "boom");
     const edited = await store.updateDraft(draft.id, { subject: "S2" });
     assert.equal(edited.remoteSyncState, "sync_failed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Found by external review of 2.1.17: sync_draft_to_remote uploads version A; while
+// that is in flight update_draft(syncToRemote:false) stores version B; when the
+// older upload finishes, markRemoteSynced used to mark the CURRENT record (B) synced.
+test("markRemoteSynced does not mark a newer local edit as synced", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "draft-sync-race-"));
+  try {
+    const store = new DraftStoreService(createConfig(dir));
+    const draft = await store.createDraft({ to: ["a@example.com"], subject: "Version A", body: "b" });
+    const fingerprintA = draftSyncFingerprint(await store.getDraft(draft.id));
+
+    await store.updateDraft(draft.id, { subject: "Version B" });
+    const ref = { folder: "Drafts", emailId: "Drafts::1", syncedAt: new Date().toISOString() };
+    const result = await store.markRemoteSynced(draft.id, ref, fingerprintA);
+
+    assert.equal(result.subject, "Version B", "local content is untouched");
+    assert.equal(result.remoteSyncState, "local_only");
+    assert.equal(result.remoteDraft?.emailId, "Drafts::1", "remote ref kept so the next sync updates that copy");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("markRemoteSynced marks synced when the uploaded version is still current, and downgrades on a stale late finish", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "draft-sync-race-"));
+  try {
+    const store = new DraftStoreService(createConfig(dir));
+    const draft = await store.createDraft({ to: ["a@example.com"], subject: "A", body: "b" });
+    const fpA = draftSyncFingerprint(await store.getDraft(draft.id));
+    await store.updateDraft(draft.id, { subject: "B" });
+    const fpB = draftSyncFingerprint(await store.getDraft(draft.id));
+    const ref = { folder: "Drafts", emailId: "Drafts::1", syncedAt: new Date().toISOString() };
+
+    assert.equal((await store.markRemoteSynced(draft.id, ref, fpB)).remoteSyncState, "synced");
+    // the older upload (A) finishing last: remote now holds A, local is B
+    assert.equal((await store.markRemoteSynced(draft.id, ref, fpA)).remoteSyncState, "local_only");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

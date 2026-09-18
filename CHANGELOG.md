@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.18] — 2026-09-18
+
+### Fixed
+- **A finishing older sync marked a newer local edit as `synced`.** `sync_draft_to_remote` uploads version A; meanwhile `update_draft(syncToRemote:false)` stores B; when A's upload finished, `markRemoteSynced` marked the current record (B) `synced`, so a later identical `update_draft` skipped IMAP while the remote copy still held A. `markRemoteSynced` now receives a fingerprint (`draftSyncFingerprint`, sha256 of every field that goes into the remote MIME) of the version actually uploaded and checks it against the stored record inside the store lock: on a mismatch the draft stays `local_only` (the remote ref is still recorded so the next sync updates that copy). Also covers two syncs finishing in reverse order. Content-based, so same-millisecond writes can't collide. Found by external review of 2.1.17.
+
+### Added
+- Two `draft-store.test.mjs` cases for the stale-finish and reverse-order cases.
+
 ## [2.1.17] — 2026-09-18
 
 ### Fixed

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFileSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -35,6 +35,18 @@ function createEmptyStore(): DraftStoreFile {
     updatedAt: undefined,
     drafts: {},
   };
+}
+
+// Hash of every draft field that ends up in the remote MIME (see syncDraftToRemote).
+export function draftSyncFingerprint(draft: DraftRecord): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        draft.to, draft.cc, draft.bcc, draft.subject, draft.body, draft.isHtml, draft.priority,
+        draft.replyTo, draft.from, draft.inReplyTo, draft.references, draft.draftMessageId, draft.attachments,
+      ]),
+    )
+    .digest("hex");
 }
 
 export class DraftStoreService {
@@ -257,19 +269,24 @@ export class DraftStoreService {
     });
   }
 
-  async markRemoteSynced(id: string, remoteDraft: RemoteDraftRef): Promise<DraftRecord> {
+  // syncedFingerprint = draftSyncFingerprint() of the draft version whose MIME was
+  // actually uploaded. If the stored draft has changed since (a newer local edit landed
+  // while the upload was in flight), the remote copy is stale, so the draft must not be
+  // marked synced — but the remote ref is still recorded so the next sync updates it.
+  async markRemoteSynced(id: string, remoteDraft: RemoteDraftRef, syncedFingerprint?: string): Promise<DraftRecord> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
       const existing = store.drafts[id];
       if (!existing) {
         throw new Error(`Draft not found for id ${id}`);
       }
+      const stillCurrent = syncedFingerprint === undefined || draftSyncFingerprint(existing) === syncedFingerprint;
 
       const updatedAt = new Date().toISOString();
       const nextDraft: DraftRecord = {
         ...existing,
         updatedAt,
-        remoteSyncState: "synced",
+        remoteSyncState: stillCurrent ? "synced" : "local_only",
         remoteSyncError: undefined,
         remoteDraft,
       };

@@ -22,7 +22,7 @@ import { AnalyticsService } from "./services/analytics-service.js";
 import { AuditService } from "./services/audit-service.js";
 import { BackgroundSyncService } from "./services/background-sync-service.js";
 import { DeliveryQueueService } from "./services/delivery-queue-service.js";
-import { DraftStoreService } from "./services/draft-store-service.js";
+import { DraftStoreService, draftSyncFingerprint } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
 import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService, UID_VALIDITY_MISMATCH_ERROR } from "./services/simple-imap-service.js";
 import { applySignature, plainTextToHtml, SMTPService } from "./services/smtp-service.js";
@@ -2774,7 +2774,7 @@ async function syncDraftToRemote(
     });
 
     return {
-      draft: await draftStore.markRemoteSynced(draft.id, remoteDraft),
+      draft: await draftStore.markRemoteSynced(draft.id, remoteDraft, draftSyncFingerprint(draft)),
       remoteSync: {
         ok: true,
         emailId: remoteDraft.emailId,
