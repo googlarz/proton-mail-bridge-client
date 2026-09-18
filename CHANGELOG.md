@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.9] — 2026-09-18
+
+Prompted by live testing against a Proton account with multiple addresses (main address, a `.pm.me` address, and a custom-domain address, all on the same account with Bridge's Split Addresses feature).
+
+### Added
+- **`send_email`, `reply_to_email`, `reply_all_email`, `forward_email`, `create_draft`, `update_draft`, `send_draft`, and `schedule_draft` now accept an optional `from` address**, letting you send or draft as any address verified on your Proton account instead of always the one Bridge happens to be logged in with. `fromName` previously only changed the display name shown to recipients, never the actual sending address, despite that being the natural way to try it — the tool description now makes that limit explicit for `fromName` and the new `from` field covers what people actually wanted. Proton's outgoing MTA accepts any address on the account regardless of Bridge's login identity; this server has no way to enumerate your account's own addresses, so an address not on your account is rejected by Proton at send time — same as it would be from any other mail client.
+- **Search and read results now report `deliveredTo`** — the address (from the `Delivered-To` header) a message actually arrived at. All of an account's aliases and additional addresses deliver into the same single IMAP mailbox, so this was previously the only missing piece needed to tell them apart. Captured via the same header fetch already used for automated-sender detection (no extra IMAP round-trip); existing indexed messages read back as `deliveredTo: undefined` until a full re-sync backfills it.
+
+### Investigated, not a bug here
+- A `run_doctor` call with no arguments reportedly failed validation ("expected nonoptional, received undefined") despite every field being optional with a documented default. Reproduced directly against the compiled server with a real MCP client (`Client` + `StdioClientTransport`) calling `run_doctor` with `arguments: {}` — it succeeded normally. The error originates in the calling client's own JSON-Schema-to-validator conversion, not in this server; no change was needed here.
+
 ## [2.0.8] — 2026-09-09
 
 ### Fixed
