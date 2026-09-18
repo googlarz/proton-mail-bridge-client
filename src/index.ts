@@ -3306,6 +3306,18 @@ export function createServer(
     return { bundle: accountManager.bySlugOrPrimary(accountSlug), rest };
   }
 
+  // Re-applies a bundle's account-slug prefix to an id that came back bare from that
+  // bundle's own imapService (which only ever understands unprefixed ids) — so a
+  // caller acting on a non-primary account gets back an id that resolveAccountForEmailId
+  // will route to the same account next time. The primary account's ids stay unprefixed,
+  // exactly as before multi-account support existed.
+  function prefixedIdFor(bundle: AccountBundle, rawId: string): string {
+    return withAccountPrefix(
+      bundle.account.slug === accountManager.primary().account.slug ? undefined : bundle.account.slug,
+      rawId,
+    );
+  }
+
   if (options.startBackgroundSync) {
     // Every configured account gets its own independent sync/delivery-queue/snooze
     // loop — additional accounts are not just readable, they stay live-synced exactly
@@ -3610,10 +3622,12 @@ export function createServer(
         }
 
         case "get_unsubscribe_info": {
-          const detail = await imapService.getEmailById(requireString(args, "emailId"));
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          const detail = await bundle.imapService.getEmailById(emailId);
           const info = extractUnsubscribeInfo(detail);
           return createTextResult({
-            emailId: detail.id,
+            emailId: prefixedIdFor(bundle, detail.id),
             hasUnsubscribeHeader: Boolean(info.mailto || info.url),
             mailto: info.mailto,
             url: info.url,
@@ -3624,7 +3638,9 @@ export function createServer(
         }
 
         case "unsubscribe_sender": {
-          const detail = await imapService.getEmailById(requireString(args, "emailId"));
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          const detail = await bundle.imapService.getEmailById(emailId);
           const info = extractUnsubscribeInfo(detail);
           if (!info.mailto) {
             if (info.url) {
@@ -3643,7 +3659,7 @@ export function createServer(
           ensureOutboundRecipientsAllowed(config.runtime, config.smtp.username, [info.mailto]);
 
           const result = await withAudit(auditService, name, args, () =>
-            smtpService.sendEmail({
+            bundle.smtpService.sendEmail({
               to: [info.mailto as string],
               subject: "unsubscribe",
               body: "unsubscribe",
@@ -3652,7 +3668,7 @@ export function createServer(
           );
 
           return createTextResult({
-            emailId: detail.id,
+            emailId: prefixedIdFor(bundle, detail.id),
             unsubscribedVia: info.mailto,
             messageId: result.messageId,
             accepted: result.accepted,
@@ -3684,7 +3700,9 @@ export function createServer(
         case "reply_to_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Reply to email ${String(args.emailId ?? "?")}`);
           ensureSendAllowed(config.runtime);
-          const detail = await imapService.getEmailById(requireString(args, "emailId"));
+          const rawEmailIdReply = requireString(args, "emailId");
+          const { bundle: bundleReply, rest: emailIdReply } = resolveAccountForEmailId(rawEmailIdReply);
+          const detail = await bundleReply.imapService.getEmailById(emailIdReply);
           const markdownBodyReply = optionalString(args, "markdownBody");
           const body = markdownBodyReply ? markdownBodyReply : requireString(args, "body");
           const isHtml = markdownBodyReply ? false : normalizeBoolean(args.isHtml, false);
@@ -3728,11 +3746,11 @@ export function createServer(
           }
 
           if (dryRunReply) {
-            return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc: extraBcc }, subject: prefixedSubject(detail.subject, "Re:"), note: "No email was sent." }, false, [emailSource(detail)]);
+            return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc: extraBcc }, subject: prefixedSubject(detail.subject, "Re:"), note: "No email was sent." }, false, [emailSource({ ...detail, id: prefixedIdFor(bundleReply, detail.id) })]);
           }
 
           const result = await withAudit(auditService, name, args, async () =>
-            smtpService.sendEmail({
+            bundleReply.smtpService.sendEmail({
               to,
               cc,
               bcc: extraBcc,
@@ -3755,13 +3773,13 @@ export function createServer(
           try {
             const verifyMsgId = result.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(imapService, verifyMsgId);
+              const scv = await verifySentCopy(bundleReply.imapService, verifyMsgId);
               if (scv.found) sentCopyTokenReply = "[sent-copy:verified]";
             }
           } catch (_) {}
 
           return createTextResult({
-            repliedTo: detail.id,
+            repliedTo: prefixedIdFor(bundleReply, detail.id),
             to,
             cc,
             messageId: result.messageId,
@@ -3769,13 +3787,15 @@ export function createServer(
             rejected: result.rejected,
             response: result.response,
             sentCopy: sentCopyTokenReply,
-          }, false, [emailSource(detail)]);
+          }, false, [emailSource({ ...detail, id: prefixedIdFor(bundleReply, detail.id) })]);
         }
 
         case "reply_all_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Reply-all to email ${String(args.emailId ?? "?")}`);
           ensureSendAllowed(config.runtime);
-          const detailRa = await imapService.getEmailById(requireString(args, "emailId"));
+          const rawEmailIdRa = requireString(args, "emailId");
+          const { bundle: bundleRa, rest: emailIdRa } = resolveAccountForEmailId(rawEmailIdRa);
+          const detailRa = await bundleRa.imapService.getEmailById(emailIdRa);
           const markdownBodyRa = optionalString(args, "markdownBody");
           const bodyRa = markdownBodyRa ? markdownBodyRa : requireString(args, "body");
           const isHtmlRa = markdownBodyRa ? false : normalizeBoolean(args.isHtml, false);
@@ -3821,7 +3841,7 @@ export function createServer(
           const replyBodyRa = includeQuoteRa ? buildReplyText(detailRa, signedReplyRa.body) : signedReplyRa.body;
 
           const resultRa = await withAudit(auditService, name, args, async () =>
-            smtpService.sendEmail({
+            bundleRa.smtpService.sendEmail({
               to: toRa,
               cc: ccRa,
               bcc: extraBccRa,
@@ -3844,13 +3864,13 @@ export function createServer(
           try {
             const verifyMsgId = resultRa.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(imapService, verifyMsgId);
+              const scv = await verifySentCopy(bundleRa.imapService, verifyMsgId);
               if (scv.found) sentCopyTokenRa = "[sent-copy:verified]";
             }
           } catch (_) {}
 
           return createTextResult({
-            repliedTo: detailRa.id,
+            repliedTo: prefixedIdFor(bundleRa, detailRa.id),
             to: toRa,
             cc: ccRa,
             messageId: resultRa.messageId,
@@ -3858,13 +3878,15 @@ export function createServer(
             rejected: resultRa.rejected,
             response: resultRa.response,
             sentCopy: sentCopyTokenRa,
-          }, false, [emailSource(detailRa)]);
+          }, false, [emailSource({ ...detailRa, id: prefixedIdFor(bundleRa, detailRa.id) })]);
         }
 
         case "forward_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Forward email ${String(args.emailId ?? "?")} to ${String(args.to ?? "?")}`);
           ensureSendAllowed(config.runtime);
-          const detail = await imapService.getEmailById(requireString(args, "emailId"));
+          const rawEmailIdFwd = requireString(args, "emailId");
+          const { bundle: bundleFwd, rest: emailIdFwd } = resolveAccountForEmailId(rawEmailIdFwd);
+          const detail = await bundleFwd.imapService.getEmailById(emailIdFwd);
           const to = parseEmails(requireString(args, "to"));
           const cc = parseEmails(optionalString(args, "cc"));
           const bcc = parseEmails(optionalString(args, "bcc"));
@@ -3923,7 +3945,7 @@ export function createServer(
             ? await Promise.all(
                 detail.attachments
                   .filter((a) => a.id && (!attachmentParts || (a.part !== undefined && attachmentParts.includes(a.part))))
-                  .map((a) => imapService.getAttachmentForForward(detail.id, a.id as string)),
+                  .map((a) => bundleFwd.imapService.getAttachmentForForward(detail.id, a.id as string)),
               )
             : [];
           const fwdAttachments = [...originalAttachments, ...attachments];
@@ -3934,7 +3956,7 @@ export function createServer(
           const signedFwd = applySignature(body ?? "", htmlBody, normalizeBoolean(args.appendSignature, true));
 
           const result = await withAudit(auditService, name, args, async () =>
-            smtpService.sendEmail({
+            bundleFwd.smtpService.sendEmail({
               to,
               cc,
               bcc,
@@ -3955,13 +3977,13 @@ export function createServer(
           try {
             const verifyMsgId = result.messageId;
             if (verifyMsgId) {
-              const scv = await verifySentCopy(imapService, verifyMsgId);
+              const scv = await verifySentCopy(bundleFwd.imapService, verifyMsgId);
               if (scv.found) sentCopyTokenFwd = "[sent-copy:verified]";
             }
           } catch (_) {}
 
           return createTextResult({
-            forwardedMessage: detail.id,
+            forwardedMessage: prefixedIdFor(bundleFwd, detail.id),
             to,
             cc,
             messageId: result.messageId,
@@ -3969,7 +3991,7 @@ export function createServer(
             rejected: result.rejected,
             response: result.response,
             sentCopy: sentCopyTokenFwd,
-          }, false, [emailSource(detail)]);
+          }, false, [emailSource({ ...detail, id: prefixedIdFor(bundleFwd, detail.id) })]);
         }
 
         case "create_draft": {
@@ -4686,7 +4708,9 @@ export function createServer(
         }
 
         case "get_email_by_id": {
-          const detail = await imapService.getEmailById(requireString(args, "emailId"));
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          const detail = await bundle.imapService.getEmailById(emailId);
           const preferHtml = normalizeBoolean(args.preferHtml, false);
           const maxBodyLength = normalizeLimit(args.maxBodyLength, undefined as unknown as number, 1, 500_000);
           const showHeaders = normalizeBoolean(args.showHeaders, false);
@@ -4698,7 +4722,9 @@ export function createServer(
           // on top without ever removing the always-present full map.
           if (showHeaders) output.headers = detail.headers;
 
-          return createTextResult(output, false, [emailSource(detail), ...detail.attachments.map((attachment) => attachmentSource(detail.id, attachment))]);
+          const prefixedEmailId = prefixedIdFor(bundle, detail.id);
+          output.id = prefixedEmailId;
+          return createTextResult(output, false, [emailSource({ ...detail, id: prefixedEmailId }), ...detail.attachments.map((attachment) => attachmentSource(prefixedEmailId, attachment))]);
         }
 
         case "get_emails_by_ids": {
@@ -4783,7 +4809,8 @@ export function createServer(
 
         case "update_message_labels": {
           ensureMailboxWriteAllowed(config.runtime);
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const labelsToAdd = Array.isArray(args.labelsToAdd)
             ? (args.labelsToAdd as unknown[]).map(String)
             : [];
@@ -4799,14 +4826,15 @@ export function createServer(
           // other mutation handler below.
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.updateMessageLabels(emailId, labelsToAdd, labelsToRemove, uidValidity),
+            bundle.imapService.updateMessageLabels(emailId, labelsToAdd, labelsToRemove, uidValidity),
           );
-          return createTextResult(result, false, [emailSource({ id: emailId } as Parameters<typeof emailSource>[0])]);
+          return createTextResult(result, false, [emailSource({ id: prefixedIdFor(bundle, emailId) } as Parameters<typeof emailSource>[0])]);
         }
 
         case "update_message_flags": {
           ensureMailboxWriteAllowed(config.runtime);
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const flagsToAdd = Array.isArray(args.flagsToAdd)
             ? (args.flagsToAdd as unknown[]).map(String)
             : [];
@@ -4818,9 +4846,9 @@ export function createServer(
           }
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.updateMessageFlags(emailId, flagsToAdd, flagsToRemove, uidValidity),
+            bundle.imapService.updateMessageFlags(emailId, flagsToAdd, flagsToRemove, uidValidity),
           );
-          return createTextResult(result, false, [emailSource({ id: emailId } as Parameters<typeof emailSource>[0])]);
+          return createTextResult(result, false, [emailSource({ id: prefixedIdFor(bundle, emailId) } as Parameters<typeof emailSource>[0])]);
         }
 
         case "count_messages": {
@@ -5189,11 +5217,12 @@ export function createServer(
             config.runtime,
             normalizeBoolean(args.isRead, true) ? "mark_read" : "mark_unread",
           );
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
             await withAudit(auditService, name, args, async () =>
-              imapService.markEmailRead(
+              bundle.imapService.markEmailRead(
                 emailId,
                 normalizeBoolean(args.isRead, true),
                 uidValidity,
@@ -5207,11 +5236,12 @@ export function createServer(
             config.runtime,
             normalizeBoolean(args.isStarred, true) ? "star" : "unstar",
           );
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
             await withAudit(auditService, name, args, async () =>
-              imapService.starEmail(
+              bundle.imapService.starEmail(
                 emailId,
                 normalizeBoolean(args.isStarred, true),
                 uidValidity,
@@ -5223,12 +5253,13 @@ export function createServer(
         case "move_email":
         {
           ensureEmailActionAllowed(config.runtime, "move");
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const targetFolder = requireString(args, "targetFolder");
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () => {
             try {
-              return await imapService.moveEmail(emailId, targetFolder, uidValidity);
+              return await bundle.imapService.moveEmail(emailId, targetFolder, uidValidity);
             } catch (error) {
               if (isMissingTargetFolderError(error)) {
                 throw new McpError(
@@ -5239,88 +5270,95 @@ export function createServer(
               throw error;
             }
           });
-          const sources = result.targetEmailId
+          const targetEmailId = result.targetEmailId ? prefixedIdFor(bundle, result.targetEmailId) : undefined;
+          const sources = targetEmailId
             ? [
                 {
-                  uri: buildEmailResourceUri(result.targetEmailId),
-                  name: result.targetEmailId,
-                  title: `Moved email ${result.targetEmailId}`,
+                  uri: buildEmailResourceUri(targetEmailId),
+                  name: targetEmailId,
+                  title: `Moved email ${targetEmailId}`,
                   description: `${result.targetFolder} · uid ${result.targetUid || result.uid}`,
                   mimeType: "message/rfc822",
                 },
               ]
             : [];
-          return createTextResult(result, false, sources);
+          return createTextResult({ ...result, targetEmailId }, false, sources);
         }
 
         case "archive_email":
         {
           ensureEmailActionAllowed(config.runtime, "archive");
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.archiveEmail(emailId, uidValidity),
+            bundle.imapService.archiveEmail(emailId, uidValidity),
           );
-          const sources = result.targetEmailId
+          const targetEmailId = result.targetEmailId ? prefixedIdFor(bundle, result.targetEmailId) : undefined;
+          const sources = targetEmailId
             ? [
                 {
-                  uri: buildEmailResourceUri(result.targetEmailId),
-                  name: result.targetEmailId,
-                  title: `Archived email ${result.targetEmailId}`,
+                  uri: buildEmailResourceUri(targetEmailId),
+                  name: targetEmailId,
+                  title: `Archived email ${targetEmailId}`,
                   description: `${result.targetFolder} · uid ${result.targetUid || result.uid}`,
                   mimeType: "message/rfc822",
                 },
               ]
             : [];
-          return createTextResult(result, false, sources);
+          return createTextResult({ ...result, targetEmailId }, false, sources);
         }
 
         case "trash_email":
         {
           ensureEmailActionAllowed(config.runtime, "trash");
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.trashEmail(emailId, uidValidity),
+            bundle.imapService.trashEmail(emailId, uidValidity),
           );
-          const sources = result.targetEmailId
+          const targetEmailId = result.targetEmailId ? prefixedIdFor(bundle, result.targetEmailId) : undefined;
+          const sources = targetEmailId
             ? [
                 {
-                  uri: buildEmailResourceUri(result.targetEmailId),
-                  name: result.targetEmailId,
-                  title: `Trashed email ${result.targetEmailId}`,
+                  uri: buildEmailResourceUri(targetEmailId),
+                  name: targetEmailId,
+                  title: `Trashed email ${targetEmailId}`,
                   description: `${result.targetFolder} · uid ${result.targetUid || result.uid}`,
                   mimeType: "message/rfc822",
                 },
               ]
             : [];
-          return createTextResult(result, false, sources);
+          return createTextResult({ ...result, targetEmailId }, false, sources);
         }
 
         case "restore_email":
         {
           ensureEmailActionAllowed(config.runtime, "restore");
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.restoreEmail(
+            bundle.imapService.restoreEmail(
               emailId,
               optionalString(args, "targetFolder"),
               uidValidity,
             ),
           );
-          const sources = result.targetEmailId
+          const targetEmailId = result.targetEmailId ? prefixedIdFor(bundle, result.targetEmailId) : undefined;
+          const sources = targetEmailId
             ? [
                 {
-                  uri: buildEmailResourceUri(result.targetEmailId),
-                  name: result.targetEmailId,
-                  title: `Restored email ${result.targetEmailId}`,
+                  uri: buildEmailResourceUri(targetEmailId),
+                  name: targetEmailId,
+                  title: `Restored email ${targetEmailId}`,
                   description: `${result.targetFolder} · uid ${result.targetUid || result.uid}`,
                   mimeType: "message/rfc822",
                 },
               ]
             : [];
-          return createTextResult(result, false, sources);
+          return createTextResult({ ...result, targetEmailId }, false, sources);
         }
 
         case "snooze_email": {
@@ -5405,11 +5443,12 @@ export function createServer(
         case "delete_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${String(args.emailId ?? "?")} (cannot be recovered)`);
           ensureMailboxWriteAllowed(config.runtime);
-          const emailId = requireString(args, "emailId");
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
             await withAudit(auditService, name, args, async () =>
-              imapService.deleteEmail(emailId, uidValidity),
+              bundle.imapService.deleteEmail(emailId, uidValidity),
             ),
           );
         }
@@ -6211,7 +6250,9 @@ export function createServer(
 
         case "list_attachments":
         {
-          const attachmentList = await imapService.listAttachments(requireString(args, "emailId"));
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          const attachmentList = await bundle.imapService.listAttachments(emailId);
           const includeInline = normalizeBoolean(args.includeInline, true);
           const filenameContains = optionalString(args, "filenameContains");
           const contentType = optionalString(args, "contentType");
@@ -6234,7 +6275,7 @@ export function createServer(
             return true;
           });
           const result = {
-            emailId: attachmentList.emailId,
+            emailId: prefixedIdFor(bundle, attachmentList.emailId),
             attachments: filtered,
           };
           return createTextResult(
@@ -6246,11 +6287,14 @@ export function createServer(
 
         case "get_attachment_content":
         {
-          const result = await imapService.getAttachmentContent(
-            requireString(args, "emailId"),
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          const result = await bundle.imapService.getAttachmentContent(
+            emailId,
             requireString(args, "attachmentId"),
             normalizeBoolean(args.includeBase64, false),
           );
+          result.emailId = prefixedIdFor(bundle, result.emailId);
           const saveTo = optionalString(args, "saveTo");
           if (!saveTo && result.base64) {
             const MAX_INLINE_BYTES = (config.runtime.maxInlineBytes ?? 40) * 1024;
@@ -6308,15 +6352,20 @@ export function createServer(
         }
 
         case "get_attachment_text": {
-          const result = await imapService.getAttachmentText(
-            requireString(args, "emailId"),
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          const result = await bundle.imapService.getAttachmentText(
+            emailId,
             requireString(args, "attachmentId"),
           );
+          result.emailId = prefixedIdFor(bundle, result.emailId);
           return createTextResult(result, false, [attachmentSource(result.emailId, result.attachment)]);
         }
 
         case "save_attachment":
         {
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const saveTo = optionalString(args, "saveTo");
           const outputPath = optionalString(args, "outputPath");
           let resolvedPath = outputPath;
@@ -6332,18 +6381,22 @@ export function createServer(
             }
             resolvedPath = absTarget;
           }
-          const result = await imapService.saveAttachment(
-            requireString(args, "emailId"),
+          const result = await bundle.imapService.saveAttachment(
+            emailId,
             requireString(args, "attachmentId"),
             resolvedPath,
           );
+          result.emailId = prefixedIdFor(bundle, result.emailId);
           return createTextResult(result, false, [attachmentSource(result.emailId, result.attachment)]);
         }
 
         case "export_email": {
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const result = await withAudit(auditService, name, args, async () =>
-            imapService.exportEmail(requireString(args, "emailId"), optionalString(args, "outputPath")),
+            bundle.imapService.exportEmail(emailId, optionalString(args, "outputPath")),
           );
+          result.emailId = prefixedIdFor(bundle, result.emailId);
           return createTextResult(result);
         }
 
@@ -6377,13 +6430,16 @@ export function createServer(
 
         case "save_attachments":
         {
-          const result = await imapService.saveAttachments({
-            emailId: requireString(args, "emailId"),
+          const rawEmailId = requireString(args, "emailId");
+          const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          const result = await bundle.imapService.saveAttachments({
+            emailId,
             outputPath: optionalString(args, "outputPath"),
             includeInline: normalizeBoolean(args.includeInline, false),
             filenameContains: optionalString(args, "filenameContains"),
             contentType: optionalString(args, "contentType"),
           });
+          result.emailId = prefixedIdFor(bundle, result.emailId);
           return createTextResult(
             result,
             false,
