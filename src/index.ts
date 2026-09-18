@@ -2837,7 +2837,7 @@ interface BulkExcludedEmailId {
 // call reused for both this and resolveUidsForBulkOp) should pass it, so a
 // stale-generation id gets its own clear error instead of being lumped in
 // with a genuinely malformed one.
-function getBulkNotFoundEmailIds(
+export function getBulkNotFoundEmailIds(
   emailIds: string[] | undefined,
   folder: string,
   currentUidValidity?: string,
@@ -2889,7 +2889,7 @@ function getBulkNotFoundEmailIds(
   return excluded;
 }
 
-function withBulkNotFound(
+export function withBulkNotFound(
   result: BulkOperationResult,
   excludedEmailIds: BulkExcludedEmailId[],
 ): BulkOperationResult {
@@ -2911,6 +2911,67 @@ function withBulkNotFound(
       })),
     ],
   };
+}
+
+// Groups a bulk/batch tool's emailIds array by the account each id's optional
+// "<slug>::" prefix names (see splitAccountPrefix/resolveAccountForEmailId),
+// so bulk_delete/bulk_move/bulk_update_flags/bulk_update_labels/
+// batch_email_action can run each account's ids against that account's own
+// SimpleIMAPService instance instead of always hitting the primary bundle's
+// shared `imapService`. Map key is the resolved account slug (undefined for
+// the primary account — the same "no prefix" convention as everywhere else),
+// so results can be merged back with each entry's original, possibly
+// prefixed, emailId.
+export function groupEmailIdsByAccount(
+  accountManager: AccountManager,
+  emailIds: string[],
+): Map<string | undefined, { bundle: AccountBundle; restIds: string[] }> {
+  const groups = new Map<string | undefined, { bundle: AccountBundle; restIds: string[] }>();
+  for (const emailId of emailIds) {
+    const { accountSlug, rest } = splitAccountPrefix(emailId, accountManager.additionalSlugs());
+    let group = groups.get(accountSlug);
+    if (!group) {
+      group = { bundle: accountManager.bySlugOrPrimary(accountSlug), restIds: [] };
+      groups.set(accountSlug, group);
+    }
+    group.restIds.push(rest);
+  }
+  return groups;
+}
+
+// Re-applies a group's account-slug prefix to every emailId a BulkOperationResult
+// or notFound entry references — those are built inside SimpleIMAPService (or from
+// the group's own restIds), which knows nothing about account slugs, so the prefix
+// stripped off when grouping (groupEmailIdsByAccount) must be put back before the
+// per-group results are merged into the single response the tool returns.
+export function prefixBulkResult(result: BulkOperationResult, slug: string | undefined): BulkOperationResult {
+  if (!slug) {
+    return result;
+  }
+  return {
+    ...result,
+    results: result.results.map((entry) => ({ ...entry, emailId: withAccountPrefix(slug, entry.emailId) })),
+  };
+}
+
+export function prefixNotFound(excluded: BulkExcludedEmailId[], slug: string | undefined): BulkExcludedEmailId[] {
+  if (!slug) {
+    return excluded;
+  }
+  return excluded.map((entry) => ({ ...entry, emailId: withAccountPrefix(slug, entry.emailId) }));
+}
+
+// Merges the per-account-group BulkOperationResults produced by the bulk_*
+// handlers into the single combined shape the tool actually returns.
+export function mergeBulkResults(results: BulkOperationResult[]): BulkOperationResult {
+  return results.reduce((acc, result) => ({
+    dryRun: acc.dryRun || result.dryRun,
+    total: acc.total + result.total,
+    succeeded: acc.succeeded + result.succeeded,
+    failed: acc.failed + result.failed,
+    notFound: acc.notFound + result.notFound,
+    results: [...acc.results, ...result.results],
+  }), { dryRun: false, total: 0, succeeded: 0, failed: 0, notFound: 0, results: [] } as BulkOperationResult);
 }
 
 function paginateRecentRecords<T>(records: T[], limit: number, offset: number): T[] {
@@ -4920,43 +4981,66 @@ export function createServer(
           const folder = optionalString(args, "folder") ?? "INBOX";
           const targetFolder = requireString(args, "targetFolder");
           const max = getBulkMaxBatchSize(args);
-          // Only fetched (an extra STATUS round trip) when there are ids to
-          // check against it — a match-only bulk_move has no ids that could
-          // be stale, since match resolves directly against the live
-          // mailbox each time.
-          const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
-          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
-          // Resolve the match/emailIds set exactly once and reuse it for both
-          // the preview and the real run — see resolveUidsForBulkOp's
-          // comment for why re-resolving `match` a second time (the old
-          // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
-          // Also excludes any id whose embedded UIDVALIDITY is stale.
-          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
-          ensureBulkBatchSize(uids.length, max);
-          if (normalizeBoolean(args.dryRun, false)) {
-            const preview = await imapService.bulkMove({
-              emailIds,
-              match,
-              folder,
-              targetFolder,
-              resolvedUids: uids,
-              uidValidity: currentUidValidity,
-              dryRun: true,
+          const dryRun = normalizeBoolean(args.dryRun, false);
+
+          // emailIds can span multiple configured accounts (a "<slug>::"
+          // prefix names one; a plain id is the primary's) — group them so
+          // each account's ids resolve/run against that account's own
+          // imapService, then merge the per-group results back below. A
+          // match-only call (no emailIds) has no account identity to group
+          // by, so it stays scoped to the primary account, unchanged.
+          const groups = emailIds
+            ? groupEmailIdsByAccount(accountManager, emailIds)
+            : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
+                [undefined, { bundle: primaryBundle, restIds: undefined }],
+              ]);
+
+          let totalUids = 0;
+          const prepared: Array<{
+            slug: string | undefined;
+            bundle: AccountBundle;
+            notFound: BulkExcludedEmailId[];
+            run: () => Promise<BulkOperationResult>;
+          }> = [];
+          for (const [slug, group] of groups) {
+            // Only fetched (an extra STATUS round trip) when there are ids to
+            // check against it — a match-only bulk_move has no ids that could
+            // be stale, since match resolves directly against the live
+            // mailbox each time.
+            const currentUidValidity = group.restIds ? await group.bundle.imapService.getMailboxUidValidity(folder) : undefined;
+            const notFoundEmailIds = getBulkNotFoundEmailIds(group.restIds, folder, currentUidValidity);
+            // Resolve the match/emailIds set exactly once and reuse it for both
+            // the preview and the real run — see resolveUidsForBulkOp's
+            // comment for why re-resolving `match` a second time (the old
+            // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
+            // Also excludes any id whose embedded UIDVALIDITY is stale.
+            const uids = await group.bundle.imapService.resolveUidsForBulkOp(folder, group.restIds, match, currentUidValidity);
+            totalUids += uids.length;
+            prepared.push({
+              slug,
+              bundle: group.bundle,
+              notFound: notFoundEmailIds,
+              run: () =>
+                group.bundle.imapService.bulkMove({
+                  emailIds: group.restIds,
+                  match,
+                  folder,
+                  targetFolder,
+                  resolvedUids: uids,
+                  uidValidity: currentUidValidity,
+                  dryRun,
+                }),
             });
-            return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
           }
-          const result = await withAudit(auditService, name, args, () =>
-            imapService.bulkMove({
-              emailIds,
-              match,
-              folder,
-              targetFolder,
-              resolvedUids: uids,
-              uidValidity: currentUidValidity,
-              dryRun: false,
-            })
-          );
-          return createTextResult(withBulkNotFound(result, notFoundEmailIds));
+          ensureBulkBatchSize(totalUids, max);
+
+          const outputs: BulkOperationResult[] = [];
+          for (const group of prepared) {
+            const outputSlug = group.slug === primaryBundle.account.slug ? undefined : group.slug;
+            const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, group.run);
+            outputs.push(withBulkNotFound(prefixBulkResult(raw, outputSlug), prefixNotFound(group.notFound, outputSlug)));
+          }
+          return createTextResult(mergeBulkResults(outputs));
         }
 
         case "bulk_delete": {
@@ -4972,47 +5056,69 @@ export function createServer(
           if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
-          // Fetched once, up front, and reused for both the notFound
-          // reporting below and resolveUidsForBulkOp's own filtering — a
-          // single shared point-in-time value, same "resolve once" spirit
-          // as the uids resolution itself, so the ids this call reports as
-          // excluded and the uids it actually acts on can never disagree
-          // about which generation was current. Only fetched when there are
-          // ids to check against it (a match-only call has none).
-          const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
-          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
-          // Resolve the match/emailIds set exactly once and reuse it for both
-          // the preview and the real run — see resolveUidsForBulkOp's
-          // comment for why re-resolving `match` a second time (the old
-          // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
-          // Also excludes any id whose embedded UIDVALIDITY is stale — see
-          // resolveUidsForBulkOp's comment.
-          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
-          ensureBulkBatchSize(uids.length, max);
-          if (normalizeBoolean(args.dryRun, false)) {
-            const preview = await imapService.bulkDelete({
-              emailIds,
-              match,
-              folder,
-              permanent,
-              resolvedUids: uids,
-              uidValidity: currentUidValidity,
-              dryRun: true,
+          const dryRun = normalizeBoolean(args.dryRun, false);
+
+          // emailIds can span multiple configured accounts — group them so
+          // each account's ids resolve/run against that account's own
+          // imapService, then merge the per-group results back below. See
+          // bulk_move's identical grouping comment. A match-only call stays
+          // scoped to the primary account, unchanged.
+          const groups = emailIds
+            ? groupEmailIdsByAccount(accountManager, emailIds)
+            : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
+                [undefined, { bundle: primaryBundle, restIds: undefined }],
+              ]);
+
+          let totalUids = 0;
+          const prepared: Array<{
+            slug: string | undefined;
+            bundle: AccountBundle;
+            notFound: BulkExcludedEmailId[];
+            run: () => Promise<BulkOperationResult>;
+          }> = [];
+          for (const [slug, group] of groups) {
+            // Fetched once, up front, and reused for both the notFound
+            // reporting below and resolveUidsForBulkOp's own filtering — a
+            // single shared point-in-time value, same "resolve once" spirit
+            // as the uids resolution itself, so the ids this call reports as
+            // excluded and the uids it actually acts on can never disagree
+            // about which generation was current. Only fetched when there are
+            // ids to check against it (a match-only call has none).
+            const currentUidValidity = group.restIds ? await group.bundle.imapService.getMailboxUidValidity(folder) : undefined;
+            const notFoundEmailIds = getBulkNotFoundEmailIds(group.restIds, folder, currentUidValidity);
+            // Resolve the match/emailIds set exactly once and reuse it for both
+            // the preview and the real run — see resolveUidsForBulkOp's
+            // comment for why re-resolving `match` a second time (the old
+            // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
+            // Also excludes any id whose embedded UIDVALIDITY is stale — see
+            // resolveUidsForBulkOp's comment.
+            const uids = await group.bundle.imapService.resolveUidsForBulkOp(folder, group.restIds, match, currentUidValidity);
+            totalUids += uids.length;
+            prepared.push({
+              slug,
+              bundle: group.bundle,
+              notFound: notFoundEmailIds,
+              run: () =>
+                group.bundle.imapService.bulkDelete({
+                  emailIds: group.restIds,
+                  match,
+                  folder,
+                  permanent,
+                  resolvedUids: uids,
+                  uidValidity: currentUidValidity,
+                  dryRun,
+                }),
             });
-            return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
           }
-          const result = await withAudit(auditService, name, args, () =>
-            imapService.bulkDelete({
-              emailIds,
-              match,
-              folder,
-              permanent,
-              resolvedUids: uids,
-              uidValidity: currentUidValidity,
-              dryRun: false,
-            })
-          );
-          return createTextResult(withBulkNotFound(result, notFoundEmailIds));
+          ensureBulkBatchSize(totalUids, max);
+
+          const outputs: BulkOperationResult[] = [];
+          for (const group of prepared) {
+            const outputSlug = group.slug === primaryBundle.account.slug ? undefined : group.slug;
+            const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, group.run);
+            outputs.push(withBulkNotFound(prefixBulkResult(raw, outputSlug), prefixNotFound(group.notFound, outputSlug)));
+          }
+          return createTextResult(mergeBulkResults(outputs));
         }
 
         case "bulk_update_flags": {
@@ -5029,25 +5135,64 @@ export function createServer(
           if (flagsToAdd.length === 0 && flagsToRemove.length === 0) throw new McpError(ErrorCode.InvalidParams, "Provide flagsToAdd or flagsToRemove.");
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
-          // See the bulk_delete case above for why this is fetched once and
-          // shared between notFound reporting and uid resolution.
-          const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
-          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
-          // Resolve the match/emailIds set exactly once and reuse it for both
-          // the preview and the real run — see resolveUidsForBulkOp's
-          // comment for why re-resolving `match` a second time (the old
-          // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
-          // Also excludes any id whose embedded UIDVALIDITY is stale.
-          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
-          ensureBulkBatchSize(uids.length, max);
-          if (normalizeBoolean(args.dryRun, false)) {
-            const preview = await imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, uidValidity: currentUidValidity, dryRun: true });
-            return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
+          const dryRun = normalizeBoolean(args.dryRun, false);
+
+          // emailIds can span multiple configured accounts — group them so
+          // each account's ids resolve/run against that account's own
+          // imapService, then merge the per-group results back below. See
+          // bulk_move's identical grouping comment. A match-only call stays
+          // scoped to the primary account, unchanged.
+          const groups = emailIds
+            ? groupEmailIdsByAccount(accountManager, emailIds)
+            : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
+                [undefined, { bundle: primaryBundle, restIds: undefined }],
+              ]);
+
+          let totalUids = 0;
+          const prepared: Array<{
+            slug: string | undefined;
+            bundle: AccountBundle;
+            notFound: BulkExcludedEmailId[];
+            run: () => Promise<BulkOperationResult>;
+          }> = [];
+          for (const [slug, group] of groups) {
+            // See the bulk_delete case above for why this is fetched once and
+            // shared between notFound reporting and uid resolution.
+            const currentUidValidity = group.restIds ? await group.bundle.imapService.getMailboxUidValidity(folder) : undefined;
+            const notFoundEmailIds = getBulkNotFoundEmailIds(group.restIds, folder, currentUidValidity);
+            // Resolve the match/emailIds set exactly once and reuse it for both
+            // the preview and the real run — see resolveUidsForBulkOp's
+            // comment for why re-resolving `match` a second time (the old
+            // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
+            // Also excludes any id whose embedded UIDVALIDITY is stale.
+            const uids = await group.bundle.imapService.resolveUidsForBulkOp(folder, group.restIds, match, currentUidValidity);
+            totalUids += uids.length;
+            prepared.push({
+              slug,
+              bundle: group.bundle,
+              notFound: notFoundEmailIds,
+              run: () =>
+                group.bundle.imapService.bulkUpdateFlags({
+                  emailIds: group.restIds,
+                  match,
+                  folder,
+                  flagsToAdd,
+                  flagsToRemove,
+                  resolvedUids: uids,
+                  uidValidity: currentUidValidity,
+                  dryRun,
+                }),
+            });
           }
-          const result = await withAudit(auditService, name, args, () =>
-            imapService.bulkUpdateFlags({ emailIds, match, folder, flagsToAdd, flagsToRemove, resolvedUids: uids, uidValidity: currentUidValidity, dryRun: false })
-          );
-          return createTextResult(withBulkNotFound(result, notFoundEmailIds));
+          ensureBulkBatchSize(totalUids, max);
+
+          const outputs: BulkOperationResult[] = [];
+          for (const group of prepared) {
+            const outputSlug = group.slug === primaryBundle.account.slug ? undefined : group.slug;
+            const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, group.run);
+            outputs.push(withBulkNotFound(prefixBulkResult(raw, outputSlug), prefixNotFound(group.notFound, outputSlug)));
+          }
+          return createTextResult(mergeBulkResults(outputs));
         }
 
         case "bulk_update_labels": {
@@ -5063,25 +5208,64 @@ export function createServer(
           const labelsToRemove = Array.isArray(args.labelsToRemove) ? (args.labelsToRemove as unknown[]).map(String) : [];
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
-          // See the bulk_delete case above for why this is fetched once and
-          // shared between notFound reporting and uid resolution.
-          const currentUidValidity = emailIds ? await imapService.getMailboxUidValidity(folder) : undefined;
-          const notFoundEmailIds = getBulkNotFoundEmailIds(emailIds, folder, currentUidValidity);
-          // Resolve the match/emailIds set exactly once and reuse it for both
-          // the preview and the real run — see resolveUidsForBulkOp's
-          // comment for why re-resolving `match` a second time (the old
-          // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
-          // Also excludes any id whose embedded UIDVALIDITY is stale.
-          const uids = await imapService.resolveUidsForBulkOp(folder, emailIds, match, currentUidValidity);
-          ensureBulkBatchSize(uids.length, max);
-          if (normalizeBoolean(args.dryRun, false)) {
-            const preview = await imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, uidValidity: currentUidValidity, dryRun: true });
-            return createTextResult(withBulkNotFound(preview, notFoundEmailIds));
+          const dryRun = normalizeBoolean(args.dryRun, false);
+
+          // emailIds can span multiple configured accounts — group them so
+          // each account's ids resolve/run against that account's own
+          // imapService, then merge the per-group results back below. See
+          // bulk_move's identical grouping comment. A match-only call stays
+          // scoped to the primary account, unchanged.
+          const groups = emailIds
+            ? groupEmailIdsByAccount(accountManager, emailIds)
+            : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
+                [undefined, { bundle: primaryBundle, restIds: undefined }],
+              ]);
+
+          let totalUids = 0;
+          const prepared: Array<{
+            slug: string | undefined;
+            bundle: AccountBundle;
+            notFound: BulkExcludedEmailId[];
+            run: () => Promise<BulkOperationResult>;
+          }> = [];
+          for (const [slug, group] of groups) {
+            // See the bulk_delete case above for why this is fetched once and
+            // shared between notFound reporting and uid resolution.
+            const currentUidValidity = group.restIds ? await group.bundle.imapService.getMailboxUidValidity(folder) : undefined;
+            const notFoundEmailIds = getBulkNotFoundEmailIds(group.restIds, folder, currentUidValidity);
+            // Resolve the match/emailIds set exactly once and reuse it for both
+            // the preview and the real run — see resolveUidsForBulkOp's
+            // comment for why re-resolving `match` a second time (the old
+            // dry-run-then-real-run pattern) could silently exceed maxBatchSize.
+            // Also excludes any id whose embedded UIDVALIDITY is stale.
+            const uids = await group.bundle.imapService.resolveUidsForBulkOp(folder, group.restIds, match, currentUidValidity);
+            totalUids += uids.length;
+            prepared.push({
+              slug,
+              bundle: group.bundle,
+              notFound: notFoundEmailIds,
+              run: () =>
+                group.bundle.imapService.bulkUpdateLabels({
+                  emailIds: group.restIds,
+                  match,
+                  folder,
+                  labelsToAdd,
+                  labelsToRemove,
+                  resolvedUids: uids,
+                  uidValidity: currentUidValidity,
+                  dryRun,
+                }),
+            });
           }
-          const result = await withAudit(auditService, name, args, () =>
-            imapService.bulkUpdateLabels({ emailIds, match, folder, labelsToAdd, labelsToRemove, resolvedUids: uids, uidValidity: currentUidValidity, dryRun: false })
-          );
-          return createTextResult(withBulkNotFound(result, notFoundEmailIds));
+          ensureBulkBatchSize(totalUids, max);
+
+          const outputs: BulkOperationResult[] = [];
+          for (const group of prepared) {
+            const outputSlug = group.slug === primaryBundle.account.slug ? undefined : group.slug;
+            const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, group.run);
+            outputs.push(withBulkNotFound(prefixBulkResult(raw, outputSlug), prefixNotFound(group.notFound, outputSlug)));
+          }
+          return createTextResult(mergeBulkResults(outputs));
         }
 
         case "top_senders": {
@@ -5098,9 +5282,19 @@ export function createServer(
 
         case "move_thread": {
           ensureMailboxWriteAllowed(config.runtime);
-          const result = await withAudit(auditService, name, args, () =>
-            imapService.moveThread({
-              messageId: requireString(args, "messageId"),
+          // A threadId only ever names ONE account — a thread can't span
+          // multiple mailboxes/accounts — so this reuses
+          // resolveAccountForEmailId's generic "<slug>::" prefix stripping
+          // (it doesn't care that the string is an emailId vs a threadId) to
+          // route the whole call to that account's own imapService/
+          // auditService. A plain, unprefixed threadId keeps going to the
+          // primary account, unchanged. Full cross-account thread resolution
+          // (e.g. a match/threading key that could resolve differently per
+          // account) is out of scope for this pass.
+          const { bundle, rest: messageId } = resolveAccountForEmailId(requireString(args, "messageId"));
+          const result = await withAudit(bundle.auditService, name, args, () =>
+            bundle.imapService.moveThread({
+              messageId,
               destination: requireString(args, "destination"),
               acrossFolders: normalizeBoolean(args.acrossFolders, false),
               dryRun: normalizeBoolean(args.dryRun, false),
@@ -5113,9 +5307,13 @@ export function createServer(
           ensureMailboxWriteAllowed(config.runtime);
           const permanentThread = normalizeBoolean(args.permanent, false);
           if (permanentThread) ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), "Permanently delete thread");
-          const result = await withAudit(auditService, name, args, () =>
-            imapService.deleteThread({
-              messageId: requireString(args, "messageId"),
+          // See move_thread's comment on scoping by the threadId's own
+          // "<slug>::" prefix — same convention, same single-account
+          // limitation.
+          const { bundle, rest: messageId } = resolveAccountForEmailId(requireString(args, "messageId"));
+          const result = await withAudit(bundle.auditService, name, args, () =>
+            bundle.imapService.deleteThread({
+              messageId,
               permanent: permanentThread,
               acrossFolders: normalizeBoolean(args.acrossFolders, false),
               dryRun: normalizeBoolean(args.dryRun, false),
@@ -5129,9 +5327,13 @@ export function createServer(
           const flagsToAdd = Array.isArray(args.flagsToAdd) ? (args.flagsToAdd as unknown[]).map(String) : [];
           const flagsToRemove = Array.isArray(args.flagsToRemove) ? (args.flagsToRemove as unknown[]).map(String) : [];
           if (flagsToAdd.length === 0 && flagsToRemove.length === 0) throw new McpError(ErrorCode.InvalidParams, "Provide flagsToAdd or flagsToRemove.");
-          const result = await withAudit(auditService, name, args, () =>
-            imapService.flagThread({
-              messageId: requireString(args, "messageId"),
+          // See move_thread's comment on scoping by the threadId's own
+          // "<slug>::" prefix — same convention, same single-account
+          // limitation.
+          const { bundle, rest: messageId } = resolveAccountForEmailId(requireString(args, "messageId"));
+          const result = await withAudit(bundle.auditService, name, args, () =>
+            bundle.imapService.flagThread({
+              messageId,
               flagsToAdd,
               flagsToRemove,
               acrossFolders: normalizeBoolean(args.acrossFolders, false),
@@ -5468,15 +5670,55 @@ export function createServer(
           if (action === "delete") {
             ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${emailIds.length} email(s) (cannot be recovered)`);
           }
-          const result = await withAudit(auditService, name, args, async () =>
-            applyBatchEmailAction(imapService, [], {
-              emailIds,
-              action,
-              targetFolder: optionalString(args, "targetFolder"),
-              continueOnError: normalizeBoolean(args.continueOnError, true),
-              dryRun: normalizeBoolean(args.dryRun, false),
-            }),
+          // emailIds can span multiple configured accounts — group them so
+          // each account's ids run against that account's own imapService
+          // (and get audited to that account's own auditService), then merge
+          // the per-group BatchActionResults back into one. continueOnError
+          // is honored within each group (as before); across groups, a
+          // failure in one account's group still lets independent, unrelated
+          // groups for OTHER accounts run — an id in account B failing
+          // doesn't block account A's ids, which are on an entirely separate
+          // connection anyway.
+          const continueOnError = normalizeBoolean(args.continueOnError, true);
+          const dryRun = normalizeBoolean(args.dryRun, false);
+          const targetFolder = optionalString(args, "targetFolder");
+          const groups = groupEmailIdsByAccount(accountManager, emailIds);
+
+          const groupResults: Array<{ slug: string | undefined; result: BatchActionResult }> = [];
+          for (const [slug, group] of groups) {
+            const entries: BatchActionEntry[] = [];
+            const groupResult = await withAudit(group.bundle.auditService, name, args, () =>
+              applyBatchEmailAction(group.bundle.imapService, entries, {
+                emailIds: group.restIds,
+                action,
+                targetFolder,
+                continueOnError,
+                dryRun,
+              }),
+            );
+            groupResults.push({ slug, result: groupResult });
+          }
+
+          const outputSlugFor = (slug: string | undefined) => (slug === primaryBundle.account.slug ? undefined : slug);
+          const mergedResults: BatchActionEntry[] = groupResults.flatMap(({ slug, result: groupResult }) =>
+            groupResult.results.map((entry) => ({ ...entry, emailId: withAccountPrefix(outputSlugFor(slug), entry.emailId) })),
           );
+          // Reordered to match the caller's original emailIds order (each
+          // group only preserves order within itself) so a mixed-account
+          // request's results still line up with the ids the caller passed.
+          const byEmailId = new Map(mergedResults.map((entry) => [entry.emailId, entry]));
+          const orderedResults = emailIds.flatMap((emailId) => {
+            const entry = byEmailId.get(emailId);
+            return entry ? [entry] : [];
+          });
+          const succeeded = orderedResults.filter((entry) => entry.ok).length;
+          const result: BatchActionResult = {
+            action,
+            total: orderedResults.length,
+            succeeded,
+            failed: orderedResults.length - succeeded,
+            results: orderedResults,
+          };
 
           const sources = result.results.flatMap((entry) =>
             entry.ok ? emailSourceFromActionResult(entry.result) : [],
@@ -6198,13 +6440,23 @@ export function createServer(
 
         case "apply_thread_action":
         {
-          await maybeRefreshLocalIndex(imapService, localIndexService, {
+          // A threadId only ever names ONE account — see move_thread's
+          // identical comment on reusing resolveAccountForEmailId's generic
+          // "<slug>::" prefix stripping for threadIds. Every message in the
+          // resolved thread therefore belongs to this same account, so
+          // (unlike batch_email_action's emailIds) there is nothing to
+          // group — the whole action runs against this one bundle's own
+          // imapService/localIndexService/auditService. Full cross-account
+          // thread resolution is out of scope for this pass.
+          const { bundle, rest: threadId } = resolveAccountForEmailId(requireString(args, "threadId"));
+          const outputSlug = bundle.account.slug === primaryBundle.account.slug ? undefined : bundle.account.slug;
+          await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
             force: normalizeBoolean(args.syncBefore, false),
             folder: "INBOX",
             limitPerFolder: 100,
           });
 
-          const thread = await localIndexService.getThreadById(requireString(args, "threadId"));
+          const thread = await bundle.localIndexService.getThreadById(threadId);
           const action = requireEmailAction(args);
           ensureEmailActionAllowed(config.runtime, action);
           const unreadOnly = normalizeBoolean(args.unreadOnly, false);
@@ -6221,8 +6473,8 @@ export function createServer(
             ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${emailIds.length} email(s) in thread (cannot be recovered)`);
           }
 
-          const result = await withAudit(auditService, name, args, async () =>
-            applyBatchEmailAction(imapService, [], {
+          const result = await withAudit(bundle.auditService, name, args, async () =>
+            applyBatchEmailAction(bundle.imapService, [], {
               emailIds,
               action,
               targetFolder: optionalString(args, "targetFolder"),
@@ -6230,6 +6482,10 @@ export function createServer(
               dryRun: normalizeBoolean(args.dryRun, false),
             }),
           );
+          const prefixedResult: BatchActionResult = {
+            ...result,
+            results: result.results.map((entry) => ({ ...entry, emailId: withAccountPrefix(outputSlug, entry.emailId) })),
+          };
 
           const sources = [
             threadSource(thread),
@@ -6238,10 +6494,10 @@ export function createServer(
 
           return createTextResult(
             {
-              threadId: thread.id,
+              threadId: withAccountPrefix(outputSlug, thread.id),
               unreadOnly,
               dryRun: normalizeBoolean(args.dryRun, false),
-              ...result,
+              ...prefixedResult,
             },
             false,
             sources,
