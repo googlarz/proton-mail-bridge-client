@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.14] — 2026-09-18
+
+### Fixed
+- **`resource_link` blocks carried a `description` that duplicated title/from/date** (~104 tokens per result, measured by an external review). Dropped `description` and `mimeType`; `uri`/`name`/`title` remain (the CLI only reads those).
+- **`list_scheduled_sends` returned every queued record's full body** (one long message ≈ 40k tokens). Bodies over 500 chars are now truncated with `bodyTruncated`/`bodyLength`, same as drafts; the stored queue record is untouched.
+- **`list_drafts` had no default limit** (107 drafts ≈ 30k tokens plus links). It now defaults to 20; use `hasMore` and `offset` for more.
+
+### Added
+- `test/queue-body-truncation.test.mjs`.
+
 ## [2.1.13] — 2026-09-18
 
 ### Fixed

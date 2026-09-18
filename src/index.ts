@@ -472,7 +472,7 @@ const TOOLS = [
       type: "object",
       properties: {
         includeSent: { type: "boolean", description: "Include drafts already sent.", default: false },
-        limit: { type: "number", description: "Maximum drafts to return. Omit to return every draft (still with truncated bodies/attachments) — set this when you only need a bounded page." },
+        limit: { type: "number", description: "Maximum drafts to return. Defaults to 20; check hasMore and page with offset for more." },
         offset: { type: "number", description: "Number of drafts to skip, newest-updated first.", default: 0 },
       },
     },
@@ -1837,8 +1837,6 @@ function citationToResourceLink(source: CitationSource): ToolResult["content"][n
     uri: source.uri,
     name: source.name,
     title: source.title,
-    description: source.description,
-    mimeType: source.mimeType,
   };
 }
 
@@ -2536,21 +2534,28 @@ export function truncateDraftBodyForResponse<T extends { body: string }>(draft: 
 // for the same reason as the function above.
 export function redactQueueRecordAttachments<T extends { payload: SendEmailInput }>(record: T) {
   const attachments = record.payload.attachments;
-  if (!attachments || attachments.length === 0) {
+  const body = record.payload.body;
+  const bodyTooLong = typeof body === "string" && body.length > DRAFT_BODY_PREVIEW_LENGTH;
+  if ((!attachments || attachments.length === 0) && !bodyTooLong) {
     return record;
   }
   return {
     ...record,
     payload: {
       ...record.payload,
-      attachments: attachments.map((attachment) => ({
-        filename: attachment.filename,
-        contentType: attachment.contentType,
-        cid: attachment.cid,
-        contentDisposition: attachment.contentDisposition,
-        content: "",
-        size: Buffer.byteLength(attachment.content, "base64"),
-      })),
+      ...(bodyTooLong ? truncateDraftBodyForResponse({ body }) : {}),
+      ...(attachments && attachments.length > 0
+        ? {
+            attachments: attachments.map((attachment) => ({
+              filename: attachment.filename,
+              contentType: attachment.contentType,
+              cid: attachment.cid,
+              contentDisposition: attachment.contentDisposition,
+              content: "",
+              size: Buffer.byteLength(attachment.content, "base64"),
+            })),
+          }
+        : {}),
     },
   };
 }
@@ -4898,8 +4903,8 @@ export function createServer(
           // draft (just with truncated bodies/attachments), so this doesn't change
           // behavior for a caller not using the new params.
           const offset = normalizeLimit(args.offset, 0, 0, 10_000);
-          const limit = typeof args.limit === "number" ? normalizeLimit(args.limit, allDrafts.length, 1, 10_000) : undefined;
-          const page = limit !== undefined ? allDrafts.slice(offset, offset + limit) : allDrafts.slice(offset);
+          const limit = normalizeLimit(args.limit, 20, 1, 10_000);
+          const page = allDrafts.slice(offset, offset + limit);
           return createTextResult(
             {
               total: allDrafts.length,
