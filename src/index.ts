@@ -4618,6 +4618,14 @@ export function createServer(
               subject: prefixedSubject(detail.subject, "Re:"),
               body: buildReplyText(detail, body),
               isHtml,
+              // Found live (external review): a `from` naming a real alias NOT
+              // itself a separately-configured account (e.g. a genuine alias
+              // reachable only via header override, same as send_email's own
+              // fallback) picked the right draftStore bundle above but never
+              // actually stored the address on the draft — draft.from came back
+              // undefined, so a later send_draft used the account's default
+              // sender instead of the alias the caller asked for.
+              from: optionalString(args, "from"),
               inReplyTo: detail.messageId,
               references: detail.messageId ? [detail.messageId] : undefined,
               attachments,
@@ -4722,6 +4730,8 @@ export function createServer(
               subject: prefixedSubject(detail.subject, "Fwd:"),
               body: buildForwardText(detail, optionalString(args, "body")),
               isHtml: normalizeBoolean(args.isHtml, false),
+              // Same fix as create_reply_draft — see its comment.
+              from: optionalString(args, "from"),
               attachments,
               sourceEmailId: detail.id,
               sourceMessageId: detail.messageId,
@@ -5329,8 +5339,18 @@ export function createServer(
             result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlug), email.id) })),
           );
           const mergedAll = sortByDateDesc(taggedEmails, (email) => email.internalDate || email.date);
-          const { page: merged, hasMore } = paginateMergedAccountResults(mergedAll, requestedOffset, effectiveLimit);
+          const { page: merged } = paginateMergedAccountResults(mergedAll, requestedOffset, effectiveLimit);
           const total = perAccount.reduce((sum, { result }) => sum + result.total, 0);
+          // Found live (external review): paginateMergedAccountResults' own hasMore
+          // only looks at what was actually FETCHED (mergedAll.length, capped at
+          // perAccountFetchLimit per account) — with a lopsided distribution (e.g.
+          // 300 messages in one account, 0 in another) and a small page near the
+          // start, mergedAll.length can equal requestedOffset+limit exactly even
+          // though the account's real total is far larger, reporting hasMore:false
+          // while 275 more messages exist. `total` above is each account's real,
+          // authoritative IMAP mailbox count (not bounded by what we fetched), so
+          // it's the correct source for this instead.
+          const hasMore = total > requestedOffset + effectiveLimit;
           return createTextResult(
             {
               folder: getEmailsInput.folder?.trim() || "INBOX",
@@ -7509,6 +7529,8 @@ export function createServer(
               subject: prefixedSubject(detail.subject, "Re:"),
               body: buildReplyText(detail, body),
               isHtml,
+              // Same fix as create_reply_draft — see its comment.
+              from: optionalString(args, "from"),
               inReplyTo: detail.messageId,
               references: detail.messageId ? [detail.messageId] : undefined,
               attachments,

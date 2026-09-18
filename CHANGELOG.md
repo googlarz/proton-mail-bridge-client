@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.6] — 2026-09-18
+
+A third-pass external re-review of v2.1.5 (`a292ab6`) confirmed the prior fixes (349/349 project tests, 29/30 additional signature scenarios — the one non-pass is the already-documented queue-signature-timing gap against a proposed plan, not a regression) and found four more issues, three of them gaps in the 2.1.5 fixes themselves.
+
+### Fixed
+- **The new `cid:`-only image sanitizer allowlist could be bypassed with a protocol-relative URL** (`<img src="//tracking.example/pixel?...">`). `allowedSchemesByTag` only inspects a URL that has an explicit scheme — a protocol-relative one has none, so sanitize-html's own default (`allowProtocolRelative: true`) let it straight through despite `img` being scoped to `cid`, reopening the exact remote-image exfiltration risk that restriction exists to close. Now set to `false`.
+- **`create_reply_draft`, `create_forward_draft`, and `create_thread_reply_draft` still lost `from` for a genuine alias that isn't itself a separately-configured account** — a leftover gap in 2.1.4's account-default fix: they picked the *storage* bundle correctly but never actually passed `from` into `createDraft()`, so `draft.from` came back `undefined` and a later `send_draft` used the account's default sender instead of the alias asked for. All three now pass it through, matching `create_draft`.
+- **`get_emails`' `hasMore` was still wrong for a lopsided multi-account distribution** (e.g. 300 messages in one account, 0 in another) — it was derived from how many messages the multi-account merge had actually *fetched* (capped at `offset + limit` per account), not from the real total, so a small page near the start could report `hasMore: false` while hundreds of messages remained. Now derived from the authoritative summed `total` instead.
+- **Raising the internal fetch-depth cap to 10,000 in 2.1.4 just moved the same truncation boundary further out** rather than removing it: `offset:10000,limit:25`, both individually within their own documented bounds, still needed a fetch depth of 10,025 and got truncated at 10,000. Raised to 10,250 (offset's own 10,000 ceiling plus the largest possible outer page size, 250) so any offset+limit combination that's individually in bounds is never silently truncated below what it asked for. Confirmed by the review as not a full fix for the underlying re-fetch cost at very large offsets — that's a cursor-based redesign, tracked separately, not a single-number fix.
+
+### Added
+- A protocol-relative-image case in `test/smtp.test.mjs` — regression coverage for the sanitizer bypass above.
+
 ## [2.1.5] — 2026-09-18
 
 Fixes from two more independent external reviews of v2.1.3 (`7c36bae`): a 30-scenario signature/MIME audit and a 13-scenario performance/response-size audit. Two previously-reported signature bugs (isHtml formatting, markdown HTML quote) were confirmed already fixed by 2.1.4.

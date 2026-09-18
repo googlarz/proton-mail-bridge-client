@@ -211,6 +211,15 @@ export class SMTPService {
         img: ["cid"],
       },
       allowedSchemesAppliedToAttributes: ["href", "src"],
+      // Found live (external review): allowedSchemesByTag only checks a URL that
+      // HAS an explicit scheme — a protocol-relative URL like
+      // "//tracking.example/pixel?token=..." has none, so sanitize-html's own
+      // default (allowProtocolRelative: true) let it straight through even
+      // though img is scoped to "cid" above, reopening the exact remote-image
+      // exfiltration risk the cid-only restriction exists to close. Any
+      // recipient client that resolves it and loads remote images fires a
+      // request to that host.
+      allowProtocolRelative: false,
     });
   }
 

@@ -135,6 +135,26 @@ test("buildRawMessage keeps an inline <img src=\"cid:...\"> (e.g. a signature lo
   assert.ok(!message.includes("evil.example.com"), "an http(s) image src must still be stripped");
 });
 
+// Regression test for an externally-reported bug (second-pass review of a292ab6 /
+// v2.1.5): allowedSchemesByTag only inspects a URL that HAS an explicit scheme — a
+// protocol-relative URL like "//tracking.example/pixel?token=..." has none, so
+// sanitize-html's own default (allowProtocolRelative: true) let it straight
+// through even with img scoped to "cid" — reopening the exact remote-image
+// exfiltration risk that restriction exists to close.
+test("buildRawMessage strips a protocol-relative img src just like an http(s) one", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["victim@example.com"],
+    subject: "Tracking pixel test",
+    body: "fallback text",
+    isHtml: true,
+    htmlBody: '<p>Best,</p><img src="//tracking.example/pixel?token=fixture">',
+  });
+  const message = raw.toString("utf8");
+
+  assert.ok(!message.includes("tracking.example"), "a protocol-relative image src must be stripped, not silently allowed through");
+});
+
 test("buildRawMessage sanitizes script tags out of HTML bodies by default", async () => {
   const service = new SMTPService(createConfig());
   const raw = await service.buildRawMessage({

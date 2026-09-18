@@ -1194,10 +1194,22 @@ export class SimpleIMAPService {
     // With offset already allowed up to 10_000, capping limit at 250 meant that
     // overfetch got silently clamped right back down, so a page past position 250
     // (e.g. offset:250,limit:25 on a 300-message mailbox) came back empty even
-    // though the messages exist — the fetch never actually reached them. Raised to
-    // match offset's own ceiling so a request that's otherwise in bounds isn't
-    // quietly truncated to a smaller page than requested.
-    const limit = normalizeLimit(input.limit, 50, 1, 10_000);
+    // though the messages exist — the fetch never actually reached them.
+    //
+    // Found live again (external review, second pass): raising this to 10_000
+    // just moved the same boundary further out instead of removing it —
+    // offset:10_000,limit:25 (both individually in-bounds: offset's own max is
+    // 10_000, and get_emails' outer page-size is separately capped at 250 in
+    // index.ts) needs an internal fetch depth of 10_025, which this cap of
+    // 10_000 still truncated, so that page came back empty too. Raised to
+    // 10_250 — offset's max (10_000) plus the largest possible outer limit
+    // (250) — so any offset+limit combination that's individually within
+    // documented bounds is never silently truncated below what it asked for.
+    // This still isn't free (a very deep page pulls that many headers per
+    // account), but it fixes the correctness bug; the cost is a separate,
+    // larger question the review flagged too (worth cursors eventually, not a
+    // single-number fix).
+    const limit = normalizeLimit(input.limit, 50, 1, 10_250);
     const offset = normalizeLimit(input.offset, 0, 0, 10_000);
 
     return this.withMailbox(folder, true, async (client) => {
