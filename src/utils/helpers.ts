@@ -963,6 +963,74 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string)
 // meaningfully use this except to eyeball it. get_email_by_id keeps it in
 // full, same as attachmentText above.
 export function trimAttachmentsForListing<T>(item: T): T {
+  return compactListingFields(trimAttachmentsAndHeavyFields(item));
+}
+
+// Lossless compaction of what's LEFT on a list/search result — found live on
+// real output, where each email still carried: seq (IMAP-internal, id already
+// identifies the message), empty bcc/labels/attachments/cc arrays, replyTo
+// identical to from, internalDate a couple of seconds off date, "name":""
+// on address objects with no display name, and flags:["\\Seen"] restating
+// isRead:true. None of it carries information the rest of the object doesn't,
+// and it repeats on every result of every search/list call. Absent key ==
+// empty/equal/false-default, so nothing is lost; uid is deliberately kept
+// (it's the cursor for get_emails' beforeUid pagination) and so is flags
+// when it holds anything beyond \Seen/\Flagged (e.g. \Answered).
+export function compactListingFields<T>(item: T): T {
+  if (!item || typeof item !== "object") {
+    return item;
+  }
+  const source = item as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...source };
+
+  delete out.seq;
+
+  const compactAddresses = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map((entry) => {
+          if (entry && typeof entry === "object" && (entry as Record<string, unknown>).name === "") {
+            const { name: _name, ...withoutName } = entry as Record<string, unknown>;
+            return withoutName;
+          }
+          return entry;
+        })
+      : value;
+  for (const key of ["from", "to", "cc", "bcc", "replyTo"]) {
+    if (key in out) out[key] = compactAddresses(out[key]);
+  }
+
+  const addressSet = (value: unknown): string =>
+    Array.isArray(value)
+      ? value
+          .map((entry) => String((entry as Record<string, unknown>)?.address ?? "").toLowerCase())
+          .sort()
+          .join(",")
+      : "";
+  if (Array.isArray(out.replyTo) && out.replyTo.length > 0 && addressSet(out.replyTo) === addressSet(out.from)) {
+    delete out.replyTo;
+  }
+
+  if (typeof out.internalDate === "string" && typeof out.date === "string") {
+    const delta = Math.abs(new Date(out.internalDate).getTime() - new Date(out.date).getTime());
+    if (Number.isFinite(delta) && delta < 60_000) {
+      delete out.internalDate;
+    }
+  }
+
+  if (Array.isArray(out.flags)) {
+    out.flags = out.flags.filter((flag) => flag !== "\\Seen" && flag !== "\\Flagged");
+  }
+
+  for (const key of ["to", "cc", "bcc", "replyTo", "labels", "attachments", "flags"]) {
+    if (Array.isArray(out[key]) && (out[key] as unknown[]).length === 0) {
+      delete out[key];
+    }
+  }
+
+  return out as T;
+}
+
+function trimAttachmentsAndHeavyFields<T>(item: T): T {
   const record = item as unknown as { attachments?: unknown; attachmentText?: unknown; references?: unknown };
   const hasAttachments = Array.isArray(record.attachments) && record.attachments.length > 0;
   const hasAttachmentText = record.attachmentText !== undefined;

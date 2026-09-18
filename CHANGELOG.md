@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.13] — 2026-09-18
+
+### Fixed
+- **List/search results still carried a layer of lossless noise on every email**, measured on real output after 2.1.9–2.1.12 were actually live: `seq` (IMAP-internal; `id` already identifies the message), empty `cc`/`bcc`/`labels`/`attachments` arrays, `replyTo` identical to `from`, `internalDate` a couple of seconds off `date`, `"name":""` on nameless addresses, and `flags:["\\Seen"]` merely restating `isRead:true`. All dropped (absent key = empty/equal/derivable, so nothing is lost). Deliberately kept: `uid` (the `beforeUid` pagination cursor) and any flag beyond `\Seen`/`\Flagged` (e.g. `\Answered`). Applies to `get_emails`, `search_emails`, `search_indexed_emails`, `list_remote_drafts`, and `get_thread_by_id` messages; `get_email_by_id` is unchanged. The CLI only reads `id`/`subject`/`from`/`date` from list items, so it is unaffected.
+
+### Added
+- `test/listing-compaction.test.mjs` — regression coverage for the above.
+
 ## [2.1.12] — 2026-09-18
 
 ### Fixed
