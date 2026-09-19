@@ -937,7 +937,10 @@ export class SimpleIMAPService {
         resolveYieldForced?.();
       }
     }, IDLE_YIELD_POLL_MS);
-    opWatchdog.unref?.();
+    // Deliberately NOT unref'd: it lives only while this call holds the lock (cleared in
+    // the finally below, at the latest when IDLE ends), and an operation may be waiting on
+    // it — an unref'd timer lets the process/test runner declare the event loop finished
+    // while that operation is still pending.
 
     // Best-effort graceful break — NOT what enforces the timeout (see the
     // Promise.race below for why this alone isn't trustworthy).

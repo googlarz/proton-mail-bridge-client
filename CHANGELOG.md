@@ -2,7 +2,14 @@
 
 All notable changes to this project are documented here.
 
-## [2.1.24] — 2026-09-19
+## [2.1.25] — 2026-09-19
+
+Ships the 2.1.24 fix (the IDLE watcher yielding the mailbox lock to waiting operations — see below) with the CI failure of the 2.1.24 tag corrected. 2.1.24 was tagged but never published to npm.
+
+### Fixed
+- **The yield poll timer was `unref()`'d.** An operation waiting for the mailbox lock depends on that timer to make the watcher let go; nothing else keeps a bare process (or a test runner) alive, so on Node 20/22 the event loop was declared finished while the operation was still pending ("Promise resolution is still pending but the event loop has already resolved"). The three `idle-yields-lock` tests failed on the CI matrix that way; they only passed locally on Node 25 (verified by reproducing on Node 20 and 22 with the `unref` and passing without it). In the real server other handles hid this. The timer is now a normal ref'd one — it is cleared when the call releases the lock, at the latest when IDLE ends.
+
+## [2.1.24] — 2026-09-19 (never published: CI failed on Node 20/22, fixed in 2.1.25)
 
 ### Fixed
 - **With the IDLE watcher on (the default), every other IMAP operation waited out the watcher's whole idle period.** The watcher shares the ONE IMAP connection and holds the mailbox lock for up to `idleMaxSeconds` (30 s). Found by checking 2.1.23 against the live server after the restart: `search_emails` timed out. Reproduced in isolation with IDLE and background sync on vs. off (same Bridge, same query): single-folder search **26-31 s vs 1.9 s**, all-folders search **>170 s (never finished) vs 6.1 s** — one lock per folder, each queued behind a fresh IDLE. This affected every tool that opens a mailbox (search, get_emails, get_email_by_id, …) on a normally configured server; the earlier "search_emails takes 20 s" measurement, taken with IDLE off, was the *other* cost (Bridge's SEARCH over duplicate views, fixed in 2.1.23). An operation waiting for the lock now makes the watcher yield: it polls for waiters (50 ms) and breaks IDLE as soon as there is one, and if the graceful break has not released the lock within 3 s it drops the connection instead (same force path as the existing hard timeout). A yield counts as a healthy IDLE return, so it never trips the "IDLE returned without blocking" reset. With the fix and IDLE + background sync on: 26 s → 2.6 s, 31 s → 1.3 s, >170 s → 6.7 s; `get_emails` 162 ms; the watcher stays connected and watching.
