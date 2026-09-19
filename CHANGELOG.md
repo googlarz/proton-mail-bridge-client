@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.23] — 2026-09-19
+
+### Fixed
+- **`search_emails` without `folder` took ~20 s on a large Bridge mailbox.** Measured against a real Bridge (INBOX 28,950, Archive 22,836, All Mail 57,165, Labels/gmail 50,312 messages): the cost is Bridge's server-side SEARCH, proportional to folder size, and an all-folders search walked **All Mail and every Labels/\* folder — views over mail that already lives in INBOX/Sent/Archive**. Those two alone were 12 of 19 s, and they inflated `totalMatched` to 165,669 for ~57k distinct messages. With no `folder`, the search now covers every real folder and skips the All Mail / Labels/\* / Starred views. Same query, same account: 19.5 s → 7.1 s (no match), 25.0 s → 9.0 s (broad match), 15.2 s → 4.4 s (subject-only), and `totalMatched` now equals the real distinct count (57,274). An explicit `folder` is honored as-is (including `All Mail` and `Labels/x`), and `label` / `mailboxRole` searches keep the full folder set, since those are only answerable from the label views. `sync_emails` is unchanged.
+
+### Added
+- `test/search-folder-scope.test.mjs`.
+
 ## [2.1.22] — 2026-09-19
 
 ### Fixed

@@ -653,7 +653,7 @@ const TOOLS = [
   },
   {
     name: "search_emails",
-    description: "Search emails via live IMAP filters with optional local post-processing for attachments and labels. Use when you need real-time results or must find messages received after the last sync. Prefer search_indexed_emails when the local index is current — it is significantly faster and works even when Bridge IMAP is unavailable. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail.",
+    description: "Search emails via live IMAP filters with optional local post-processing for attachments and labels. Use when you need real-time results or must find messages received after the last sync. Prefer search_indexed_emails when the local index is current — it is significantly faster and works even when Bridge IMAP is unavailable. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail. Without `folder` it searches every real folder but not the All Mail / Labels/* / Starred views (they only duplicate mail already in a real folder and made an all-folders search ~3x slower); pass `folder` (e.g. 'Labels/x' or 'All Mail') or `label`/`mailboxRole` to search those.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",

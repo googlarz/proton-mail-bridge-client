@@ -304,6 +304,22 @@ export function isLikelyConnectionError(error: unknown): boolean {
   ].some((needle) => haystack.includes(needle));
 }
 
+// Proton Bridge exposes "views" over mail that already lives in a real folder: All Mail
+// (every message), Labels/* (a message per label it carries) and Starred. A search over
+// "every folder" that includes them scans the same messages several times — measured live
+// on a 28k-message INBOX / 57k All Mail mailbox: All Mail and Labels/gmail alone were 12 s
+// of a 19 s search and inflated `totalMatched` to 165k for ~60k distinct messages. Every
+// message lives in exactly one real folder, so the real folders cover everything.
+export function isVirtualMailView(entry: { path: string; specialUse?: string }): boolean {
+  return (
+    entry.path.startsWith("Labels/") ||
+    entry.path === "All Mail" ||
+    entry.specialUse === "\\All" ||
+    entry.path === "Starred" ||
+    entry.specialUse === "\\Flagged"
+  );
+}
+
 // UID order does not track date order (e.g. after a cross-provider import), so picking
 // the target subset by UID (slice(-limit)) can silently drop the newest messages. This
 // picks by INTERNALDATE instead. See GitHub issue #6.
@@ -1384,7 +1400,7 @@ export class SimpleIMAPService {
     emails: EmailSummary[];
   }> {
     const limit = normalizeLimit(input.limit, 50);
-    const folders = await this.resolveFolders(input.folder);
+    const folders = await this.resolveSearchFolders(input);
     const searchQuery = this.buildSearchQuery(input);
     const collected: EmailSummary[] = [];
     let totalMatched = 0;
@@ -3535,6 +3551,19 @@ export class SimpleIMAPService {
     return folders
       .filter((entry) => !entry.flags.includes("\\Noselect"))
       .map((entry) => entry.path);
+  }
+
+  // Which folders a search covers. An explicit `folder` is honored as-is. With none given,
+  // every REAL folder is searched, but not the All Mail / Labels/* / Starred views (see
+  // isVirtualMailView) — unless the query itself is about labels or mailbox roles, which
+  // are only answerable from those views (`label` matches a Labels/<name> folder).
+  private async resolveSearchFolders(input: SearchEmailsInput): Promise<string[]> {
+    if (input.folder?.trim() || input.label || input.mailboxRole) {
+      return this.resolveFolders(input.folder);
+    }
+    const selectable = (await this.getFolders()).filter((entry) => !entry.flags.includes("\\Noselect"));
+    const real = selectable.filter((entry) => !isVirtualMailView(entry));
+    return (real.length > 0 ? real : selectable).map((entry) => entry.path);
   }
 
   private async resolveSpecialFolder(
