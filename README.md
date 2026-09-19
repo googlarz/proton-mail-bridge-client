@@ -539,6 +539,43 @@ all shared types (`ProtonMailConfig`, `EmailSummary`, `EmailDetail`, …), `plan
 
 ---
 
+## Performance and token cost
+
+Measured against a real Proton Bridge with a ~57,000-message mailbox (INBOX 29k, Archive 23k, Sent 5k), September 2026. Your numbers depend on mailbox size and machine; the ratios are what to rely on.
+
+| Call | Typical time |
+|---|---|
+| `search_indexed_emails` (local SQLite index) | ~10 ms |
+| `get_emails` (3 messages) | ~0.2 s |
+| `search_emails` with a `label`, or `folder` set to a small folder | < 1 s |
+| `search_emails` in one large folder (INBOX, 29k) | ~2 s |
+| `search_emails` with no `folder` (every real folder) | ~6–7 s |
+| `search_emails` in a 50k-message label folder | ~3 s |
+
+Bridge answers IMAP `SEARCH` itself, and its cost grows with folder size. That is why a live search is slower than the local index, and why narrowing the scope matters most.
+
+**Make searches faster**
+
+- **Prefer `search_indexed_emails`** when the index is current (`get_index_status`, `sync_emails`). It does not touch Bridge at all.
+- **Pass `folder`** when you know it. With no `folder`, `search_emails` covers every *real* folder and skips **All Mail**, **Labels/\*** and **Starred**: those are views of mail that already lives in INBOX/Sent/Archive, and scanning them made an all-folders search about three times slower and inflated `totalMatched`. Pass `folder: "All Mail"` (or `"Labels/x"`) to search a view on purpose.
+- **Use `label` for labels.** On Proton Bridge a label is the folder `Labels/<name>`, so `label: "Newsletters"` searches only that folder. A name that matches no label answers immediately with nothing instead of scanning.
+- Free-text `query` searches message bodies on Bridge's side and was the slowest filter in these measurements; `subject` and `from` were noticeably cheaper.
+
+**Keep responses (and token use) small**
+
+- List and search results are compact by default: attachments are metadata only, and empty or derivable fields are left out. Pass `fields: ["subject","from","date"]` to trim further — 10 results is roughly 800 tokens that way, versus about 11,000 for 50 full results.
+- Defaults are bounded: `search_emails`/`search_indexed_emails` return 50 (pass `limit` for more), `list_drafts` 20, `list_scheduled_sends` 50 newest first. Each reports `hasMore`; page with `offset`.
+- Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
+- Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_BYTES`.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 96: about 7k tokens of tool definitions instead of about 20k (roughly 65% less, reference tokenizer), paid on every conversation that loads the server.
+- Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
+
+**IMAP IDLE and the shared connection.** The server keeps one IMAP connection per account. The IDLE watcher (`PROTONMAIL_IDLE_WATCH`, on by default) waits on it, and since 2.1.25 it steps aside as soon as another operation needs the mailbox, so it no longer adds delay. Before that, with IDLE on, a single-folder search took 26–31 s and a multi-folder search did not finish.
+
+To check a real Bridge yourself, run the read-only smoke test: `PROTONMAIL_USERNAME=… PROTONMAIL_PASSWORD=… node test/live/readonly-smoke.mjs`. It uses `PROTONMAIL_READ_ONLY=true` and a throwaway data directory, sends nothing, and prints counts and timings only.
+
+---
+
 ## Operational notes
 
 - `get_emails` and `search_emails` return a composite `emailId` — use it for all subsequent reads and actions.
@@ -564,6 +601,9 @@ This reinstalls the runtime and rebuilds native modules in place.
 
 **Claude can't see the connector**
 After changing the MCP config, restart Claude Desktop fully (not just reload). Then check **`+` → Connectors → proton-mail-bridge**. If it's not there, run `proton-mail-bridge-client doctor` to validate the connection.
+
+**Searches take ~30 seconds, or time out**
+Upgrade to 2.1.25 or later. Before that, the IMAP IDLE watcher held the shared connection for its whole idle period and every other operation waited behind it (see [Performance and token cost](#performance-and-token-cost)). On a current version, a slow `search_emails` is Bridge's own `SEARCH` over a large folder: pass `folder` or `label`, or use `search_indexed_emails`.
 
 **Folder not found when moving email**
 Use `Folders/Name` for real folders (e.g., `Folders/Receipts`), not just `Name`. Labels and folders share the same namespace in Proton Bridge but are structurally different.
