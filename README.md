@@ -434,6 +434,8 @@ PROTONMAIL_IMAP_SECURE='false'
 PROTONMAIL_SMTP_HOST='127.0.0.1'
 PROTONMAIL_SMTP_PORT='1025'
 PROTONMAIL_SMTP_SECURE='true'         # Bridge's local SMTP port requires implicit TLS from the first byte; set false only for a non-Bridge SMTP relay
+PROTONMAIL_IMAP_USERNAME=''           # optional: log in to IMAP as a different user than PROTONMAIL_USERNAME (default: the same). The send identity, and RESTRICT_OUTBOUND_TO_SELF, still use PROTONMAIL_USERNAME.
+PROTONMAIL_IMAP_PASSWORD=''           # optional: a different IMAP password than PROTONMAIL_PASSWORD (default: the same)
 
 # Secrets via file or command (avoids raw credentials in config)
 PROTONMAIL_USERNAME_FILE='/path/to/user.txt'
@@ -455,6 +457,7 @@ PROTONMAIL_ALLOWED_ACTIONS='mark_read,mark_unread,star,unstar,archive,trash,rest
 PROTONMAIL_CONFIRM_DESTRUCTIVE='false'
 PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF='false'  # true: sends may only go to your own Bridge login address (To, CC and BCC; +tag aliases count as yours); anything else is refused, and queued/scheduled sends are re-checked when they fire. Covers send_email, reply_to_email, reply_all_email, forward_email, send_draft, schedule_draft, send_test_email, unsubscribe_sender. The safest way to try the server.
 PROTONMAIL_ALLOW_EMPTY_FOLDER='false'         # true: enables empty_folder, which permanently deletes ALL messages in a folder (still needs confirmed:true; without it only a preview is returned). Off by default; use bulk_delete for a subset.
+PROTONMAIL_ALLOW_UNSAFE_HTML='false'          # HTML in outgoing mail is always sanitized (scripts, event handlers and remote images/beacons removed). A send that passes sanitizeHtml:false is IGNORED — still sanitized, with a warning logged — unless this is exactly 'true'. Leave it off unless you deliberately send raw HTML.
 PROTONMAIL_SEND_DELAY_SECONDS='0'    # >0: send_email, reply_to_email, reply_all_email and forward_email queue instead of sending immediately, cancelable via cancel_send (undoWindowSeconds overrides per call). send_draft is not delayed; use schedule_draft. Only fires while this server stays running.
 PROTONMAIL_SIGNATURE=''              # Plain text, appended to send_email/reply_to_email/reply_all_email/forward_email bodies (text + HTML), after your own text and before any quoted/forwarded content. Every send now goes out multipart (a plain-text send auto-gets an html alternative too), so the signature always gets its HTML treatment, not just the text/plain part. Opt out per-message with appendSignature: false. Never applied to send_draft/schedule_draft — draft content is already finalized.
 #
@@ -466,10 +469,18 @@ PROTONMAIL_SIGNATURE=''              # Plain text, appended to send_email/reply_
 
 # Sync
 PROTONMAIL_AUTO_SYNC='true'
+PROTONMAIL_AUTO_SYNC_FOLDER='INBOX,Sent'      # comma-separated folders the background sync keeps indexed
+PROTONMAIL_AUTO_SYNC_FULL='false'             # true: each background pass is a full sync (larger sample per folder, and messages moved/deleted elsewhere are pruned from the index) instead of incremental
+PROTONMAIL_AUTO_SYNC_LIMIT_PER_FOLDER='100'  # messages fetched per folder per background pass (1-500)
 PROTONMAIL_STARTUP_SYNC='true'
 PROTONMAIL_SYNC_INTERVAL_MINUTES='5'
 PROTONMAIL_IDLE_WATCH='true'
 PROTONMAIL_IDLE_MAX_SECONDS='30'
+
+# Tuning and diagnostics
+PROTONMAIL_OP_DELAY_MS='0'            # minimum gap in ms between IMAP mailbox operations (0-5000); raise it to be gentler on a slow Bridge. 0 = no throttling
+PROTONMAIL_DEBUG='false'              # true: get_connection_status and run_doctor include the raw underlying connection error text (otherwise only a classified cause and suggestion)
+PROTONMAIL_CLAUDE_RUNTIME_DIR=''      # where the Claude Desktop installer puts its runtime copy (default: ~/Library/Application Support/Proton Mail Bridge Client on macOS, %APPDATA%\Proton Mail Bridge Client on Windows, ~/.local/share/proton-mail-bridge-client on Linux)
 ```
 
 ---
