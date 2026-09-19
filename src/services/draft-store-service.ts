@@ -49,6 +49,44 @@ export function draftSyncFingerprint(draft: DraftRecord): string {
     .digest("hex");
 }
 
+export interface BodyEdit {
+  find: string;
+  replace: string;
+  // Replace every occurrence instead of requiring exactly one.
+  all?: boolean;
+}
+
+// Applies find/replace edits, in order, to a draft body. All-or-nothing: any edit that
+// cannot be applied unambiguously throws, and the caller keeps the original body.
+// Editing by fragment instead of resending the whole body is what makes iterating on a
+// long draft cheap — the model only has to write the words that change.
+export function applyBodyEdits(body: string, edits: BodyEdit[]): { body: string; replacements: number } {
+  if (!Array.isArray(edits) || edits.length === 0) {
+    throw new Error("bodyEdits must be a non-empty array of {find, replace} objects.");
+  }
+  let current = body;
+  let replacements = 0;
+  edits.forEach((edit, index) => {
+    const label = `bodyEdits[${index}]`;
+    if (typeof edit?.find !== "string" || edit.find.length === 0) {
+      throw new Error(`${label}.find must be a non-empty string.`);
+    }
+    if (typeof edit.replace !== "string") {
+      throw new Error(`${label}.replace must be a string (use "" to delete the text).`);
+    }
+    const occurrences = current.split(edit.find).length - 1;
+    if (occurrences === 0) {
+      throw new Error(`${label}: the text to replace was not found in the draft body (edits apply in order, so an earlier edit may have changed it).`);
+    }
+    if (occurrences > 1 && edit.all !== true) {
+      throw new Error(`${label}: the text to replace appears ${occurrences} times — include more surrounding text to make it unique, or set all:true to replace every occurrence.`);
+    }
+    current = current.split(edit.find).join(edit.replace);
+    replacements += occurrences;
+  });
+  return { body: current, replacements };
+}
+
 export class DraftStoreService {
   private readonly draftPath: string;
   private _lock: Promise<void> = Promise.resolve();
@@ -143,6 +181,9 @@ export class DraftStoreService {
       bcc?: string[];
       subject?: string;
       body?: string;
+      // Find/replace edits applied to the STORED body under the store lock, so concurrent
+      // edits of different fragments both land. Mutually exclusive with `body`.
+      bodyEdits?: BodyEdit[];
       isHtml?: boolean;
       priority?: "high" | "normal" | "low";
       replyTo?: string;
@@ -177,7 +218,7 @@ export class DraftStoreService {
         cc: patch.cc ? [...patch.cc] : existing.cc,
         bcc: patch.bcc ? [...patch.bcc] : existing.bcc,
         subject: patch.subject ?? existing.subject,
-        body: patch.body ?? existing.body,
+        body: patch.bodyEdits ? applyBodyEdits(existing.body, patch.bodyEdits).body : patch.body ?? existing.body,
         isHtml: typeof patch.isHtml === "boolean" ? patch.isHtml : existing.isHtml,
         priority: patch.priority ?? existing.priority,
         replyTo: patch.replyTo ?? existing.replyTo,

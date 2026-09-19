@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.27] — 2026-09-19
+
+### Added
+- **`update_draft` accepts `bodyEdits`: edit a draft by fragments instead of resending the whole body.** Working on long drafts through Claude meant sending the entire body for every small change (a real draft here is ~14,000 characters of HTML). `bodyEdits: [{ find, replace, all? }]` applies find/replace edits, in order, to the stored body: a two-sentence change to a 13,838-character draft is a 201-character request instead of 13,919 (about 69x smaller). Each `find` must appear exactly once (or set `all:true`); a missing/ambiguous/malformed edit changes nothing and the error names the edit and the reason (all-or-nothing). Passing both `body` and `bodyEdits` is rejected. The edits are applied to the stored body under the draft store's lock (not to a copy read earlier), so two concurrent edits of different fragments both land. An edit that leaves the body unchanged is a no-op like any other. The response reports `bodyEditsApplied`. Purely additive: `body` still replaces the whole body as before.
+- `test/draft-body-edits.test.mjs` (function, store concurrency, and the real MCP handler including the request-size ratio).
+
+### Docs
+- README: performance and token-cost section, including the date-filter comparison and notes for working with drafts.
+
 ## [2.1.26] — 2026-09-19
 
 ### Fixed

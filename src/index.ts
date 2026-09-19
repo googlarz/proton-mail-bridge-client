@@ -22,7 +22,7 @@ import { AnalyticsService } from "./services/analytics-service.js";
 import { AuditService } from "./services/audit-service.js";
 import { BackgroundSyncService } from "./services/background-sync-service.js";
 import { DeliveryQueueService } from "./services/delivery-queue-service.js";
-import { DraftStoreService, draftSyncFingerprint } from "./services/draft-store-service.js";
+import { DraftStoreService, applyBodyEdits, draftSyncFingerprint, type BodyEdit } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
 import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService, UID_VALIDITY_MISMATCH_ERROR } from "./services/simple-imap-service.js";
 import { applySignature, plainTextToHtml, SMTPService } from "./services/smtp-service.js";
@@ -519,7 +519,20 @@ const TOOLS = [
         cc: { type: "string", description: "CC recipient email addresses, comma-separated." },
         bcc: { type: "string", description: "BCC recipient email addresses, comma-separated." },
         subject: { type: "string", description: "Draft subject." },
-        body: { type: "string", description: "Draft body." },
+        body: { type: "string", description: "Draft body. Replaces the WHOLE body — for a change to part of a long draft use bodyEdits instead, which costs a fraction of the tokens." },
+        bodyEdits: {
+          type: "array",
+          description: "Change parts of the existing body without resending it: find/replace edits applied in order (use instead of body; not both). Each find must appear exactly once in the body (add surrounding text to make it unique, or set all:true), otherwise nothing is changed and the error says why. replace:'' deletes the text. Matches the stored body literally — for an HTML draft that means the HTML source. The response reports bodyEditsApplied (number of replacements).",
+          items: {
+            type: "object",
+            properties: {
+              find: { type: "string", description: "Exact text to find (non-empty)." },
+              replace: { type: "string", description: "Replacement text; '' deletes." },
+              all: { type: "boolean", description: "Replace every occurrence instead of requiring exactly one.", default: false },
+            },
+            required: ["find", "replace"],
+          },
+        },
         isHtml: { type: "boolean", description: "Whether the body should be HTML." },
         priority: { type: "string", enum: ["high", "normal", "low"] },
         replyTo: { type: "string", description: "Optional reply-to email address." },
@@ -1999,6 +2012,24 @@ export async function withAudit<T>(
     });
     throw error;
   }
+}
+
+// Validates update_draft's `bodyEdits` argument into BodyEdit[] (shape only; whether each
+// find text is present/unambiguous is decided against the stored body by applyBodyEdits).
+function parseBodyEdits(value: unknown): BodyEdit[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new McpError(ErrorCode.InvalidParams, "bodyEdits must be a non-empty array of {find, replace, all?} objects.");
+  }
+  return value.map((entry, index) => {
+    const edit = asObject(entry);
+    if (typeof edit.find !== "string" || edit.find.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${index}].find must be a non-empty string.`);
+    }
+    if (typeof edit.replace !== "string") {
+      throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${index}].replace must be a string (use "" to delete the text).`);
+    }
+    return { find: edit.find, replace: edit.replace, ...(edit.all === true ? { all: true } : {}) };
+  });
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -5165,6 +5196,10 @@ export function createServer(
           // comment — so an explicit body:'' or replyTo:'' actually clears the
           // field instead of being silently treated as "field not provided".
           const body = optionalClearableString(args, "body");
+          const bodyEdits = args.bodyEdits === undefined ? undefined : parseBodyEdits(args.bodyEdits);
+          if (bodyEdits && body !== undefined) {
+            throw new McpError(ErrorCode.InvalidParams, "Pass either body (replace the whole body) or bodyEdits (change fragments), not both.");
+          }
           const replyTo = optionalClearableString(args, "replyTo");
           const from = optionalString(args, "from");
           const priority = optionalString(args, "priority");
@@ -5192,6 +5227,7 @@ export function createServer(
             bcc,
             subject: optionalString(args, "subject"),
             body,
+            bodyEdits,
             isHtml: typeof args.isHtml === "boolean" ? args.isHtml : undefined,
             priority:
               priority === "high" || priority === "low" || priority === "normal"
@@ -5203,9 +5239,23 @@ export function createServer(
             notes: optionalString(args, "notes"),
           } satisfies Parameters<typeof updateDraftBundle.draftStore.updateDraft>[1];
 
+          let bodyEditsApplied: number | undefined;
           const result = await withAudit(auditService, name, args, async () => {
             const existingDraft = await updateDraftBundle.draftStore.getDraft(updateDraftIdRest);
-            const noop = isNoopDraftPatch(existingDraft, draftPatch);
+            // For the no-op check only: what the body would become. The store re-applies
+            // the edits to the stored body under its own lock, so a concurrent edit of
+            // another fragment is never overwritten.
+            let notedBody: string | undefined;
+            if (bodyEdits) {
+              try {
+                const preview = applyBodyEdits(existingDraft.body, bodyEdits);
+                notedBody = preview.body;
+                bodyEditsApplied = preview.replacements;
+              } catch (error) {
+                throw new McpError(ErrorCode.InvalidParams, error instanceof Error ? error.message : String(error));
+              }
+            }
+            const noop = isNoopDraftPatch(existingDraft, bodyEdits ? { ...draftPatch, bodyEdits: undefined, body: notedBody } : draftPatch);
             // Only skip the resync when the remote copy is known to be current. A
             // draft whose last sync failed (or never ran) must still retry it, even
             // if this particular call changes nothing locally.
@@ -5256,7 +5306,9 @@ export function createServer(
           // remains full-content for the "let me look at this draft" case, which is a
           // single call rather than a loop.
           return createTextResult(
-            truncateDraftBodyForResponse(redactDraftAttachmentsForListing(result)),
+            (bodyEditsApplied === undefined
+              ? truncateDraftBodyForResponse(redactDraftAttachmentsForListing(result))
+              : { ...truncateDraftBodyForResponse(redactDraftAttachmentsForListing(result)), bodyEditsApplied }),
             false,
             [
               draftSource(result),
