@@ -29,6 +29,7 @@ import {
   isTextLikeMimeType,
   mapEnvelopeAddresses,
   mapParsedAddresses,
+  labelMatchesFolder,
   matchesLocalSearchFilters,
   nextDay,
   normalizeLimit,
@@ -1446,7 +1447,10 @@ export class SimpleIMAPService {
     emails: EmailSummary[];
   }> {
     const limit = normalizeLimit(input.limit, 50);
-    const folders = await this.resolveSearchFolders(input);
+    // A label that names real folder(s) (Proton: "Newsletters" = Labels/Newsletters) is
+    // answered by searching just those folders — every message in them has the label.
+    const labelFolders = await this.resolveLabelFolders(input);
+    const folders = labelFolders ?? (await this.resolveSearchFolders(input));
     const searchQuery = this.buildSearchQuery(input);
     const collected: EmailSummary[] = [];
     let totalMatched = 0;
@@ -1459,7 +1463,10 @@ export class SimpleIMAPService {
     const hasLocalOnlyFilters =
       typeof input.hasAttachment === "boolean" ||
       Boolean(input.threadId) ||
-      Boolean(input.label) ||
+      // Already guaranteed by the folder scope when it resolved to the label's folder(s);
+      // treating it as a local-only filter would fetch the date of every message in the
+      // folder (50k for a big label) just to re-check what the folder already says.
+      (Boolean(input.label) && labelFolders === undefined) ||
       Boolean(input.attachmentName) ||
       Boolean(input.senderDomain) ||
       Boolean(input.mailboxRole);
@@ -3611,6 +3618,25 @@ export class SimpleIMAPService {
   // every REAL folder is searched, but not the All Mail / Labels/* / Starred views (see
   // isVirtualMailView) — unless the query itself is about labels or mailbox roles, which
   // are only answerable from those views (`label` matches a Labels/<name> folder).
+  // Folders that ARE the requested label; [] when the server is Proton Bridge and none is;
+  // undefined when there is no `label`, the caller gave an explicit `folder`, or the server
+  // is not recognizably Bridge and may report labels through X-GM-LABELS — a label is then
+  // only knowable per message, so the caller scans as before.
+  private async resolveLabelFolders(input: SearchEmailsInput): Promise<string[] | undefined> {
+    if (!input.label || input.folder?.trim()) {
+      return undefined;
+    }
+    const selectable = (await this.getFolders()).filter((entry) => !entry.flags.includes("\\Noselect"));
+    const matches = selectable.filter((entry) => labelMatchesFolder(entry.path, input.label as string));
+    if (matches.length > 0) {
+      return matches.map((entry) => entry.path);
+    }
+    // Proton Bridge (recognizable by its Labels/ folders) never reports X-GM-LABELS, so a
+    // label that is no folder cannot match any message: answer "nothing" now instead of
+    // scanning every folder for 25 s to reach the same empty result (a typo'd label name).
+    return selectable.some((entry) => entry.path.startsWith("Labels/")) ? [] : undefined;
+  }
+
   private async resolveSearchFolders(input: SearchEmailsInput): Promise<string[]> {
     if (input.folder?.trim() || input.label || input.mailboxRole) {
       return this.resolveFolders(input.folder);

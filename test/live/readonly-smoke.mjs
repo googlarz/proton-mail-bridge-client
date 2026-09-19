@@ -75,6 +75,17 @@ try {
     check("get_email_by_id round-trips an id from get_emails", !one.isError, `${one.ms}ms`);
   }
 
+  // label filter (2.1.26): a label is a Labels/<name> folder on Bridge — searching it by its
+  // bare name must find its messages quickly instead of scanning every folder for ~25 s.
+  const labelFolder = folderList.find((f) => typeof f.path === "string" && f.path.startsWith("Labels/") && (f.messages ?? 0) > 0 && (f.messages ?? 0) < 5000);
+  if (labelFolder) {
+    const bare = labelFolder.path.slice("Labels/".length);
+    const byLabel = await call("search_emails", { label: bare, limit: 3 });
+    check("search_emails by bare label name finds that label's mail, quickly", !byLabel.isError && (byLabel.data?.emails?.length ?? 0) > 0 && byLabel.ms < 15000, `${byLabel.data?.emails?.length ?? 0} returned, ${byLabel.ms}ms`);
+    const typo = await call("search_emails", { label: `${bare}-no-such-label`, limit: 3 });
+    check("an unknown label answers immediately with nothing", !typo.isError && (typo.data?.emails?.length ?? 1) === 0 && typo.ms < 5000, `${typo.ms}ms`);
+  }
+
   const search = await call("search_emails", { query: "a", limit: 5 });
   check("search_emails default path", !search.isError, `${search.ms}ms`);
 

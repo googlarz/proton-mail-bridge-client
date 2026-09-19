@@ -506,7 +506,7 @@ export function matchesLocalSearchFilters(
 
   if (filters.label) {
     const labelNeedle = filters.label.toLowerCase();
-    const folderMatch = email.folder.toLowerCase() === labelNeedle;
+    const folderMatch = labelMatchesFolder(email.folder, filters.label);
     const labelMatch = email.labels.some((label) => label.toLowerCase() === labelNeedle);
     if (!folderMatch && !labelMatch) {
       return false;
@@ -545,6 +545,17 @@ export function matchesLocalSearchFilters(
   }
 
   return true;
+}
+
+// Proton Bridge does not send X-GM-LABELS, so a message's `labels` is empty there and a
+// label is only visible as a folder: label "Newsletters" is the folder "Labels/Newsletters"
+// (custom folders live under "Folders/"). Matching only the bare folder path meant that
+// `label: "Newsletters"` never matched anything — found live, after a 26 s scan of every
+// folder. Case-insensitive; the exact path (e.g. "Labels/Newsletters", "INBOX") still matches.
+export function labelMatchesFolder(folder: string, label: string): boolean {
+  const needle = label.trim().toLowerCase();
+  const path = folder.toLowerCase();
+  return path === needle || path === `labels/${needle}` || path === `folders/${needle}`;
 }
 
 export function stringifyForJson(value: unknown): string {

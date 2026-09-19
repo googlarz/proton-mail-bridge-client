@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.26] — 2026-09-19
+
+### Fixed
+- **`search_emails` with `label` took ~25 s and, for the label name a user actually types, found nothing.** Measured against a real Bridge: `label: "Newsletters"` → 26.0 s, 0 results, after scanning all 17 folders; `label: "Labels/Newsletters"` → 25.2 s; the *same* messages via `folder: "Labels/Newsletters"` → 38 ms. Two causes. (1) Correctness: Proton Bridge sends no `X-GM-LABELS`, so a message's `labels` is empty and a label is only visible as a folder (`Labels/Newsletters`), but the filter compared the bare label with the full folder path — the bare name never matched. (The local index already normalized `Labels/X` to `X`; the live IMAP path now behaves the same, via the new shared `labelMatchesFolder`, which also accepts `Folders/<name>` and the exact path, case-insensitively.) (2) Cost: with `label` the search fetched the date of every message in every folder (`label` counted as a "local-only filter"). A label that names folder(s) now scopes the search to exactly those folders and no longer needs the per-message filter, so the fast newest-N path applies and `totalMatched` is the exact count. On the real Bridge: `label: "Newsletters"` 26.0 s / 0 hits → 0.95 s / 5 of 553; `Labels/Newsletters` 25.2 s → 43 ms; a 50k-message label 21.2 s → 3.3 s (Bridge's own SEARCH over 50k); `label` + `query` 252 ms.
+- **A label that matches no folder now answers immediately on Bridge** (recognized by its `Labels/` folders — it never reports `X-GM-LABELS`, so an unknown label cannot match a message) instead of scanning every folder for 25 s to return nothing. On other servers an unknown label still scans, since labels may come per message there. An explicit `folder`, or `mailboxRole`, behaves as before.
+
+### Added
+- `test/search-label-scope.test.mjs`; the opt-in live smoke test now also checks a bare-label search on a real label (finds its mail in <15 s) and that an unknown label answers in <5 s.
+
 ## [2.1.25] — 2026-09-19
 
 Ships the 2.1.24 fix (the IDLE watcher yielding the mailbox lock to waiting operations — see below) with the CI failure of the 2.1.24 tag corrected. 2.1.24 was tagged but never published to npm.

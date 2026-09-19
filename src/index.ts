@@ -660,7 +660,7 @@ const TOOLS = [
       properties: {
         query: { type: "string", description: "Free-text query across headers and body." },
         folder: { type: "string", description: "Folder to search. Defaults to all folders." },
-        label: { type: "string", description: "Folder or label filter applied locally after IMAP fetch." },
+        label: { type: "string", description: "Label name (Proton: 'Newsletters' = the Labels/Newsletters folder; a folder path such as 'Labels/Newsletters' or 'INBOX' also works). Searches just that label's folder, which is much faster than scanning every folder." },
         threadId: { type: "string", description: "Thread id filter applied locally after IMAP fetch." },
         from: { type: "string", description: "Sender filter." },
         to: { type: "string", description: "Recipient filter." },
