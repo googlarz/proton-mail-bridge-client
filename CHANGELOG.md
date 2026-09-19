@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.22] — 2026-09-19
+
+### Fixed
+- **`list_scheduled_sends` and `list_snoozed` failed with "Maximum call stack size exceeded" on a multi-account setup with a live IMAP connection.** Found by the first run against a real Proton Bridge (3 accounts). Both handlers return `{ bundle, items }` per account from inside `withAudit`, and the audit sanitizer recursed without bound through the account bundle — its services, sockets and clients. The mocked-IMAP tests never had a connection to recurse into, which is why nothing caught it. `sanitizeAuditValue` is now bounded: it never descends into class instances or an account `bundle`, stops on cycles, and caps depth. As a side effect the audit log no longer captures an account bundle's internals (config, paths) for these tools. Other handlers that pass a bundle through `withAudit` were affected the same way and are covered by the same fix.
+
+### Added
+- **Real-process tests** (`test/crash-and-multiprocess.test.mjs`): SIGKILL while SMTP is in flight (the restart never resends and reports an unknown outcome, the draft stays claimed), a file lock held by a SIGKILLed process is reclaimed, and two processes syncing the same draft produce exactly one remote copy (verified to fail without the sync lock).
+- **Opt-in read-only live smoke test** (`node test/live/readonly-smoke.mjs`, not part of `npm test`): runs the built server against a real Bridge with `PROTONMAIL_READ_ONLY=true`, background sync off and a throwaway data dir; calls only read tools plus `sync_emails` into that throwaway index; prints counts and timings, never message content.
+- `test/audit-sanitize-robustness.test.mjs`.
+
 ## [2.1.21] — 2026-09-19
 
 ### Fixed

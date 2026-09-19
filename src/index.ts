@@ -1891,20 +1891,45 @@ function createTextResult(
   };
 }
 
-function sanitizeAuditValue(value: unknown): unknown {
+// Bounded on purpose. The audited `result` of a handler can contain arbitrary objects —
+// found live: list_scheduled_sends/list_snoozed returned `{ bundle, items }` per account
+// from inside withAudit, and once an account had an open IMAP connection the recursive
+// walk through the bundle's services/sockets overflowed the stack ("Maximum call stack
+// size exceeded"), failing the whole tool call. So: never descend into class instances
+// (services, sockets, clients), never into an account bundle, stop on cycles, and cap depth.
+const AUDIT_MAX_DEPTH = 8;
+
+function sanitizeAuditValue(value: unknown, depth = 0, seen: WeakSet<object> = new WeakSet()): unknown {
   if (value === undefined || value === null) {
     return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeAuditValue(item));
   }
 
   if (typeof value === "string") {
     return value.length > 300 ? `[redacted:${value.length} chars]` : value;
   }
 
-  if (typeof value === "object") {
+  if (typeof value !== "object") {
+    return value;
+  }
+
+  if (depth >= AUDIT_MAX_DEPTH) {
+    return "[max depth]";
+  }
+  if (seen.has(value)) {
+    return "[circular]";
+  }
+  seen.add(value);
+
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => sanitizeAuditValue(item, depth + 1, seen));
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return `[${(value as object).constructor?.name ?? "object"}]`;
+    }
+
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, entryValue]) => {
         if (
@@ -1916,6 +1941,10 @@ function sanitizeAuditValue(value: unknown): unknown {
           /password|secret|token/i.test(key)
         ) {
           return [key, "[redacted]"];
+        }
+
+        if (key === "bundle") {
+          return [key, "[account bundle]"];
         }
 
         if (key === "attachments" && Array.isArray(entryValue)) {
@@ -1932,12 +1961,13 @@ function sanitizeAuditValue(value: unknown): unknown {
           ];
         }
 
-        return [key, sanitizeAuditValue(entryValue)];
+        return [key, sanitizeAuditValue(entryValue, depth + 1, seen)];
       }),
     );
+  } finally {
+    // Only ancestors count as a cycle; the same object reachable twice is fine.
+    seen.delete(value);
   }
-
-  return value;
 }
 
 export async function withAudit<T>(
