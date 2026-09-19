@@ -1654,3 +1654,52 @@ test("planFolderSync full:true after backfill re-walks history once the last ful
   assert.equal(planFolderSync({ ...input, now: Date.parse("2026-09-01T12:00:00.000Z") }).changed, false);
   assert.equal(planFolderSync({ ...input, now: Date.parse("2026-09-02T01:00:00.000Z") }).changed, true);
 });
+
+// Review of 2.1.20: a new-mail catch-up reset lastFullSyncAt, so with a steady trickle of
+// new mail (1 UID/hour) the history reconcile was postponed forever.
+test("a new-mail catch-up does not reset the history-reconcile clock; a history walk does", async () => {
+  const { nextLastFullSyncAt } = await import("../dist/services/simple-imap-service.js");
+  const previous = "2026-09-01T00:00:00.000Z";
+  const now = "2026-09-05T00:00:00.000Z";
+
+  const catchUp = planFolderSync({
+    folder: "INBOX", exists: 101, uidNext: 102, uidValidity: "1", full: true, limit: 50, now: Date.parse("2026-09-01T12:00:00.000Z"),
+    checkpoint: { folder: "INBOX", uidValidity: "1", backfilledToUid: 1, highestUid: 100, total: 100, lastFullSyncAt: previous },
+  });
+  assert.equal(catchUp.catchUp, true);
+  assert.equal(nextLastFullSyncAt(catchUp, previous, now), previous);
+
+  const walk = planFolderSync({
+    folder: "INBOX", exists: 99, uidNext: 101, uidValidity: "1", full: true, limit: 50, now: Date.parse("2026-09-01T12:00:00.000Z"),
+    checkpoint: { folder: "INBOX", uidValidity: "1", backfilledToUid: 1, highestUid: 100, total: 100, lastFullSyncAt: previous },
+  });
+  assert.equal(walk.catchUp, undefined);
+  assert.equal(nextLastFullSyncAt(walk, previous, now), now);
+
+  const noop = planFolderSync({
+    folder: "INBOX", exists: 100, uidNext: 101, uidValidity: "1", full: true, limit: 50, now: Date.parse("2026-09-01T12:00:00.000Z"),
+    checkpoint: { folder: "INBOX", uidValidity: "1", backfilledToUid: 1, highestUid: 100, total: 100 },
+  });
+  assert.equal(nextLastFullSyncAt(noop, previous, now), previous);
+});
+
+test("with a new UID arriving every hour, the history reconcile still comes due after a day", async () => {
+  const { nextLastFullSyncAt } = await import("../dist/services/simple-imap-service.js");
+  const hour = 3_600_000;
+  const start = Date.parse("2026-09-01T00:00:00.000Z");
+  let checkpoint = { folder: "INBOX", uidValidity: "1", backfilledToUid: 1, highestUid: 100, total: 100, lastFullSyncAt: new Date(start).toISOString() };
+  let reconciled = false;
+  for (let h = 1; h <= 30 && !reconciled; h++) {
+    const now = start + h * hour;
+    const uidNext = 101 + h; // one new message per hour
+    const plan = planFolderSync({ folder: "INBOX", exists: 100 + h, uidNext, uidValidity: "1", full: true, limit: 50, checkpoint, now });
+    if (!plan.catchUp && plan.changed) { reconciled = true; break; }
+    const nowIso = new Date(now).toISOString();
+    checkpoint = {
+      ...checkpoint, highestUid: uidNext - 1, total: 100 + h,
+      lastFullSyncAt: nextLastFullSyncAt(plan, checkpoint.lastFullSyncAt, nowIso),
+      incrementalResumeUid: plan.incrementalResumeUid,
+    };
+  }
+  assert.ok(reconciled, "a history re-walk must be scheduled despite continuous new mail");
+});

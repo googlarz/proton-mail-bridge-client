@@ -943,19 +943,7 @@ async function runSend(parsed: ParsedCliArgs): Promise<void> {
 
   const wantJson = isTruthyFlag(parsed.flags.json);
   const wait = isTruthyFlag(parsed.flags.wait);
-  const undoWindowFlag = getStringFlag(parsed.flags, "undo-window");
-  // Not getNumberFlag: 0 is a meaningful, valid value here (force an
-  // immediate send even when the server has a default undo window
-  // configured), but getNumberFlag rejects <= 0 for the flags where only a
-  // positive count makes sense (limit, offset, ...).
-  let undoWindowSeconds: number | undefined;
-  if (undoWindowFlag !== undefined) {
-    const requested = Number.parseInt(undoWindowFlag, 10);
-    if (!Number.isInteger(requested) || requested < 0 || requested > 300) {
-      throw new Error("--undo-window must be an integer between 0 and 300.");
-    }
-    undoWindowSeconds = requested;
-  }
+  const undoWindowSeconds = parseUndoWindowFlag(parsed);
   await withMcpClient(async (client) => {
     const result = await client.callTool({
       name: "send_email",
@@ -1017,6 +1005,31 @@ async function runSend(parsed: ParsedCliArgs): Promise<void> {
   });
 }
 
+// Not getNumberFlag: 0 is a meaningful, valid value here (force an immediate send even
+// when the server has a default undo window configured), but getNumberFlag rejects <= 0
+// for the flags where only a positive count makes sense (limit, offset, ...).
+function parseUndoWindowFlag(parsed: ParsedCliArgs): number | undefined {
+  const undoWindowFlag = getStringFlag(parsed.flags, "undo-window");
+  if (undoWindowFlag === undefined) return undefined;
+  const requested = Number.parseInt(undoWindowFlag, 10);
+  if (!Number.isInteger(requested) || requested < 0 || requested > 300) {
+    throw new Error("--undo-window must be an integer between 0 and 300.");
+  }
+  return requested;
+}
+
+// A CLI process exits right after the call, and the undo-send queue only fires while an
+// MCP server (e.g. Claude Desktop) is running against the same data directory — say so
+// instead of letting a queued reply/forward look sent.
+function noteIfQueued(result: Record<string, unknown>, wantJson: boolean): void {
+  const structured = (result.structuredContent ?? {}) as Record<string, unknown>;
+  if (structured.queued && !wantJson) {
+    process.stderr.write(
+      "Note: queued, not sent yet. It only fires while an MCP server (e.g. Claude Desktop) is running against the same data directory — this CLI process exits now. Cancel with cancel-send, or pass --undo-window 0 to send immediately.\n",
+    );
+  }
+}
+
 async function runReply(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("reply requires an emailId");
@@ -1038,9 +1051,10 @@ async function runReply(parsed: ParsedCliArgs): Promise<void> {
   await withMcpClient(async (client) => {
     const result = await client.callTool({
       name: "reply_to_email",
-      arguments: { emailId, body, replyAll: replyAll || undefined, confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined },
+      arguments: { emailId, body, replyAll: replyAll || undefined, confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined, undoWindowSeconds: parseUndoWindowFlag(parsed) },
     });
     printToolCallResult(result as Record<string, unknown>, wantJson);
+    noteIfQueued(result as Record<string, unknown>, wantJson);
   });
 }
 
@@ -1063,9 +1077,10 @@ async function runForward(parsed: ParsedCliArgs): Promise<void> {
   await withMcpClient(async (client) => {
     const result = await client.callTool({
       name: "forward_email",
-      arguments: { emailId, to: to.join(", "), body, confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined },
+      arguments: { emailId, to: to.join(", "), body, confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined, undoWindowSeconds: parseUndoWindowFlag(parsed) },
     });
     printToolCallResult(result as Record<string, unknown>, wantJson);
+    noteIfQueued(result as Record<string, unknown>, wantJson);
   });
 }
 

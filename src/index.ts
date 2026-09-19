@@ -234,6 +234,7 @@ const TOOLS = [
       type: "object",
       properties: {
         emailId: { type: "string", description: "Original email id." },
+        undoWindowSeconds: { type: "number", description: "Override PROTONMAIL_SEND_DELAY_SECONDS for this one send: queue it for this many seconds (cancelable via cancel_send) instead of the server's configured default. 0 sends immediately even if the server has a default window configured. Same caveat as the server default: only fires while this server process stays running." },
         body: { type: "string", description: "Reply body to prepend (plain text). Required unless markdownBody is provided." },
         markdownBody: { type: "string", description: "Reply body in Markdown. Rendered to HTML with body as plain-text fallback; takes precedence over body+isHtml." },
         replyAll: { type: "boolean", description: "Reply to all original recipients.", default: false },
@@ -274,6 +275,7 @@ const TOOLS = [
       type: "object",
       properties: {
         emailId: { type: "string", description: "Original email id." },
+        undoWindowSeconds: { type: "number", description: "Override PROTONMAIL_SEND_DELAY_SECONDS for this one send: queue it for this many seconds (cancelable via cancel_send) instead of the server's configured default. 0 sends immediately even if the server has a default window configured. Same caveat as the server default: only fires while this server process stays running." },
         body: { type: "string", description: "Reply body to prepend (plain text). Required unless markdownBody is provided." },
         markdownBody: { type: "string", description: "Reply body in Markdown. Rendered to HTML with body as plain-text fallback; takes precedence over body+isHtml." },
         isHtml: { type: "boolean", description: "Send body as HTML (ignored when markdownBody is provided).", default: false },
@@ -313,6 +315,7 @@ const TOOLS = [
       type: "object",
       properties: {
         emailId: { type: "string", description: "Original email id." },
+        undoWindowSeconds: { type: "number", description: "Override PROTONMAIL_SEND_DELAY_SECONDS for this one send: queue it for this many seconds (cancelable via cancel_send) instead of the server's configured default. 0 sends immediately even if the server has a default window configured. Same caveat as the server default: only fires while this server process stays running." },
         to: { type: "string", description: "Forward recipient list, comma-separated." },
         body: { type: "string", description: "Optional message before the forwarded content (plain text)." },
         markdownBody: { type: "string", description: "Optional introductory note in Markdown. Rendered to HTML with body as plain-text fallback; takes precedence over body+isHtml." },
@@ -3849,6 +3852,44 @@ export function createServer(
     return bundle.account.slug === accountManager.primary().account.slug ? undefined : bundle.account.slug;
   }
 
+  // Undo-send window for one send: the server default (PROTONMAIL_SEND_DELAY_SECONDS),
+  // overridable per call with undoWindowSeconds (0 = send immediately). Shared by
+  // send_email, reply_to_email, reply_all_email and forward_email.
+  function resolveUndoWindowSeconds(args: Record<string, unknown>): number {
+    if (args.undoWindowSeconds === undefined) {
+      return config.runtime.sendDelaySeconds ?? 0;
+    }
+    const requested = Number(args.undoWindowSeconds);
+    if (!Number.isInteger(requested) || requested < 0 || requested > 300) {
+      throw new McpError(ErrorCode.InvalidParams, "undoWindowSeconds must be an integer between 0 and 300.");
+    }
+    return requested;
+  }
+
+  // Queues a send on the SENDING account's own delivery queue (so it fires through that
+  // account's SMTP) and returns the tool result. The id carries that account's slug so
+  // cancel_send/list_scheduled_sends can find it again.
+  async function queueUndoSend(
+    bundle: AccountBundle,
+    payload: SendEmailInput,
+    undoWindowSeconds: number,
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+    extra: Record<string, unknown> = {},
+  ) {
+    const sendAt = new Date(Date.now() + undoWindowSeconds * 1000).toISOString();
+    const queued = await withAudit(auditService, toolName, toolArgs, async () =>
+      bundle.deliveryQueueService.enqueue(payload, sendAt, "undo_send"),
+    );
+    return createTextResult({
+      queued: true,
+      id: withAccountPrefix(responseSlug(bundle), queued.id),
+      sendAt: queued.sendAt,
+      ...extra,
+      note: `Not sent yet — will send in ~${undoWindowSeconds}s unless canceled with cancel_send. This server must stay running for the send to fire; if it's restarted before sendAt, the send fires on next startup instead.`,
+    });
+  }
+
   // Alias for responseSlug — tagAccountIds (added alongside the digest/follow-up
   // multi-account fan-out) was written against this name; kept as a thin alias rather
   // than rewriting every call site to the other name.
@@ -4143,14 +4184,7 @@ export function createServer(
           // immediately, cancelable via cancel_send until the window elapses.
           // undoWindowSeconds overrides the server default for this one send —
           // including forcing 0 (send immediately) when a default is configured.
-          let undoWindowSeconds = config.runtime.sendDelaySeconds;
-          if (args.undoWindowSeconds !== undefined) {
-            const requested = Number(args.undoWindowSeconds);
-            if (!Number.isInteger(requested) || requested < 0 || requested > 300) {
-              throw new McpError(ErrorCode.InvalidParams, "undoWindowSeconds must be an integer between 0 and 300.");
-            }
-            undoWindowSeconds = requested;
-          }
+          const undoWindowSeconds = resolveUndoWindowSeconds(args);
           // A `from` matching a configured additional account routes through that
           // account's own SMTP connection — required under Bridge's Split Addresses
           // feature, where each address is its own separate IMAP/SMTP login, not just
@@ -4411,8 +4445,7 @@ export function createServer(
             return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc: extraBcc }, subject: prefixedSubject(detail.subject, "Re:"), note: "No email was sent." }, false, [emailSource({ ...detail, id: prefixedIdFor(readBundleReply, detail.id) })]);
           }
 
-          const result = await withAudit(auditService, name, args, async () =>
-            sendBundleForReply.smtpService.sendEmail({
+          const replyPayload: SendEmailInput = {
               to,
               cc,
               bcc: extraBcc,
@@ -4428,7 +4461,13 @@ export function createServer(
               attachments,
               // Already applied above, before quote-wrapping.
               appendSignature: false,
-            }),
+          };
+          const undoWindowreply = resolveUndoWindowSeconds(args);
+          if (undoWindowreply > 0) {
+            return queueUndoSend(sendBundleForReply, replyPayload, undoWindowreply, name, args, { repliedTo: prefixedIdFor(readBundleReply, detail.id), to, cc });
+          }
+          const result = await withAudit(auditService, name, args, async () =>
+            sendBundleForReply.smtpService.sendEmail(replyPayload),
           );
 
           let sentCopyTokenReply = "[sent-copy:unverified]";
@@ -4510,8 +4549,7 @@ export function createServer(
             ? buildReplyHtml(detailRa, signedReplyRa.htmlBody)
             : signedReplyRa.htmlBody;
 
-          const resultRa = await withAudit(auditService, name, args, async () =>
-            sendBundleForRa.smtpService.sendEmail({
+          const replyAllPayload: SendEmailInput = {
               to: toRa,
               cc: ccRa,
               bcc: extraBccRa,
@@ -4527,7 +4565,13 @@ export function createServer(
               attachments: attachmentsRa,
               // Already applied above, before quote-wrapping.
               appendSignature: false,
-            }),
+          };
+          const undoWindowreplyAll = resolveUndoWindowSeconds(args);
+          if (undoWindowreplyAll > 0) {
+            return queueUndoSend(sendBundleForRa, replyAllPayload, undoWindowreplyAll, name, args, { repliedTo: prefixedIdFor(readBundleRa, detailRa.id), to: toRa, cc: ccRa });
+          }
+          const resultRa = await withAudit(auditService, name, args, async () =>
+            sendBundleForRa.smtpService.sendEmail(replyAllPayload),
           );
 
           let sentCopyTokenRa = "[sent-copy:unverified]";
@@ -4635,8 +4679,7 @@ export function createServer(
             ? buildForwardHtml(detail, signedFwd.htmlBody)
             : signedFwd.htmlBody;
 
-          const result = await withAudit(auditService, name, args, async () =>
-            sendBundleForFwd.smtpService.sendEmail({
+          const forwardPayload: SendEmailInput = {
               to,
               cc,
               bcc,
@@ -4650,7 +4693,13 @@ export function createServer(
               attachments: fwdAttachments,
               // Already applied above, before quote-wrapping.
               appendSignature: false,
-            }),
+          };
+          const undoWindowforward = resolveUndoWindowSeconds(args);
+          if (undoWindowforward > 0) {
+            return queueUndoSend(sendBundleForFwd, forwardPayload, undoWindowforward, name, args, { forwardedMessage: prefixedIdFor(readBundleFwd, detail.id), to, cc });
+          }
+          const result = await withAudit(auditService, name, args, async () =>
+            sendBundleForFwd.smtpService.sendEmail(forwardPayload),
           );
 
           let sentCopyTokenFwd = "[sent-copy:unverified]";

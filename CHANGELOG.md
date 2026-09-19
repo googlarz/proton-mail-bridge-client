@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.21] — 2026-09-19
+
+### Fixed
+- **`PROTONMAIL_SEND_DELAY_SECONDS` did not cover replies and forwards.** Only `send_email` queued; `reply_to_email`, `reply_all_email` and `forward_email` sent at once even with a delay configured (and the CLI, which now delegates to them, inherited that). They now queue on the sending account's delivery queue exactly like `send_email` (cancelable with `cancel_send`, threading headers preserved) and accept the same per-call `undoWindowSeconds` (0 = send immediately). The CLI `reply`/`forward` gain `--undo-window` and print a note when the result was queued, since a CLI process exits before the window elapses. `send_draft` is unchanged (use `schedule_draft`). Found by review of 2.1.20.
+- **A steady trickle of new mail postponed the history reconcile forever.** The new-mail catch-up reset `lastFullSyncAt` (the reconcile clock), and — a deeper problem the fix for that exposed — every sync with something new took the catch-up branch and never reached the reconcile branch at all. A due reconcile now takes priority over the catch-up (the walk starts at the top, so it covers new mail too), and only a pass that actually walked history moves the clock (`nextLastFullSyncAt`). Found by review of 2.1.20.
+
+### Added
+- `test/reply-forward-undo-send.test.mjs` (real MCP handlers, delay > 0: zero SMTP calls before the window, `cancel_send` works, `undoWindowSeconds:0` sends at once, default unchanged) and two planner tests, including a simulated one-new-message-per-hour mailbox.
+
 ## [2.1.20] — 2026-09-19
 
 Fixes for all ten findings of the 2.1.19 audit.

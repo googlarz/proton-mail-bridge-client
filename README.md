@@ -446,7 +446,7 @@ PROTONMAIL_ALLOW_SEND='true'
 PROTONMAIL_ALLOW_REMOTE_DRAFT_SYNC='true'
 PROTONMAIL_ALLOWED_ACTIONS='mark_read,mark_unread,star,unstar,archive,trash,restore,move,delete'
 PROTONMAIL_CONFIRM_DESTRUCTIVE='false'
-PROTONMAIL_SEND_DELAY_SECONDS='0'    # >0: send_email queues instead of sending immediately, cancelable via cancel_send. Only fires while this server stays running.
+PROTONMAIL_SEND_DELAY_SECONDS='0'    # >0: send_email, reply_to_email, reply_all_email and forward_email queue instead of sending immediately, cancelable via cancel_send (undoWindowSeconds overrides per call). send_draft is not delayed; use schedule_draft. Only fires while this server stays running.
 PROTONMAIL_SIGNATURE=''              # Plain text, appended to send_email/reply_to_email/reply_all_email/forward_email bodies (text + HTML), after your own text and before any quoted/forwarded content. Every send now goes out multipart (a plain-text send auto-gets an html alternative too), so the signature always gets its HTML treatment, not just the text/plain part. Opt out per-message with appendSignature: false. Never applied to send_draft/schedule_draft — draft content is already finalized.
 #
 # Note: a signature configured inside Proton Mail itself (Settings → Identity and addressing)
@@ -511,7 +511,7 @@ PROTONMAIL_IDLE_MAX_SECONDS='30'
 `get_unsubscribe_info` · `unsubscribe_sender` — `get_email_by_id` also returns a `security` block (DKIM/SPF/DMARC, encryption, spam score)
 
 ### Undo-send, scheduling & snooze
-`cancel_send` · `list_scheduled_sends` · `schedule_draft` · `snooze_email` · `cancel_snooze` · `list_snoozed` — send_email queues instead of sending immediately when `PROTONMAIL_SEND_DELAY_SECONDS` is set; all three only fire while this server process stays running, see [Operational notes](#operational-notes)
+`cancel_send` · `list_scheduled_sends` · `schedule_draft` · `snooze_email` · `cancel_snooze` · `list_snoozed` — send_email, reply_to_email, reply_all_email and forward_email queue instead of sending immediately when `PROTONMAIL_SEND_DELAY_SECONDS` is set; all three only fire while this server process stays running, see [Operational notes](#operational-notes)
 
 ### Templates
 `create_template` · `list_templates` · `get_template` · `delete_template` · `render_template` — `{{variable}}` substitution, render then pass the result to `send_email`
