@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.28] — 2026-09-19
+
+### Fixed
+- **Every message mutation made the next folder lookup re-`STATUS` all folders (~0.9 s on a 57-folder Bridge).** Investigating why a synced `update_draft` that replaces the previous remote copy took 4.4–4.8 s (vs 1.5 s for the first sync), each IMAP step was timed against a real Bridge: APPEND ≈ 1.5 s, deleting the superseded copy (STORE+EXPUNGE) ≈ 2.0–2.2 s, and `getFolders` ≈ 0.94 s. The last one was self-inflicted: every message mutation (append, delete, move, flag, …) clears the folder cache because the message *counts* changed, and the next call that merely needed to know *where* a folder is (`resolveSpecialFolder` for Drafts, `resolveFolders`, the folder scope of a search) paid a full re-list to get counts it never used. Folder structure (path, flags, special-use) is now cached separately from the counts (`getFolderStructure`), kept across count invalidations, and dropped when a folder is created, renamed or deleted, on `clear_cache`, or after the same 5-minute TTL. Replace-syncs now take 3.5–3.6 s (−0.9 to −1.3 s), and the first search or label lookup after any change no longer pays the re-list either. Folder *counts* (`get_folders`, stats) are still refreshed exactly as before.
+- Investigated and **rejected**: skipping the delete of the old remote copy. Bridge does not replace a draft appended with the same Message-ID (Drafts went 79 → 80 → 81 → 82 with older copies still present), so the delete is required.
+
+### Docs
+- README: measured sync costs for drafts (local edit 2–6 ms, first sync ~1.5 s, replacing sync ~3.5 s), the advice to iterate with `syncToRemote:false` and sync once, and a matching line for the recommended system prompt.
+
+### Added
+- `test/folder-structure-cache.test.mjs`.
+
 ## [2.1.27] — 2026-09-19
 
 ### Added

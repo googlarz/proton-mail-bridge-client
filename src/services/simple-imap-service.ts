@@ -719,6 +719,11 @@ export class SimpleIMAPService {
   private client?: ImapFlow;
   private folderCache?: FolderInfo[];
   private folderCacheAt?: number;
+  // The folder list WITHOUT the freshness of its message counts: paths, flags, special-use
+  // roles. Every message mutation invalidates folderCache (the counts changed), but not
+  // this — see getFolderStructure().
+  private folderStructureCache?: FolderInfo[];
+  private folderStructureAt?: number;
   private readonly messageCache = new Map<string, EmailSummary>();
   private lastSyncAt?: string;
   private lastIdleAt?: string;
@@ -1117,7 +1122,28 @@ export class SimpleIMAPService {
 
     this.folderCache = folders.map(mapFolder);
     this.folderCacheAt = Date.now();
+    this.folderStructureCache = this.folderCache;
+    this.folderStructureAt = this.folderCacheAt;
     return this.folderCache;
+  }
+
+  // For callers that only need WHERE folders are (path, flags, special-use), not how many
+  // messages they hold. getFolders() re-lists every folder with a STATUS each — measured
+  // on a real Bridge (57 folders) at ~0.9 s — and every message mutation (append, delete,
+  // move, flag…) invalidates it because the counts changed. Resolving "which folder is
+  // Drafts" right after appending a draft therefore paid that ~0.9 s again on every edit
+  // of a synced draft and on the first search after any change. The structure only
+  // changes when a folder is created, renamed or deleted (or the cache is cleared, or the
+  // TTL runs out), so it is kept across count invalidations.
+  private async getFolderStructure(): Promise<FolderInfo[]> {
+    if (
+      this.folderStructureCache &&
+      this.folderStructureAt !== undefined &&
+      Date.now() - this.folderStructureAt <= FOLDER_CACHE_TTL_MS
+    ) {
+      return this.folderStructureCache;
+    }
+    return this.getFolders();
   }
 
   async syncFolders(): Promise<{ syncedAt: string; folders: FolderInfo[] }> {
@@ -1201,6 +1227,7 @@ export class SimpleIMAPService {
     );
 
     this.folderCache = undefined;
+    this.folderStructureCache = undefined;
     const folders = await this.getFolders(true);
     const folder = folders.find((entry) => entry.path === response.path);
 
@@ -1237,6 +1264,7 @@ export class SimpleIMAPService {
     );
 
     this.folderCache = undefined;
+    this.folderStructureCache = undefined;
     for (const [id, cached] of this.messageCache) {
       if (cached.folder === response.path) {
         this.messageCache.delete(id);
@@ -1297,6 +1325,7 @@ export class SimpleIMAPService {
     );
 
     this.folderCache = undefined;
+    this.folderStructureCache = undefined;
     for (const [id, cached] of this.messageCache) {
       if (cached.folder === response.path) {
         this.messageCache.delete(id);
@@ -3379,6 +3408,7 @@ export class SimpleIMAPService {
     const clearedFolders = Boolean(this.folderCache);
     this.messageCache.clear();
     this.folderCache = undefined;
+    this.folderStructureCache = undefined;
     this.lastSyncAt = undefined;
 
     return { clearedMessages, clearedFolders };
@@ -3575,7 +3605,7 @@ export class SimpleIMAPService {
   }
 
   private async resolveSelectableFolderPaths(maxFolders?: number): Promise<string[]> {
-    const folders = await this.getFolders();
+    const folders = await this.getFolderStructure();
     return folders
       .filter((entry) => !Array.from(entry.flags ?? []).some((flag) => {
         const normalized = flag.replace(/^\\/, "").toLowerCase();
@@ -3597,7 +3627,7 @@ export class SimpleIMAPService {
       // exact match over guessing it's a list.
       const trimmedInput = folder.trim();
       if (trimmedInput.includes(",")) {
-        const existingFolders = await this.getFolders();
+        const existingFolders = await this.getFolderStructure();
         if (existingFolders.some((entry) => entry.path === trimmedInput)) {
           return [trimmedInput];
         }
@@ -3608,7 +3638,7 @@ export class SimpleIMAPService {
         .filter(Boolean);
     }
 
-    const folders = await this.getFolders();
+    const folders = await this.getFolderStructure();
     return folders
       .filter((entry) => !entry.flags.includes("\\Noselect"))
       .map((entry) => entry.path);
@@ -3626,7 +3656,7 @@ export class SimpleIMAPService {
     if (!input.label || input.folder?.trim()) {
       return undefined;
     }
-    const selectable = (await this.getFolders()).filter((entry) => !entry.flags.includes("\\Noselect"));
+    const selectable = (await this.getFolderStructure()).filter((entry) => !entry.flags.includes("\\Noselect"));
     const matches = selectable.filter((entry) => labelMatchesFolder(entry.path, input.label as string));
     if (matches.length > 0) {
       return matches.map((entry) => entry.path);
@@ -3641,7 +3671,7 @@ export class SimpleIMAPService {
     if (input.folder?.trim() || input.label || input.mailboxRole) {
       return this.resolveFolders(input.folder);
     }
-    const selectable = (await this.getFolders()).filter((entry) => !entry.flags.includes("\\Noselect"));
+    const selectable = (await this.getFolderStructure()).filter((entry) => !entry.flags.includes("\\Noselect"));
     const real = selectable.filter((entry) => !isVirtualMailView(entry));
     return (real.length > 0 ? real : selectable).map((entry) => entry.path);
   }
@@ -3650,7 +3680,7 @@ export class SimpleIMAPService {
     specialUse: string,
     fallbacks: string[],
   ): Promise<string> {
-    const folders = await this.getFolders();
+    const folders = await this.getFolderStructure();
 
     const bySpecialUse = folders.find((folder) => folder.specialUse === specialUse);
     if (bySpecialUse) {

@@ -16,7 +16,9 @@ const scope = (input) =>
   SimpleIMAPService.prototype.resolveSearchFolders.call(
     {
       getFolders: async () => FOLDERS,
-      resolveFolders: (folder) => SimpleIMAPService.prototype.resolveFolders.call({ getFolders: async () => FOLDERS }, folder),
+      getFolderStructure: async () => FOLDERS,
+      resolveFolders: (folder) =>
+        SimpleIMAPService.prototype.resolveFolders.call({ getFolders: async () => FOLDERS, getFolderStructure: async () => FOLDERS }, folder),
     },
     input,
   );
