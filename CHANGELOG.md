@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.24] — 2026-09-19
+
+### Fixed
+- **With the IDLE watcher on (the default), every other IMAP operation waited out the watcher's whole idle period.** The watcher shares the ONE IMAP connection and holds the mailbox lock for up to `idleMaxSeconds` (30 s). Found by checking 2.1.23 against the live server after the restart: `search_emails` timed out. Reproduced in isolation with IDLE and background sync on vs. off (same Bridge, same query): single-folder search **26-31 s vs 1.9 s**, all-folders search **>170 s (never finished) vs 6.1 s** — one lock per folder, each queued behind a fresh IDLE. This affected every tool that opens a mailbox (search, get_emails, get_email_by_id, …) on a normally configured server; the earlier "search_emails takes 20 s" measurement, taken with IDLE off, was the *other* cost (Bridge's SEARCH over duplicate views, fixed in 2.1.23). An operation waiting for the lock now makes the watcher yield: it polls for waiters (50 ms) and breaks IDLE as soon as there is one, and if the graceful break has not released the lock within 3 s it drops the connection instead (same force path as the existing hard timeout). A yield counts as a healthy IDLE return, so it never trips the "IDLE returned without blocking" reset. With the fix and IDLE + background sync on: 26 s → 2.6 s, 31 s → 1.3 s, >170 s → 6.7 s; `get_emails` 162 ms; the watcher stays connected and watching.
+
+### Added
+- `test/idle-yields-lock.test.mjs` (fake client: an operation waits <2 s, not 30 s; seven folder switches in a row against a re-entering watcher; verified to fail without the fix).
+- The opt-in live smoke test now also starts a second server with IDLE and background sync ON and asserts a single-folder search finishes in <12 s and an all-folders search in <60 s.
+
 ## [2.1.23] — 2026-09-19
 
 ### Fixed

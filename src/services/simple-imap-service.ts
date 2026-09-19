@@ -109,6 +109,17 @@ export const SEARCH_FILTER_BATCH_SIZE = 50;
 // engaged (e.g. imapflow's `idling` flag stuck true after Proton Bridge ended
 // the session server-side) and we must recover instead of busy-spinning.
 const MIN_HEALTHY_IDLE_MS = 500;
+
+// The IDLE watcher shares the ONE IMAP connection with every other operation and holds
+// the mailbox lock for its whole idle period (up to idleMaxSeconds, default 30 s). Any
+// other operation needing the lock used to simply wait that out — measured live: a search
+// in a single folder took 26-31 s instead of 1-2 s, and a search over 9 folders (one lock
+// per folder, each queued behind a fresh IDLE) never finished within 170 s, vs 6 s with
+// IDLE off. So an operation waiting for the lock makes the watcher yield: the watcher
+// polls for waiters and breaks IDLE as soon as there is one, and if the graceful break
+// does not release the lock within IDLE_YIELD_FORCE_MS it drops the connection instead.
+const IDLE_YIELD_POLL_MS = 50;
+const IDLE_YIELD_FORCE_MS = 3_000;
 // A fast, event-less idle() return isn't on its own proof of a stuck connection —
 // imapflow's preCheck/DONE mechanism is *designed* to interrupt an active IDLE the
 // instant any other command needs the same shared connection (a foreground tool
@@ -716,6 +727,9 @@ export class SimpleIMAPService {
   private _lastOpTs = 0;
   private _connectingPromise?: Promise<void>;
   private readonly _idleActive = new Map<string, boolean>();
+  // Operations currently waiting for the mailbox lock (see withMailbox); the IDLE watcher
+  // yields while this is non-zero.
+  private _pendingMailboxOps = 0;
   private consecutiveFastIdleReturns = 0;
   private identityChecked = false;
 
@@ -897,6 +911,34 @@ export class SimpleIMAPService {
     client.on("flags", onFlags);
 
     const lock = await client.getMailboxLock(folder, { readOnly: true });
+
+    // Yield to operations waiting for the lock (see IDLE_YIELD_* above). The graceful
+    // break is retried on every poll because preCheck only exists once IDLE has actually
+    // started; if the lock is still held IDLE_YIELD_FORCE_MS after the first waiter was
+    // seen, `yieldForced` resolves and the race below drops the connection.
+    let idleBrokenForOps = false;
+    let waiterSeenAt: number | undefined;
+    let resolveYieldForced: (() => void) | undefined;
+    const yieldForced = new Promise<"yield-forced">((resolve) => {
+      resolveYieldForced = () => resolve("yield-forced");
+    });
+    const opWatchdog = setInterval(() => {
+      if (this._pendingMailboxOps === 0) {
+        waiterSeenAt = undefined;
+        return;
+      }
+      idleBrokenForOps = true;
+      waiterSeenAt ??= Date.now();
+      const breaker = idleClient.preCheck;
+      if (typeof breaker === "function") {
+        breaker().catch(() => {});
+      }
+      if (Date.now() - waiterSeenAt >= IDLE_YIELD_FORCE_MS) {
+        resolveYieldForced?.();
+      }
+    }, IDLE_YIELD_POLL_MS);
+    opWatchdog.unref?.();
+
     // Best-effort graceful break — NOT what enforces the timeout (see the
     // Promise.race below for why this alone isn't trustworthy).
     const timeout = setTimeout(() => {
@@ -951,9 +993,9 @@ export class SimpleIMAPService {
         hardTimeoutTimer.unref?.();
       });
 
-      const outcome = await Promise.race([idlePromise, hardTimeout]);
+      const outcome = await Promise.race([idlePromise, hardTimeout, yieldForced]);
 
-      if (outcome === "hard-timeout") {
+      if (outcome === "hard-timeout" || outcome === "yield-forced") {
         timedOutHard = true;
         this.log.warn("IMAP IDLE exceeded its hard timeout; disconnecting to clear stuck state", "IMAPService", {
           folder,
@@ -980,7 +1022,7 @@ export class SimpleIMAPService {
       const checkedAt = new Date().toISOString();
       const changed = events.length > 0;
 
-      if (changed || idleElapsedMs >= MIN_HEALTHY_IDLE_MS) {
+      if (changed || idleElapsedMs >= MIN_HEALTHY_IDLE_MS || idleBrokenForOps) {
         // A real mailbox change, or a full-duration idle that simply timed out
         // with nothing to report — both are healthy outcomes.
         this.consecutiveFastIdleReturns = 0;
@@ -1020,6 +1062,7 @@ export class SimpleIMAPService {
       }
       throw error;
     } finally {
+      clearInterval(opWatchdog);
       clearTimeout(timeout);
       clearTimeout(hardTimeoutTimer);
       client.off("exists", onExists);
@@ -3441,7 +3484,15 @@ export class SimpleIMAPService {
   ): Promise<T> {
     await this._throttle(this.opDelayMs);
     const client = await this.ensureConnected();
-    const lock = await client.getMailboxLock(folder, { readOnly });
+    // Announce that we are waiting so the IDLE watcher yields the lock instead of
+    // holding it for its whole idle period (see IDLE_YIELD_* above).
+    this._pendingMailboxOps += 1;
+    let lock;
+    try {
+      lock = await client.getMailboxLock(folder, { readOnly });
+    } finally {
+      this._pendingMailboxOps -= 1;
+    }
 
     try {
       return await action(client);

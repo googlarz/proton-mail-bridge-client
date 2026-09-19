@@ -126,6 +126,38 @@ try {
   await rm(dataDir, { recursive: true, force: true });
 }
 
+// Second server instance with the IDLE watcher and background sync ON (as in a real
+// Claude Desktop install). Regression for 2.1.24: the watcher held the shared connection's
+// mailbox lock for its whole 30 s idle period, so every other operation waited it out
+// (a single-folder search took 26-31 s; an all-folders search never finished in 170 s).
+{
+  const idleDir = await mkdtemp(join(tmpdir(), "proton-live-smoke-idle-"));
+  const idleClient = new Client({ name: "live-smoke-idle", version: "0" });
+  try {
+    await idleClient.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [fileURLToPath(new URL("../../dist/index.js", import.meta.url))],
+      env: { ...env, PROTONMAIL_AUTO_SYNC: "true", PROTONMAIL_IDLE_WATCH: "true", PROTONMAIL_DATA_DIR: idleDir },
+      stderr: "ignore",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 6000)); // let the watcher settle into IDLE
+    const timed = async (args) => {
+      const t0 = Date.now();
+      const r = await idleClient.callTool({ name: "search_emails", arguments: args }, undefined, { timeout: 120000 });
+      return { ms: Date.now() - t0, isError: Boolean(r.isError) };
+    };
+    const one = await timed({ query: "zzqxnomatch", folder: "INBOX", limit: 5 });
+    check("IDLE on: single-folder search is not stuck behind the idle period", !one.isError && one.ms < 12000, `${one.ms}ms`);
+    const all = await timed({ query: "zzqxnomatch", limit: 5 });
+    check("IDLE on: all-folders search completes", !all.isError && all.ms < 60000, `${all.ms}ms`);
+  } catch (error) {
+    check("IDLE on: searches", false, error instanceof Error ? error.message : String(error));
+  } finally {
+    await idleClient.close().catch(() => {});
+    await rm(idleDir, { recursive: true, force: true });
+  }
+}
+
 const failed = results.filter((ok) => !ok).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);
 process.exit(failed === 0 ? 0 : 1);
