@@ -409,10 +409,16 @@ PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 96 �
 PROTONMAIL_READ_ONLY=true            # disable all write operations
 PROTONMAIL_ALLOW_SEND=false          # disable SMTP sends only (other writes still work)
 PROTONMAIL_CONFIRM_DESTRUCTIVE=true  # require confirmed:true on send, reply, forward, delete
+PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF=true  # every send may only go to your own address — the safe way to try the server
+PROTONMAIL_ALLOW_EMPTY_FOLDER=true   # enable empty_folder (off by default): permanently deletes ALL messages in a folder
 PROTONMAIL_ALLOWED_ACTIONS='mark_read,archive,trash'  # per-action allowlist
 ```
 
 `batch_email_action` and `apply_thread_action` both support `dryRun: true` regardless of the above flags.
+
+**Trying it safely: `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF=true`.** With this on, the server can compose, draft, reply, forward and send for real, but every recipient (To, CC and BCC) must be your own Bridge login address; a `+tag` alias of it counts as yours. Anything else is refused with `RESTRICT_OUTBOUND_TO_SELF is enabled. Cannot send to: …` before any mail is built or queued. It covers `send_email`, `reply_to_email`, `reply_all_email`, `forward_email`, `send_draft`, `schedule_draft`, `send_test_email` and `unsubscribe_sender`, and it is checked again when a queued or scheduled send fires, so a send queued before you turned it on cannot slip out later. It does not stop the model from *writing* a message to someone else into a draft; it stops it from being sent.
+
+**`PROTONMAIL_ALLOW_EMPTY_FOLDER`.** `empty_folder` deletes every message in a folder at once and cannot be undone, so it is switched off unless this is `true` (the call then fails with a message naming the variable). When enabled it still needs an explicit `confirmed: true` to delete: without it, it only returns a preview of what would be removed. For anything less than an entire folder use `bulk_delete`.
 
 ---
 
@@ -447,6 +453,8 @@ PROTONMAIL_ALLOW_SEND='true'
 PROTONMAIL_ALLOW_REMOTE_DRAFT_SYNC='true'
 PROTONMAIL_ALLOWED_ACTIONS='mark_read,mark_unread,star,unstar,archive,trash,restore,move,delete'
 PROTONMAIL_CONFIRM_DESTRUCTIVE='false'
+PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF='false'  # true: sends may only go to your own Bridge login address (To, CC and BCC; +tag aliases count as yours); anything else is refused, and queued/scheduled sends are re-checked when they fire. Covers send_email, reply_to_email, reply_all_email, forward_email, send_draft, schedule_draft, send_test_email, unsubscribe_sender. The safest way to try the server.
+PROTONMAIL_ALLOW_EMPTY_FOLDER='false'         # true: enables empty_folder, which permanently deletes ALL messages in a folder (still needs confirmed:true; without it only a preview is returned). Off by default; use bulk_delete for a subset.
 PROTONMAIL_SEND_DELAY_SECONDS='0'    # >0: send_email, reply_to_email, reply_all_email and forward_email queue instead of sending immediately, cancelable via cancel_send (undoWindowSeconds overrides per call). send_draft is not delayed; use schedule_draft. Only fires while this server stays running.
 PROTONMAIL_SIGNATURE=''              # Plain text, appended to send_email/reply_to_email/reply_all_email/forward_email bodies (text + HTML), after your own text and before any quoted/forwarded content. Every send now goes out multipart (a plain-text send auto-gets an html alternative too), so the signature always gets its HTML treatment, not just the text/plain part. Opt out per-message with appendSignature: false. Never applied to send_draft/schedule_draft — draft content is already finalized.
 #
