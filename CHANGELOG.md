@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.29] — 2026-09-19
+
+### Changed
+- **The default IMAP host is now `127.0.0.1` (was `localhost`).** The README, the SMTP default and Bridge itself all say `127.0.0.1`; only the IMAP default disagreed. Bridge listens on the IPv4 loopback, and `localhost` can resolve to `::1` first on some systems. If `PROTONMAIL_IMAP_HOST` is set — including to `localhost` — it is used as before; only an installation that never set it changes (the setup wizard writes it explicitly, so wizard installs are unaffected). Local-Bridge handling (relaxed TLS verification for loopback hosts) already covered `127.0.0.1`.
+
+### Docs
+- README: `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF` and `PROTONMAIL_ALLOW_EMPTY_FOLDER` documented (Safety controls and the environment reference), and the remaining user-facing variables added to the reference: `PROTONMAIL_IMAP_USERNAME`, `PROTONMAIL_IMAP_PASSWORD`, `PROTONMAIL_ALLOW_UNSAFE_HTML`, `PROTONMAIL_AUTO_SYNC_FOLDER`, `PROTONMAIL_AUTO_SYNC_FULL`, `PROTONMAIL_AUTO_SYNC_LIMIT_PER_FOLDER`, `PROTONMAIL_OP_DELAY_MS`, `PROTONMAIL_DEBUG`, `PROTONMAIL_CLAUDE_RUNTIME_DIR`. (The `PROTONMAIL_SMOKE_*` variables are internal to the smoke scripts and intentionally not documented.)
+
+### Added
+- `test/config-default-hosts.test.mjs`.
+
 ## [2.1.28] — 2026-09-19
 
 ### Fixed

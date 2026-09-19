@@ -3788,7 +3788,9 @@ export function buildConfigFromEnv(): ProtonMailConfig {
   const opDelayMs = parseIntegerEnv("PROTONMAIL_OP_DELAY_MS", 0, 0, 5000);
   const sendDelaySeconds = parseIntegerEnv("PROTONMAIL_SEND_DELAY_SECONDS", 0, 0, 300);
   const smtpHost = process.env.PROTONMAIL_SMTP_HOST || "127.0.0.1";
-  const imapHost = process.env.PROTONMAIL_IMAP_HOST || "localhost";
+  // 127.0.0.1, not "localhost": Bridge listens on IPv4 loopback only, and "localhost" may
+  // resolve to ::1 first (and matches what the README and the SMTP default already say).
+  const imapHost = process.env.PROTONMAIL_IMAP_HOST || "127.0.0.1";
   const imapSecure = parseBooleanEnv("PROTONMAIL_IMAP_SECURE", false);
   const dataDir = process.env.PROTONMAIL_DATA_DIR?.trim() || join(homedir(), ".proton-mail-bridge-client");
 
