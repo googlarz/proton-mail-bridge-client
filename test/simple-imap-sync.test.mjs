@@ -1607,3 +1607,50 @@ test("toSummary does not throw on an unparseable Date header", () => {
   const withNoDate = { ...base, envelope: { ...base.envelope } };
   assert.equal(service.toSummary("INBOX", withNoDate).date, undefined);
 });
+
+// A02 (audit 2.1.19): after backfill finished, a large arrival used to fetch only the
+// newest `limit` UIDs and then advance highestUid to the top, leaving the UIDs between
+// the old checkpoint and that window out of the index forever.
+test("planFolderSync full:true after backfill walks a large arrival forward in bounded windows without gaps", () => {
+  const base = { folder: "INBOX", exists: 1100, uidNext: 1101, uidValidity: "1", full: true, limit: 50 };
+  let checkpoint = { folder: "INBOX", uidValidity: "1", backfilledToUid: 1, highestUid: 100 };
+  const covered = new Set();
+  for (let i = 0; i < 100; i++) {
+    const plan = planFolderSync({ ...base, checkpoint });
+    if (!plan.changed) break;
+    assert.ok(plan.endUid - plan.startUid + 1 <= 50, "window bounded by limit");
+    for (let uid = plan.startUid; uid <= plan.endUid; uid++) covered.add(uid);
+    const reachesTop = plan.endUid === plan.highestKnownUid;
+    // mirrors syncFolder: highestUid only advances once the window reaches the top
+    checkpoint = {
+      ...checkpoint,
+      highestUid: reachesTop ? plan.highestKnownUid : checkpoint.highestUid,
+      incrementalResumeUid: plan.incrementalResumeUid,
+      total: 1100,
+    };
+  }
+  for (let uid = 101; uid <= 1100; uid++) assert.ok(covered.has(uid), `UID ${uid} must be fetched`);
+});
+
+// A05: a fully backfilled folder never re-examined old UIDs, so expunges and flag
+// changes on already-indexed mail were never reconciled.
+test("planFolderSync full:true after backfill re-walks history when the message count changed", () => {
+  const plan = planFolderSync({
+    folder: "INBOX", exists: 99, uidNext: 101, uidValidity: "1", full: true, limit: 50,
+    checkpoint: { folder: "INBOX", uidValidity: "1", backfilledToUid: 1, highestUid: 100, total: 100 },
+  });
+  assert.equal(plan.changed, true);
+  assert.equal(plan.startUid, 51);
+  assert.equal(plan.endUid, 100);
+  assert.equal(plan.backfilledToUid, 51, "restarts the ordinary backfill walk from the top");
+});
+
+test("planFolderSync full:true after backfill re-walks history once the last full pass is over a day old, not before", () => {
+  const checkpoint = {
+    folder: "INBOX", uidValidity: "1", backfilledToUid: 1, highestUid: 100, total: 100,
+    lastFullSyncAt: "2026-09-01T00:00:00.000Z",
+  };
+  const input = { folder: "INBOX", exists: 100, uidNext: 101, uidValidity: "1", full: true, limit: 50, checkpoint };
+  assert.equal(planFolderSync({ ...input, now: Date.parse("2026-09-01T12:00:00.000Z") }).changed, false);
+  assert.equal(planFolderSync({ ...input, now: Date.parse("2026-09-02T01:00:00.000Z") }).changed, true);
+});

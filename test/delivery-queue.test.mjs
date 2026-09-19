@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DeliveryQueueService } from "../dist/services/delivery-queue-service.js";
+import { DraftStoreService } from "../dist/services/draft-store-service.js";
 
 function createConfig(dataDir) {
   return {
@@ -475,5 +476,58 @@ test("a second process writing the same dataDir is visible without restarting th
     // queueA must see the cancellation on its next read, not a stale cache.
     const seenByA = await queueA.get(record.id);
     assert.equal(seenByA.status, "canceled");
+  });
+});
+
+const pastSendAt = () => new Date(Date.now() - 1000).toISOString();
+
+// A03 (audit 2.1.19): draft stored under account A, update_draft(from: B), schedule_draft
+// -> queue B got A's draft id and looked for it in B's own store: claim failed and the
+// send was skipped as a fake "already sent" conflict.
+test("a scheduled send whose source draft lives in another account's store still sends and marks that draft sent", async () => {
+  await withTempDir(async (dirA) => {
+    await withTempDir(async (dirB) => {
+      const storeA = new DraftStoreService(createConfig(dirA));
+      const storeB = new DraftStoreService(createConfig(dirB));
+      const draft = await storeA.createDraft({ to: ["x@example.com"], subject: "S", body: "b" });
+      const smtp = fakeSmtp();
+      const queueB = new DeliveryQueueService(createConfig(dirB), smtp);
+      queueB.setDraftStore(storeB);
+      queueB.setDraftStoreResolver((slug) => (slug === "a" ? storeA : undefined));
+      await queueB.enqueue({ to: ["x@example.com"], subject: "S", body: "b" }, pastSendAt(), "scheduled_send", draft.id, "a");
+
+      const result = await queueB.checkDue();
+      assert.deepEqual(result, { sent: 1, failed: 0 });
+      assert.equal(smtp.sent.length, 1);
+      assert.equal((await storeA.getDraft(draft.id)).status, "sent");
+    });
+  });
+});
+
+// A04: SMTP confirmed delivery, then persisting "sent" failed; the shared catch treated
+// that like a failed send, reverted the draft to "draft" and a later send_draft re-sent it.
+test("a failure to persist 'sent' after confirmed SMTP delivery never reverts the draft or marks the item failed", async () => {
+  await withTempDir(async (dataDir) => {
+    const store = new DraftStoreService(createConfig(dataDir));
+    const draft = await store.createDraft({ to: ["x@example.com"], subject: "S", body: "b" });
+    const smtp = fakeSmtp();
+    const queue = new DeliveryQueueService(createConfig(dataDir), smtp);
+    queue.setDraftStore(store);
+    const queued = await queue.enqueue({ to: ["x@example.com"], subject: "S", body: "b" }, pastSendAt(), "scheduled_send", draft.id);
+
+    const realSave = queue.save;
+    queue.save = async function (fileStore) {
+      if (Object.values(fileStore.items).some((item) => item.status === "sent")) throw new Error("disk full");
+      return realSave.call(this, fileStore);
+    };
+    await queue.checkDue();
+    queue.save = realSave;
+
+    assert.equal(smtp.sent.length, 1);
+    const record = (await queue.list()).find((item) => item.id === queued.id);
+    assert.notEqual(record.status, "failed", "delivery happened, so it must not be reported as failed");
+    const after = await store.getDraft(draft.id);
+    assert.notEqual(after.status, "draft", "the draft must not become resendable");
+    assert.equal(after.status, "sent");
   });
 });

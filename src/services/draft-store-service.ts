@@ -160,6 +160,15 @@ export class DraftStoreService {
         throw new Error(`Draft not found for id ${id}`);
       }
 
+      // The SMTP transaction is running on the version claimForSending() snapshotted;
+      // a newer version saved now would be recorded as "sent" by markSent although it
+      // was never delivered.
+      if (existing.status === "sending") {
+        throw new Error(
+          `Draft ${id} is being sent right now — wait for the send to finish (or fail) before editing it.`,
+        );
+      }
+
       const updatedAt = new Date().toISOString();
       const nextDraft: DraftRecord = {
         ...existing,
@@ -398,6 +407,28 @@ export class DraftStoreService {
   // everyday scenario here, not just a testing artifact. This closes GAP-16
   // (below), which used to warn that concurrent server instances weren't
   // supported at all.
+  // Serializes remote (IMAP) syncs of ONE draft, in this process and across processes
+  // sharing the dataDir. Deliberately a separate lock from withLock: an upload can take
+  // seconds and must not block every other draft operation while it runs. Without it,
+  // two concurrent first syncs both saw "no remote draft yet" and both APPENDed, leaving
+  // an orphan copy in the remote Drafts folder.
+  private readonly syncChains = new Map<string, Promise<unknown>>();
+
+  async withDraftSyncLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const locked = () => withFileLock(`${this.draftPath}.sync-${id}`, fn);
+    const previous = this.syncChains.get(id) ?? Promise.resolve();
+    const run = previous.then(locked, locked);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.syncChains.set(id, tail);
+    void tail.then(() => {
+      if (this.syncChains.get(id) === tail) this.syncChains.delete(id);
+    });
+    return run;
+  }
+
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
     const locked = () => withFileLock(this.draftPath, fn);
     const run = this._lock.then(locked, locked);

@@ -62,6 +62,7 @@ export class DeliveryQueueService {
   // draft's own status stuck at "draft" forever after real delivery (see
   // checkDue()'s success path below).
   private draftStore?: DraftStoreService;
+  private draftStoreResolver?: (slug: string) => DraftStoreService | undefined;
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -73,6 +74,19 @@ export class DeliveryQueueService {
 
   setDraftStore(draftStore: DraftStoreService): void {
     this.draftStore = draftStore;
+  }
+
+  // Resolves a draft store by account slug, for records whose source draft lives in a
+  // different account's store than this queue's own (see sourceDraftStoreSlug).
+  setDraftStoreResolver(resolver: (slug: string) => DraftStoreService | undefined): void {
+    this.draftStoreResolver = resolver;
+  }
+
+  private sourceDraftStoreFor(record: DeliveryQueueRecord): DraftStoreService | undefined {
+    if (record.sourceDraftStoreSlug && this.draftStoreResolver) {
+      return this.draftStoreResolver(record.sourceDraftStoreSlug) ?? this.draftStore;
+    }
+    return this.draftStore;
   }
 
   async start(): Promise<void> {
@@ -116,6 +130,7 @@ export class DeliveryQueueService {
     sendAt: string,
     kind: DeliveryQueueKind,
     sourceDraftId?: string,
+    sourceDraftStoreSlug?: string,
   ): Promise<DeliveryQueueRecord> {
     const record: DeliveryQueueRecord = {
       id: randomUUID(),
@@ -125,6 +140,7 @@ export class DeliveryQueueService {
       status: "pending",
       payload,
       ...(sourceDraftId ? { sourceDraftId } : {}),
+      ...(sourceDraftId && sourceDraftStoreSlug ? { sourceDraftStoreSlug } : {}),
     };
     await this.withLock(async () => {
       const store = await this.loadUnlocked();
@@ -230,9 +246,10 @@ export class DeliveryQueueService {
       // claim, then send, with a revert on failure — so the two paths race
       // on the same lock instead of racing past each other.
       let claimedDraft: Awaited<ReturnType<DraftStoreService["claimForSending"]>> | undefined;
-      if (claimed.sourceDraftId && this.draftStore) {
+      const draftStore = this.sourceDraftStoreFor(claimed);
+      if (claimed.sourceDraftId && draftStore) {
         try {
-          claimedDraft = await this.draftStore.claimForSending(claimed.sourceDraftId);
+          claimedDraft = await draftStore.claimForSending(claimed.sourceDraftId);
         } catch (draftClaimError) {
           // Someone else — most likely a manual send_draft — already claimed
           // or sent this draft first. This scheduled fire lost the race:
@@ -266,6 +283,10 @@ export class DeliveryQueueService {
         }
       }
 
+      // Set the moment SMTP confirms delivery. Everything after that point is
+      // persistence, and a persistence failure must never be handled like a failed
+      // send (which reverts the draft to resendable and marks the record "failed").
+      let delivered = false;
       try {
         // Runtime policy (allowSend/readOnly/restrictOutboundToSelf) is only
         // checked at enqueue time by the tool handler — re-check it here too,
@@ -288,17 +309,39 @@ export class DeliveryQueueService {
           SEND_ITEM_TIMEOUT_MS,
           `Timed out after ${SEND_ITEM_TIMEOUT_MS}ms sending queued item ${id}`,
         );
-        await this.withLock(async () => {
-          const store = await this.loadUnlocked();
-          const record = store.items[id];
-          if (record && record.status === "sending") {
-            record.status = "sent";
-            record.sentAt = new Date().toISOString();
-            record.sentMessageId = result.messageId;
-            await this.save(store);
-          }
-        });
+        delivered = true;
         sent += 1;
+        // Persist "sent" with bounded retries. If every attempt fails the record stays
+        // "sending" (never "failed", never resendable): startup recovery then reports
+        // it as an unknown outcome to verify in the Sent folder, and the source draft
+        // below is still marked sent.
+        const PERSIST_SENT_ATTEMPTS = 3;
+        let persistSentError: unknown;
+        for (let attempt = 1; attempt <= PERSIST_SENT_ATTEMPTS; attempt += 1) {
+          try {
+            await this.withLock(async () => {
+              const store = await this.loadUnlocked();
+              const record = store.items[id];
+              if (record && record.status === "sending") {
+                record.status = "sent";
+                record.sentAt = new Date().toISOString();
+                record.sentMessageId = result.messageId;
+                await this.save(store);
+              }
+            });
+            persistSentError = undefined;
+            break;
+          } catch (error) {
+            persistSentError = error;
+          }
+        }
+        if (persistSentError) {
+          this.log.error(
+            'Delivery succeeded but recording the queue item as "sent" failed after retries — leaving it in "sending" (not "failed") and NOT reverting the draft, so nothing can be sent twice. Verify in the Sent folder; the message went out.',
+            "DeliveryQueueService",
+            { id, messageId: result.messageId, error: persistSentError },
+          );
+        }
 
         // The draft was already claimed above, before SMTP — mark it sent
         // now that delivery has actually completed, so both this path and
@@ -324,7 +367,7 @@ export class DeliveryQueueService {
           let markSentError: unknown;
           for (let attempt = 1; attempt <= MARK_SENT_ATTEMPTS; attempt += 1) {
             try {
-              await this.draftStore!.markSent(claimedDraft.id, {
+              await draftStore!.markSent(claimedDraft.id, {
                 messageId: result.messageId,
                 accepted: result.accepted,
                 rejected: result.rejected,
@@ -348,8 +391,8 @@ export class DeliveryQueueService {
         // SMTP failed (or timed out) after the draft claim succeeded above —
         // revert it so the draft isn't stuck in "sending" forever, exactly
         // like send_draft's own catch handler does for the same failure.
-        if (claimedDraft) {
-          await this.draftStore!.revertSending(claimedDraft.id);
+        if (claimedDraft && !delivered) {
+          await draftStore!.revertSending(claimedDraft.id);
         }
         const rawMessage = error instanceof Error ? error.message : String(error);
         // withTimeout() races the send against a timer — it can't actually

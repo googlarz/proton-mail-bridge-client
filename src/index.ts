@@ -2729,7 +2729,70 @@ function parseResourceUri(uri: string): ParsedResourceUri {
   throw new Error(`Unsupported resource URI: ${uri}`);
 }
 
+// Writes attachment bytes to <downloadDir>/<saveTo>, refusing any path that escapes the
+// download dir (lexically or through a symlink). The containment check canonicalizes
+// BOTH sides — comparing a canonical target with a merely-resolved allowed dir rejected
+// every save when the allowed dir is or sits under a symlink (macOS /var/folders is
+// really /private/var/folders). Attachments are private mail content, so directories
+// created here are owner-only (0700) and the file is 0600, existing files included.
+export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: string, data: Buffer): Promise<string> {
+  const { resolve: pathResolve, join: pathJoin, dirname, basename, sep } = await import("node:path");
+  const { realpathSync } = await import("node:fs");
+  const { writeFile: wf, mkdir: mkd, chmod: chm } = await import("node:fs/promises");
+  const absDir = pathResolve(downloadDir);
+  const absTarget = pathJoin(absDir, saveTo);
+  // A hardcoded "/" never matched on win32 (path.resolve/join produce
+  // backslash-separated paths there), hence `sep`.
+  if (!absTarget.startsWith(absDir + sep) && absTarget !== absDir) {
+    throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
+  }
+  await mkd(pathResolve(absTarget, ".."), { recursive: true, mode: 0o700 });
+  const realDir = realpathSync(absDir);
+  let realTarget: string;
+  try {
+    realTarget = realpathSync(absTarget);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
+      realTarget = realpathSync(dirname(absTarget)) + sep + basename(absTarget);
+    } else {
+      throw error;
+    }
+  }
+  if (!realTarget.startsWith(realDir + sep) && realTarget !== realDir) {
+    throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
+  }
+  await wf(absTarget, data, { mode: 0o600 });
+  // writeFile's mode only applies to a newly created file; tighten an existing one too.
+  await chm(absTarget, 0o600);
+  return absTarget;
+}
+
+// Syncs run one at a time per draft, and re-read the draft once they hold the lock: a
+// sync that queued behind another sees the remoteDraft the first one recorded (so it
+// updates that copy instead of APPENDing a second) and uploads the latest content.
 async function syncDraftToRemote(
+  draftStore: DraftStoreService,
+  smtpService: SMTPService,
+  imapService: SimpleIMAPService,
+  draft: DraftRecord,
+): Promise<{
+  draft: DraftRecord;
+  remoteSync: { ok: boolean; emailId?: string; message?: string };
+}> {
+  try {
+    return await draftStore.withDraftSyncLock(draft.id, async () =>
+      syncDraftToRemoteLocked(draftStore, smtpService, imapService, await draftStore.getDraft(draft.id).catch(() => draft)),
+    );
+  } catch (error) {
+    // Only reachable when the sync lock itself could not be taken — the upload's own
+    // failures are handled (and recorded) inside syncDraftToRemoteLocked.
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn("Draft remote sync could not start", "MCPServer", { draftId: draft.id, error });
+    return { draft: await draftStore.markRemoteSyncError(draft.id, message), remoteSync: { ok: false, message } };
+  }
+}
+
+async function syncDraftToRemoteLocked(
   draftStore: DraftStoreService,
   smtpService: SMTPService,
   imapService: SimpleIMAPService,
@@ -5474,6 +5537,9 @@ export function createServer(
               new Date(sendAtTime).toISOString(),
               "scheduled_send",
               draft.id,
+              // The draft stays in its own account's store even when `from` routes the
+              // send through another account's queue/SMTP.
+              scheduleDraftBundle.account.slug,
             ),
           );
 
@@ -7965,42 +8031,9 @@ export function createServer(
             if (!downloadDir) {
               throw new McpError(ErrorCode.InvalidParams, "PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR env var is not set.");
             }
-            const { resolve: pathResolve, join: pathJoin, dirname, basename, sep } = await import("node:path");
-            const { realpathSync } = await import("node:fs");
-            const { writeFile: wf, mkdir: mkd } = await import("node:fs/promises");
-            const absDir = pathResolve(downloadDir);
-            const absTarget = pathJoin(absDir, saveTo);
-            // Hardcoded "/" here never matched on win32 (path.resolve/join
-            // produce backslash-separated paths there), so every subdirectory
-            // save failed with a false "escapes the allowed directory" —
-            // fails safe/closed, not a security bypass, but breaks a normal
-            // save on the Windows deployment this codebase explicitly
-            // supports (see install-claude-desktop.ts's win32 branches).
-            if (!absTarget.startsWith(absDir + sep) && absTarget !== absDir) {
-              throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
-            }
-            await mkd(pathResolve(absTarget, ".."), { recursive: true });
-            let realTarget: string;
-            try {
-              realTarget = realpathSync(absTarget);
-            } catch (error) {
-              if (
-                error &&
-                typeof error === "object" &&
-                "code" in error &&
-                (error as { code?: string }).code === "ENOENT"
-              ) {
-                realTarget = realpathSync(dirname(absTarget)) + sep + basename(absTarget);
-              } else {
-                throw error;
-              }
-            }
-            if (!realTarget.startsWith(absDir + sep) && realTarget !== absDir) {
-              throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
-            }
             const buf = Buffer.from(result.base64, "base64");
-            await wf(absTarget, buf);
-            return createTextResult({ saved: true, path: absTarget, bytes: buf.length, filename: result.attachment?.filename });
+            const savedPath = await writeAttachmentToDownloadDir(downloadDir, saveTo, buf);
+            return createTextResult({ saved: true, path: savedPath, bytes: buf.length, filename: result.attachment?.filename });
           }
           return createTextResult(result, false, [attachmentSource(result.emailId, result.attachment)]);
         }

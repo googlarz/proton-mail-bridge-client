@@ -110,6 +110,11 @@ export interface DeliveryQueueRecord {
   // same draft, instead of firing a second, independent send. See the
   // schedule_draft/send_draft handlers.
   sourceDraftId?: string;
+  // Slug of the account whose draft store holds sourceDraftId, when that differs from
+  // the account that sends it (update_draft(from: <other account>) then schedule_draft:
+  // the draft lives in one account's store, the send goes out through another's SMTP).
+  // Absent = the queue owner's own draft store.
+  sourceDraftStoreSlug?: string;
   // The PID that claimed this record into "sending" (see checkDue()) and
   // when — lets a second process's startup recovery tell "owner crashed"
   // apart from "owner is still alive and mid-send" instead of assuming any

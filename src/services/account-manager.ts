@@ -96,6 +96,11 @@ export class AccountManager {
       }
       this.bySlug.set(account.slug, buildAccountBundle(account, config, log));
     }
+    // A scheduled send's source draft may live in a different account's store than the
+    // queue that sends it (see DeliveryQueueRecord.sourceDraftStoreSlug).
+    for (const bundle of this.bySlug.values()) {
+      bundle.deliveryQueueService.setDraftStoreResolver((slug) => this.bySlug.get(slug)?.draftStore);
+    }
   }
 
   primary(): AccountBundle {

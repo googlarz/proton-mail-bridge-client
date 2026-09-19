@@ -116,11 +116,31 @@ export class SnoozeService {
       originalFolder,
       currentEmailId: moved.targetEmailId,
     };
-    await this.withLock(async () => {
-      const store = await this.loadUnlocked();
-      store.items[record.id] = record;
-      await this.save(store);
-    });
+    try {
+      await this.withLock(async () => {
+        const store = await this.loadUnlocked();
+        store.items[record.id] = record;
+        await this.save(store);
+      });
+    } catch (saveError) {
+      // The move already happened; with no record nothing would ever wake this message
+      // (it would sit in the snooze folder forever). Put it back, best effort, and
+      // report the original failure either way.
+      try {
+        await this.imapService.moveEmail(moved.targetEmailId, originalFolder);
+        this.log.warn("Snooze record could not be saved — moved the message back to its original folder", "SnoozeService", {
+          emailId: moved.targetEmailId,
+          error: saveError,
+        });
+      } catch (rollbackError) {
+        this.log.error(
+          "Snooze record could not be saved AND moving the message back failed — it is in the snooze folder with no wake-up record; move it back by hand",
+          "SnoozeService",
+          { emailId: moved.targetEmailId, originalFolder, saveError, rollbackError },
+        );
+      }
+      throw saveError;
+    }
     return record;
   }
 

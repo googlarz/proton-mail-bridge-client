@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.20] — 2026-09-19
+
+Fixes for all ten findings of the 2.1.19 audit.
+
+### Fixed
+- **A01 — CLI `reply`/`forward` bypassed send policy.** They built the message and called SMTP directly, skipping `RESTRICT_OUTBOUND_TO_SELF`, `CONFIRM_DESTRUCTIVE` and the undo-send delay. They now call the `reply_to_email` / `forward_email` MCP tools (new `--confirmed` flag), so every policy applies identically. Their `--json` output is now the tool result.
+- **A02 — full sync skipped most of a large batch of new mail.** After backfill finished, a large arrival fetched only the newest `limit` UIDs and advanced the checkpoint to the top. It now walks the new range forward in `limit`-sized windows with the incremental resume cursor; the checkpoint advances only when the window reaches the top.
+- **A03 — changing a draft's sender account broke scheduling.** `update_draft(from: <other account>)` then `schedule_draft` queued the draft on the sending account, whose scheduler looked for it in its own store and skipped the send as a fake conflict. Queue records now carry `sourceDraftStoreSlug` and the scheduler claims/marks the draft in the store that holds it.
+- **A04 — a failed status write after a confirmed SMTP delivery allowed a second send.** Delivery and persistence are now separate: after SMTP confirms, `sent` is persisted with retries; if that still fails the record stays `sending` (never `failed`) and the draft is never reverted to resendable.
+- **A05 — a finished backfill never reconciled deletions or flag changes.** Full sync now re-walks history (bounded, via the ordinary backfill cursor) when the folder's message count changed or the last full pass is over 24 h old. A no-op full pass no longer refreshes `lastFullSyncAt` (it is the reconcile clock).
+- **A06 — editing a draft while it was being sent recorded the unsent version as sent.** `update_draft` on a draft in `sending` now fails with a clear message.
+- **A07 — a failed snooze-record save left the message in the snooze folder with no wake-up.** The message is moved back to its original folder (best effort, failures logged loudly) and the error is reported.
+- **A08 — concurrent first syncs of one draft created an orphan remote copy.** Remote syncs are now serialized per draft (in-process chain plus a per-draft file lock across processes) and re-read the draft once they hold the lock, so the second sync updates the first one's copy.
+- **A09 — `get_attachment_content(saveTo)` wrote world-readable files.** Files are now 0600 (existing files tightened) and created directories 0700.
+- **A10 — a download directory that is (or sits under) a symlink was rejected.** The containment check canonicalizes both sides; traversal and symlink escapes are still refused.
+
+### Added
+- Tests for each fix (`simple-imap-sync`, `delivery-queue`, `draft-store`, `snooze`, `attachment-download-dir`, `cli-send-policy`).
+
 ## [2.1.19] — 2026-09-18
 
 ### Fixed

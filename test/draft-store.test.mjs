@@ -207,3 +207,52 @@ test("markRemoteSynced marks synced when the uploaded version is still current, 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// A06 (audit 2.1.19): editing a draft while its send is in flight stored version B, and
+// markSent then recorded B as "sent" although SMTP had been given version A.
+test("updateDraft refuses to edit a draft while it is being sent", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "draft-sending-"));
+  try {
+    const store = new DraftStoreService(createConfig(dir));
+    const draft = await store.createDraft({ to: ["a@example.com"], subject: "A", body: "b" });
+    await store.claimForSending(draft.id);
+    await assert.rejects(store.updateDraft(draft.id, { subject: "B" }), /being sent/);
+    assert.equal((await store.getDraft(draft.id)).subject, "A");
+
+    await store.revertSending(draft.id);
+    assert.equal((await store.updateDraft(draft.id, { subject: "B" })).subject, "B", "editable again once the send failed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A08 (audit 2.1.19): two concurrent first syncs of one draft both saw "no remote copy".
+test("withDraftSyncLock runs syncs of the same draft one at a time and lets different drafts overlap", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "draft-sync-lock-"));
+  try {
+    const store = new DraftStoreService(createConfig(dir));
+    const events = [];
+    const job = (label, ms) => async () => {
+      events.push(`${label}:start`);
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      events.push(`${label}:end`);
+    };
+    await Promise.all([
+      store.withDraftSyncLock("d1", job("a", 30)),
+      store.withDraftSyncLock("d1", job("b", 1)),
+    ]);
+    assert.deepEqual(events, ["a:start", "a:end", "b:start", "b:end"]);
+
+    // d1's job only finishes once d2's job has started, so this deadlocks (and fails
+    // after 3s) if a sync of one draft blocks a sync of another. No timing assumptions.
+    let releaseY;
+    const yStarted = new Promise((resolve) => { releaseY = resolve; });
+    const blocked = new Promise((_, reject) => setTimeout(() => reject(new Error("d2 was blocked by d1")), 3000).unref());
+    await Promise.all([
+      store.withDraftSyncLock("d1", async () => { await Promise.race([yStarted, blocked]); }),
+      store.withDraftSyncLock("d2", async () => { releaseY(); }),
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

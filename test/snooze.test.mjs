@@ -479,3 +479,21 @@ test("startup recovery still reverts a 'waking' record to pending when its owner
     assert.equal((await service.get(noOwnerId)).status, "pending");
   });
 });
+
+// A07 (audit 2.1.19): the IMAP move ran before the record was saved, so a failed save
+// left the message in the snooze folder with nothing to ever wake it.
+test("a failed snooze-record save moves the message back and reports the failure", async () => {
+  await withTempDir(async (dataDir) => {
+    const imap = fakeImap();
+    const service = new SnoozeService(createConfig(dataDir), imap);
+    service.save = async () => {
+      throw new Error("disk full");
+    };
+
+    await assert.rejects(service.snooze("INBOX::42", new Date(Date.now() + 60_000).toISOString()), /disk full/);
+
+    assert.equal(imap.moves.length, 2, "moved into the snooze folder, then back");
+    assert.equal(imap.moves[1].to, "INBOX");
+    assert.ok(imap.moves[1].from.startsWith("Folders/MCP-Snoozed::"));
+  });
+});

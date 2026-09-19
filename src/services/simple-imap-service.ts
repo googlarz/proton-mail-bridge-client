@@ -326,6 +326,10 @@ export interface FolderSyncPlan {
   incrementalResumeUid?: number;
 }
 
+// How long a fully backfilled folder goes without a history re-walk before the next
+// full sync starts one (see the "Nothing new" branch of planFolderSync).
+const RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 export function planFolderSync(input: {
   folder: string;
   exists: number;
@@ -334,6 +338,7 @@ export function planFolderSync(input: {
   full: boolean;
   limit: number;
   checkpoint?: MailboxSyncCheckpoint;
+  now?: number;
 }): FolderSyncPlan {
   const uidNext = input.uidNext ?? 1;
   const highestKnownUid = Math.max(0, uidNext - 1);
@@ -368,26 +373,59 @@ export function planFolderSync(input: {
       // History is fully covered, but full:true must still surface mail
       // that arrived *after* backfill completed — otherwise, once a folder
       // finishes backfilling, full:true silently stops discovering any new
-      // mail forever, even as highestKnownUid keeps growing. Top up with a
-      // bounded fetch of just the newly-arrived range.
+      // mail forever, even as highestKnownUid keeps growing.
       const priorHighest = input.checkpoint?.highestUid ?? 0;
-      if (highestKnownUid <= priorHighest) {
+      const catchUpCursor = input.checkpoint?.incrementalResumeUid;
+
+      if (highestKnownUid > priorHighest) {
+        // Bounded catch-up of the new range, walked forward with the same
+        // incrementalResumeUid cursor the incremental path uses. This used to jump
+        // straight to the newest `limit` UIDs and then move highestUid to the top, so
+        // a large arrival (checkpoint 100, server at 1100, limit 50) silently left
+        // UIDs 101..1050 out of the index for good. highestUid only advances once the
+        // window reaches the top (see the reachesTop handling in syncFolder).
+        const startUid = Math.max(1, catchUpCursor !== undefined && catchUpCursor >= priorHighest ? catchUpCursor + 1 : priorHighest + 1);
+        const endUid = Math.min(highestKnownUid, startUid + input.limit - 1);
         return {
           folder: input.folder,
           strategy: "full",
-          changed: false,
+          changed: true,
+          startUid,
+          endUid,
           highestKnownUid,
           backfilledToUid: priorFloor,
+          incrementalResumeUid: endUid === highestKnownUid ? undefined : endUid,
         };
       }
 
-      const topUpStart = Math.max(1, priorHighest + 1, highestKnownUid - input.limit + 1);
+      // Nothing new. History is only ever *fetched* going forward, so deletions and
+      // flag changes on already-indexed mail would otherwise never be reconciled once
+      // backfill is done. Re-walk history (bounded, `limit` UIDs per call, via the
+      // ordinary backfill cursor) when the mailbox's message count changed since the
+      // last sync (something was expunged) or the last full pass is over a day old
+      // (flag changes leave no other trace). Absent checkpoint fields never trigger it.
+      const previousTotal = input.checkpoint?.total;
+      const lastFullMs = input.checkpoint?.lastFullSyncAt ? Date.parse(input.checkpoint.lastFullSyncAt) : Number.NaN;
+      const nowMs = input.now ?? Date.now();
+      const countChanged = previousTotal !== undefined && input.exists !== previousTotal;
+      const reconcileDue = Number.isFinite(lastFullMs) && nowMs - lastFullMs > RECONCILE_INTERVAL_MS;
+      if (countChanged || reconcileDue) {
+        const reEndUid = highestKnownUid;
+        const reStartUid = Math.max(1, reEndUid - input.limit + 1);
+        return {
+          folder: input.folder,
+          strategy: "full",
+          changed: true,
+          startUid: reStartUid,
+          endUid: reEndUid,
+          highestKnownUid,
+          backfilledToUid: reStartUid,
+        };
+      }
       return {
         folder: input.folder,
         strategy: "full",
-        changed: true,
-        startUid: topUpStart,
-        endUid: highestKnownUid,
+        changed: false,
         highestKnownUid,
         backfilledToUid: priorFloor,
       };
@@ -3110,8 +3148,10 @@ export class SimpleIMAPService {
             uidNext,
             highestUid: plan.highestKnownUid,
             lastSyncAt: input.syncedAt,
+            // A no-op full pass (changed:false) did no work, so it must not reset the
+            // clock that schedules the next history re-walk.
             lastFullSyncAt:
-              plan.strategy === "full"
+              plan.strategy === "full" && plan.changed
                 ? input.syncedAt
                 : input.checkpoint?.lastFullSyncAt,
             strategy: plan.strategy,

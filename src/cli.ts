@@ -9,9 +9,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { buildConfigFromEnv, createServer, withAudit } from "./index.js";
 import { isMainModule } from "./is-main.js";
 import { SimpleIMAPService } from "./services/simple-imap-service.js";
-import type { EmailAddress, EmailDetail, EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
-import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, ensureSendAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
-import { isValidEmail, lowerCaseAddress, parseEmails, ensureValidEmails } from "./utils/helpers.js";
+import type { EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
+import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
+import { isValidEmail, parseEmails } from "./utils/helpers.js";
 import { getClaudeDesktopInstallStatus } from "./scripts/check-claude-desktop.js";
 import { installClaudeDesktopConfig } from "./scripts/install-claude-desktop.js";
 import { runClaudeDesktopSetupWizard } from "./scripts/setup-claude-desktop.js";
@@ -816,90 +816,6 @@ async function runRead(parsed: ParsedCliArgs): Promise<void> {
   });
 }
 
-// ── reply/forward helpers (mirrors logic in index.ts) ──────────────────────
-
-function uniqueAddresses(addresses: string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const address of addresses) {
-    const normalized = lowerCaseAddress(address);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    result.push(address.trim());
-  }
-  return result;
-}
-
-function addressValues(addresses: EmailAddress[]): string[] {
-  return uniqueAddresses(
-    addresses.map((a) => a.address?.trim()).filter((a): a is string => Boolean(a)),
-  );
-}
-
-function prefixedSubject(subject: string, prefix: "Re:" | "Fwd:"): string {
-  const trimmed = subject.trim();
-  return trimmed.toLowerCase().startsWith(prefix.toLowerCase()) ? trimmed : `${prefix} ${trimmed}`;
-}
-
-function formatAddressList(addresses: EmailAddress[]): string {
-  return addresses
-    .map((a) => (a.name && a.address ? `${a.name} <${a.address}>` : a.address || a.name || ""))
-    .filter(Boolean)
-    .join(", ");
-}
-
-function buildReplyText(detail: EmailDetail, body: string): string {
-  const originalText = detail.text || detail.preview || "";
-  const fromText = formatAddressList(detail.from);
-  const dateText = detail.date || detail.internalDate || "an unknown date";
-  return [
-    body.trim(),
-    "",
-    `On ${dateText}, ${fromText || "the sender"} wrote:`,
-    originalText.split(/\r?\n/).map((line) => `> ${line}`).join("\n"),
-  ].join("\n");
-}
-
-function buildForwardText(detail: EmailDetail, body?: string): string {
-  const originalText = detail.text || detail.preview || "";
-  return [
-    body?.trim() || "",
-    "",
-    "---------- Forwarded message ---------",
-    `From: ${formatAddressList(detail.from)}`,
-    `Date: ${detail.date || detail.internalDate || ""}`,
-    `Subject: ${detail.subject}`,
-    `To: ${formatAddressList(detail.to)}`,
-    detail.cc.length > 0 ? `Cc: ${formatAddressList(detail.cc)}` : "",
-    "",
-    originalText,
-  ]
-    .filter((line, index, array) => line !== "" || (index > 0 && array[index - 1] !== ""))
-    .join("\n");
-}
-
-function getReplyRecipients(
-  detail: EmailDetail,
-  ownerEmail: string,
-  replyAll: boolean,
-): { to: string[]; cc: string[] } {
-  const owner = lowerCaseAddress(ownerEmail);
-  const primary = addressValues(detail.replyTo).length > 0 ? detail.replyTo : detail.from;
-  const primaryAddresses = addressValues(primary);
-  const strippedTo = uniqueAddresses(primaryAddresses.filter((address) => lowerCaseAddress(address) !== owner));
-  // Mirrors the same fix in index.ts's getReplyRecipients: a self-addressed
-  // email has no other party to reply to, so don't strip down to zero.
-  const to = strippedTo.length > 0 ? strippedTo : uniqueAddresses(primaryAddresses);
-  if (!replyAll) return { to, cc: [] };
-  const cc = uniqueAddresses([...addressValues(detail.to), ...addressValues(detail.cc)]).filter(
-    (address) => {
-      const normalized = lowerCaseAddress(address);
-      return normalized !== owner && !to.some((r) => lowerCaseAddress(r) === normalized);
-    },
-  );
-  return { to, cc };
-}
-
 // ── write commands ──────────────────────────────────────────────────────────
 
 async function runMove(parsed: ParsedCliArgs): Promise<void> {
@@ -1115,22 +1031,16 @@ async function runReply(parsed: ParsedCliArgs): Promise<void> {
   if (!body) throw new Error("reply requires --body or body piped via stdin");
 
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, smtpService, imapService, auditService }) => {
-    ensureSendAllowed(config.runtime);
-    const detail = await imapService.getEmailById(emailId);
-    const recipients = getReplyRecipients(detail, config.smtp.username, replyAll);
-    if (recipients.to.length === 0) throw new Error("Unable to infer reply recipient.");
-    const result = await withAudit(auditService, "reply_to_email", { emailId, replyAll }, () =>
-      smtpService.sendEmail({
-        to: recipients.to,
-        cc: recipients.cc,
-        subject: prefixedSubject(detail.subject, "Re:"),
-        body: buildReplyText(detail, body!),
-        inReplyTo: detail.messageId,
-        references: detail.messageId ? [detail.messageId] : undefined,
-      }),
-    );
-    process.stdout.write(wantJson ? json({ repliedTo: emailId, to: recipients.to, messageId: result.messageId }) : `Reply sent to ${recipients.to.join(", ")}\n`);
+  // Goes through the same MCP handler as every other client, so send policy
+  // (read-only/allowSend, RESTRICT_OUTBOUND_TO_SELF, CONFIRM_DESTRUCTIVE, account
+  // routing) applies here exactly as it does there. This used to build the message and
+  // call SMTP directly, bypassing all of it.
+  await withMcpClient(async (client) => {
+    const result = await client.callTool({
+      name: "reply_to_email",
+      arguments: { emailId, body, replyAll: replyAll || undefined, confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined },
+    });
+    printToolCallResult(result as Record<string, unknown>, wantJson);
   });
 }
 
@@ -1149,18 +1059,13 @@ async function runForward(parsed: ParsedCliArgs): Promise<void> {
   }
 
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, smtpService, imapService, auditService }) => {
-    ensureSendAllowed(config.runtime);
-    ensureValidEmails(to, "to");
-    const detail = await imapService.getEmailById(emailId);
-    const result = await withAudit(auditService, "forward_email", { emailId, to }, () =>
-      smtpService.sendEmail({
-        to,
-        subject: prefixedSubject(detail.subject, "Fwd:"),
-        body: buildForwardText(detail, body),
-      }),
-    );
-    process.stdout.write(wantJson ? json({ forwardedMessage: emailId, to, messageId: result.messageId }) : `Forwarded to ${to.join(", ")}\n`);
+  // Same reasoning as runReply: use the shared MCP handler so send policy applies.
+  await withMcpClient(async (client) => {
+    const result = await client.callTool({
+      name: "forward_email",
+      arguments: { emailId, to: to.join(", "), body, confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined },
+    });
+    printToolCallResult(result as Record<string, unknown>, wantJson);
   });
 }
 
