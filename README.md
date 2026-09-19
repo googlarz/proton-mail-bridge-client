@@ -549,8 +549,13 @@ Measured against a real Proton Bridge with a ~57,000-message mailbox (INBOX 29k,
 | `get_emails` (3 messages) | ~0.2 s |
 | `search_emails` with a `label`, or `folder` set to a small folder | < 1 s |
 | `search_emails` in one large folder (INBOX, 29k) | ~2 s |
-| `search_emails` with no `folder` (every real folder) | ~6–7 s |
+| `search_emails` with only `dateFrom`/`dateTo` in INBOX (29k) | ~1 s |
+| `search_emails` with only `dateFrom`/`dateTo`, every real folder | ~2–2.5 s |
+| `search_emails` with `subject` or `from` in INBOX | ~1.6 s |
+| `search_emails` with free-text `query` in INBOX | ~2.5 s |
+| `search_emails` with `subject` or `query`, every real folder | ~5.5–7 s |
 | `search_emails` in a 50k-message label folder | ~3 s |
+| `list_remote_drafts` (79 drafts) | ~15 ms |
 
 Bridge answers IMAP `SEARCH` itself, and its cost grows with folder size. That is why a live search is slower than the local index, and why narrowing the scope matters most.
 
@@ -559,7 +564,10 @@ Bridge answers IMAP `SEARCH` itself, and its cost grows with folder size. That i
 - **Prefer `search_indexed_emails`** when the index is current (`get_index_status`, `sync_emails`). It does not touch Bridge at all.
 - **Pass `folder`** when you know it. With no `folder`, `search_emails` covers every *real* folder and skips **All Mail**, **Labels/\*** and **Starred**: those are views of mail that already lives in INBOX/Sent/Archive, and scanning them made an all-folders search about three times slower and inflated `totalMatched`. Pass `folder: "All Mail"` (or `"Labels/x"`) to search a view on purpose.
 - **Use `label` for labels.** On Proton Bridge a label is the folder `Labels/<name>`, so `label: "Newsletters"` searches only that folder. A name that matches no label answers immediately with nothing instead of scanning.
-- Free-text `query` searches message bodies on Bridge's side and was the slowest filter in these measurements; `subject` and `from` were noticeably cheaper.
+- **Date filters are the cheapest filter Bridge offers** — about 1 s in INBOX and 2–2.5 s across every real folder, against 1.6 s / 5.5 s for `subject` and 2.5 s / 6–7 s for free-text `query`. When you can say *when* ("last week", "this month"), lead with `dateFrom`/`dateTo`. Even a wide range is fine: everything older than a year (about 20,000 messages) still took under 2 s.
+- **Adding a date range to a text search does not make the text search faster.** In INBOX, `dateFrom` (last 30 days) + `subject` took about as long as `subject` alone (1.6 s vs 1.6 s), and + `query` 2.1 s vs 2.5 s: Bridge still does the text work. Use dates on their own to find the window, then search inside it (for example by `folder`, or by fetching that window and reading it).
+- Free-text `query` searches message bodies on Bridge's side and is the slowest filter; `subject` and `from` are cheaper.
+- (Single runs on one machine, so read them as ratios, not guarantees.)
 
 **Keep responses (and token use) small**
 
@@ -569,6 +577,17 @@ Bridge answers IMAP `SEARCH` itself, and its cost grows with folder size. That i
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_BYTES`.
 - **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 96: about 7k tokens of tool definitions instead of about 20k (roughly 65% less, reference tokenizer), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
+
+**Working with drafts**
+
+Drafts live in a local store first; the copy in Proton's Drafts folder is a separate upload.
+
+- **Each `update_draft` uploads the whole draft to the Drafts folder** (the full message, attachment bytes included — about 1.4 MB of MIME for a 1 MiB attachment) unless you pass `syncToRemote:false`. When you are making several edits in a row, do them with `syncToRemote:false` and finish with one `sync_draft_to_remote`, or fold them into a single `update_draft`.
+- **The response stays small however big the draft is.** `create_draft`, the reply/forward/thread-reply draft creators, `update_draft` and `sync_draft_to_remote` return a body preview and attachment metadata only (an edit of a ~200 KB draft cost about 300 tokens; a draft with a 1 MiB attachment about 220–300). Only `get_draft` returns the full body and attachment content.
+- **Nothing to do if nothing changed:** repeating an `update_draft` that changes nothing on an already-synced draft does no write and no upload.
+- `list_drafts` is local and returns the 20 most recently updated (`hasMore`, `offset` to page); `list_remote_drafts` reads the Drafts folder over IMAP (about 15 ms for 79 drafts).
+- **Large attachments make every draft operation slower.** The store is one JSON file, so an edit reads and rewrites the whole file, attachment content of *every* draft included. In a benchmark (mocked IMAP), a tiny edit took about 1 ms normally and about 15 ms when a different draft held a 10 MiB attachment. If you edit drafts constantly, attach big files as late as possible.
+- A draft cannot be edited while it is being sent, and simultaneous syncs of the same draft are serialized (so two clients cannot upload two copies).
 
 **IMAP IDLE and the shared connection.** The server keeps one IMAP connection per account. The IDLE watcher (`PROTONMAIL_IDLE_WATCH`, on by default) waits on it, and since 2.1.25 it steps aside as soon as another operation needs the mailbox, so it no longer adds delay. Before that, with IDLE on, a single-folder search took 26–31 s and a multi-folder search did not finish.
 
