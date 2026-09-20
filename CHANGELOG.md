@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.33] — 2026-09-20
+
+### Changed
+- **`imapflow` 1.7.8 → 2.0.5** (major, the IMAP client library). Upstream's only breaking change is a Node >=20 requirement, which this package already has; its rewrite in TypeScript changes one type this code depends on: `fetchOne` is now `FetchMessageObject | false | undefined` (`false` = no such message, `undefined` = no mailbox selected), which made two guards fail to compile. All three `fetchOne` guards that compared with `false` now treat both as "no message" — including the exists-check in `deleteEmail`, whose whole purpose is to refuse a permanent delete against a UID that is not there (it would otherwise have let `undefined` through). Two tests cover it, and pass only with the new guard. The IDLE watcher relies on imapflow internals (`preCheck`, `idling`, `maxIdleTime`); checked end to end on a real Bridge (below) rather than assumed. Search timings against a real Bridge were compared with the old library over 15 fresh-server samples each: same distribution (all-folders median 12.0 s vs 12.6 s, INBOX-only 4.3 s vs 4.7 s on a Bridge that was slow that day), and no IDLE warnings in the server log. Both libraries showed one ~40 s outlier in those samples, so it is not caused by the upgrade (see Known).
+- **TypeScript 5.9.3 → 7.0.2** (the native compiler; dev tool only). TypeScript 7 removed `moduleResolution: node10`, so `tsconfig.json` now uses `Bundler` (the only change needed). The emitted JavaScript is byte-identical to the TypeScript 5.9.3 build of the same source; the `.d.ts` files differ only in the order of properties and in which re-export path a type is printed with (`./lib.js`, a real file, instead of `./types/index.js`) — property names are identical, all 53 relative references in the declarations resolve, and a consumer compiles against them exactly as against the old ones.
+- `@types/node` 22.19.15 → 22.20.3 (within the 22 line).
+
+### Added
+- `test/imap-fetchone-guards.test.mjs` (deleteEmail must not delete when `fetchOne` returns `false` or `undefined`).
+- The opt-in live smoke now also holds a real IDLE session (`wait_for_mailbox_changes`, 5 s) and checks the connection is healthy afterwards.
+
+### Known
+- **Intermittent ~40 s stall in an all-folders `search_emails`** on a Bridge with IDLE on: 2 of the 51 all-folders searches made while comparing the two libraries took 37–41 s instead of 8–12 s, once on each imapflow version (so not caused by 2.0.5). Not reproduced on demand and not yet explained; not addressed in this release.
+
 ## [2.1.32] — 2026-09-20
 
 ### Changed
