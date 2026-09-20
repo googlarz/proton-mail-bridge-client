@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
+import tls from "node:tls";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { simpleParser } from "mailparser";
 import { SMTPService, normalizeSendResult } from "../dist/services/smtp-service.js";
 
@@ -9,9 +14,9 @@ import { SMTPService, normalizeSendResult } from "../dist/services/smtp-service.
 // It exists so that a nodemailer upgrade is judged by what goes over the wire (envelope,
 // headers, MIME structure, result shape) and not only by whether the types still compile.
 
-function startFakeSmtp({ rejectRcpt = [] } = {}) {
+function startFakeSmtp({ rejectRcpt = [], tlsCredentials } = {}) {
   const received = [];
-  const server = net.createServer((socket) => {
+  const onConnection = (socket) => {
     let buffer = "";
     let mode = "command"; // command | data | authUser | authPass | authPlain
     let session = { rcpt: [], from: undefined, auth: undefined, data: "" };
@@ -61,13 +66,27 @@ function startFakeSmtp({ rejectRcpt = [] } = {}) {
         }
       }
     });
-  });
+  };
+  const server = tlsCredentials ? tls.createServer(tlsCredentials, onConnection) : net.createServer(onConnection);
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, received, port: server.address().port })));
 }
 
-const service = (port) =>
+// A throwaway self-signed certificate, made at test time (nothing secret is committed).
+function selfSignedCredentials() {
+  const dir = mkdtempSync(join(tmpdir(), "smtp-test-cert-"));
+  try {
+    execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(dir, "k.pem"), "-out", join(dir, "c.pem"), "-days", "1", "-subj", "/CN=127.0.0.1"], { stdio: "ignore" });
+    return { key: readFileSync(join(dir, "k.pem")), cert: readFileSync(join(dir, "c.pem")) };
+  } catch {
+    return undefined;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const service = (port, secure = false) =>
   new SMTPService({
-    smtp: { host: "127.0.0.1", port, secure: false, username: "me@example.com", password: "s3cret" },
+    smtp: { host: "127.0.0.1", port, secure, username: "me@example.com", password: "s3cret" },
     imap: { host: "127.0.0.1", port: 1143, secure: false, username: "me@example.com", password: "s3cret" },
     dataDir: "/tmp/smtp-real-transport-test", debug: false, runtime: {},
   });
@@ -138,4 +157,39 @@ test("normalizeSendResult fills missing fields and flattens address objects", ()
     { messageId: "<m@x>", accepted: ["a@x", "b@x"], rejected: ["c@x"], response: "250 ok" },
   );
   assert.deepEqual(normalizeSendResult({}), { messageId: "", accepted: [], rejected: [], response: "" });
+});
+
+// Proton Bridge's SMTP port speaks TLS from the first byte (secure: true) with a self-signed
+// certificate, and the service accepts it because the host is loopback. That is the path a
+// real installation uses, and the one a nodemailer upgrade could change (TLS defaults).
+test("implicit TLS with a self-signed certificate on loopback (the Bridge configuration)", { skip: selfSignedCredentials() ? false : "openssl not available" }, async () => {
+  const { server, received, port } = await startFakeSmtp({ tlsCredentials: selfSignedCredentials() });
+  try {
+    const result = await service(port, true).sendEmail({ to: ["anna@example.com"], subject: "over TLS", body: "hello", isHtml: false, appendSignature: false });
+    assert.equal(received.length, 1);
+    assert.deepEqual(received[0].auth, { user: "me@example.com", pass: "s3cret" });
+    assert.deepEqual(result.accepted, ["anna@example.com"]);
+    const parsed = await simpleParser(Buffer.from(received[0].data, "latin1"));
+    assert.equal(parsed.subject, "over TLS");
+  } finally {
+    server.close();
+  }
+});
+
+test("a certificate that is NOT on loopback is still verified (the relaxation is loopback-only)", { skip: selfSignedCredentials() ? false : "openssl not available" }, async () => {
+  const { server, port } = await startFakeSmtp({ tlsCredentials: selfSignedCredentials() });
+  try {
+    const remote = new SMTPService({
+      // 0.0.0.0 reaches the local server but is not in the loopback list, so the self-signed
+      // certificate must be refused for a TLS reason (not a DNS failure).
+      smtp: { host: "0.0.0.0", port, secure: true, username: "me@example.com", password: "s3cret" },
+      imap: {}, dataDir: "/tmp/x", debug: false, runtime: {},
+    });
+    await assert.rejects(
+      remote.sendEmail({ to: ["a@example.com"], subject: "s", body: "b", isHtml: false, appendSignature: false }),
+      (error) => /self[- ]signed|certificate|altnames|unable to verify/i.test(String(error?.message)) || /CERT|SELF_SIGNED|ESOCKET/.test(String(error?.code)),
+    );
+  } finally {
+    server.close();
+  }
 });

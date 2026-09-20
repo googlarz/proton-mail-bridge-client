@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.32] — 2026-09-20
+
+### Changed
+- **`nodemailer` 9.1.1 → 10.0.10** (major). Upstream's only breaking change is a Node >=20 requirement, which this package already has. nodemailer 10 ships its own types, so `@types/nodemailer` was removed. What went over the wire was checked before adopting it, not just that the code compiles: see the new transport tests below.
+- **`better-sqlite3` stays on the 12.x line, updated 12.8.0 → 12.11.1**, and Dependabot now ignores its major updates. better-sqlite3 13 requires Node >=22 and crashes the process (SIGSEGV) when the index is opened on Node 20, which this package still supports (`engines.node >=20`). The `allowScripts` pin in `package.json` now names the installed version. Moving to 13 means raising `engines.node` and the CI matrix in a deliberate release; a test keeps the pin in step with the lockfile.
+- **Dependabot also ignores `@types/node` major updates**: type definitions should describe the oldest supported Node, and `@types/node` 26 would let code call APIs Node 20 does not have and still compile.
+
+### Fixed
+- **`SMTPService.sendEmail` / `sendTestEmail` now return a normalized result** (`accepted`, `rejected`, `response` always present, address objects flattened to strings) instead of nodemailer's raw `SentMessageInfo`. nodemailer 10 types those fields as optional, which the draft store and delivery queue (they need the plain values) could not accept; normalizing once at the source keeps the three call sites unchanged and works with both major versions.
+
+### Added
+- `test/smtp-real-transport.test.mjs`: sends through the real `SMTPService` and real nodemailer over a real TCP socket to an in-process SMTP server and checks what arrives — envelope (Bcc present in the envelope, never in the delivered headers), authentication, non-ASCII subject, `In-Reply-To`/`References`, multipart/related with an inline `cid` image and a normal attachment, a rejected recipient, and the normalized result. It also covers the Bridge configuration: implicit TLS with a self-signed certificate on loopback, and that a non-loopback host still verifies the certificate.
+- Build-hygiene tests for the Dependabot ignore rules and the `allowScripts` pin.
+
 ## [2.1.31] — 2026-09-20
 
 Found while auditing the CI and compiler setup.

@@ -45,3 +45,19 @@ test("Dependabot keeps both the npm dependencies and the pinned actions current"
   assert.match(config, /package-ecosystem:\s*github-actions/);
   assert.match(config, /package-ecosystem:\s*npm/);
 });
+
+test("Dependabot does not offer major bumps that would break the supported Node range", async () => {
+  // better-sqlite3 13 needs Node >=22 and crashes on 20; @types/node 26 would let code use
+  // APIs Node 20 lacks. Both must stay ignored for major updates until `engines.node` is raised.
+  const config = await read(".github/dependabot.yml");
+  for (const name of ["better-sqlite3", "@types/node"]) {
+    assert.match(config, new RegExp(`dependency-name:\\s*"${name}"\\s*\\n\\s*update-types:\\s*\\["version-update:semver-major"\\]`), `${name} majors must be ignored`);
+  }
+});
+
+test("the allowScripts pin names the better-sqlite3 version that is actually installed", async () => {
+  const pkg = JSON.parse(await read("package.json"));
+  const lock = JSON.parse(await read("package-lock.json"));
+  const installed = lock.packages["node_modules/better-sqlite3"].version;
+  assert.equal(pkg.allowScripts?.[`better-sqlite3@${installed}`], true, `allowScripts must pin better-sqlite3@${installed}`);
+});
