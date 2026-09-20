@@ -83,7 +83,7 @@
     "@types/node": "^22.10.2",
     "@types/sanitize-html": "^2.16.1",
     "@types/turndown": "^5.0.6",
-    "typescript": "^5.7.2"
+    "typescript": "^7.0.2"
   },
   "files": [
     "dist/**/*",
