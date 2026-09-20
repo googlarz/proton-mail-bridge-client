@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.31] — 2026-09-20
+
+Found while auditing the CI and compiler setup.
+
+### Security
+- **GitHub Actions are pinned to full commit SHAs** (`actions/checkout` v4.4.0, `actions/setup-node` v4.4.0, `actions/upload-artifact` v4.6.2; SHAs resolved from the GitHub API, not copied). The three workflows referenced moving tags (`@v4`); a tag can be re-pointed to different code, a commit SHA cannot. This matters most for the publish job, which runs with an OIDC identity that npm trusts (Trusted Publishing) — code that runs there can publish the package. The `# vX.Y.Z` comment next to each pin says which release it is.
+- **The test workflow now declares `permissions: contents: read`** instead of inheriting the repository's default token permissions (it only reads the repo). `publish.yml` and `mcpb-release.yml` already scoped theirs.
+- **Added `.github/dependabot.yml`** (weekly, grouped): keeps the pinned actions and the npm dependencies current, so pinning does not mean going stale.
+
+### Fixed
+- **`folder_stats` advertised a `scanLimit` parameter that did nothing.** Its schema said "Maximum messages to scan (1–20000, default 5000). Lower = faster but less accurate", and the handler passed it down, but `getFolderStats` reads the count from IMAP `STATUS`, which is exact and instant, and ignored it. Removed the parameter from the schema, the handler and the method. Results are unchanged; a client that still sends `scanLimit` is simply ignored, as before. (`get_email_stats` has its own, working `scanLimit`.)
+
+### Changed
+- **`tsc` now fails on unused locals and parameters** (`noUnusedLocals`, `noUnusedParameters`). The compiler was silent about dead code, which is how the ignored `scanLimit` and five other leftovers survived: four unused service imports in `index.ts` and an unused type import in `simple-imap-service.ts`, all removed.
+
+### Added
+- `test/build-hygiene.test.mjs` — fails if the unused-code checks are turned off, if any workflow action is not pinned to a 40-character commit SHA (verified to fail when one is unpinned), if the test workflow loses its read-only permissions, or if Dependabot stops covering npm and the actions.
+
 ## [2.1.30] — 2026-09-20
 
 ### Fixed

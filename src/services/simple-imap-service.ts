@@ -16,7 +16,6 @@ import type {
   RemoteDraftRef,
   SearchEmailsInput,
   SenderFrequency,
-  SendEmailInput,
   SyncEmailsInput,
 } from "../types/index.js";
 import {
@@ -2289,7 +2288,7 @@ export class SimpleIMAPService {
     return { folder, count };
   }
 
-  async getFolderStats(folder?: string, scanLimit?: number): Promise<{
+  async getFolderStats(folder?: string): Promise<{
     folder: string;
     total: number;
     unseen: number;

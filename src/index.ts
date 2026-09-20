@@ -20,14 +20,10 @@ import {
 import { isMainModule } from "./is-main.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { AuditService } from "./services/audit-service.js";
-import { BackgroundSyncService } from "./services/background-sync-service.js";
-import { DeliveryQueueService } from "./services/delivery-queue-service.js";
 import { DraftStoreService, applyBodyEdits, draftSyncFingerprint, type BodyEdit } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
 import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService, UID_VALIDITY_MISMATCH_ERROR } from "./services/simple-imap-service.js";
 import { applySignature, plainTextToHtml, SMTPService } from "./services/smtp-service.js";
-import { SnoozeService } from "./services/snooze-service.js";
-import { TemplateService } from "./services/template-service.js";
 import type {
   AccountConfig,
   ActionableThreadSummary,
@@ -1016,7 +1012,6 @@ const TOOLS = [
       type: "object",
       properties: {
         folder: { type: "string", description: "Folder path. Defaults to INBOX.", default: "INBOX" },
-        scanLimit: { type: "number", description: "Maximum messages to scan (1–20000, default 5000). Lower = faster but less accurate." },
       },
     },
   },
@@ -5993,9 +5988,8 @@ export function createServer(
 
         case "folder_stats": {
           const folderStatsFolder = optionalString(args, "folder");
-          const scanLimit = typeof args.scanLimit === "number" ? args.scanLimit : undefined;
           if (accountManager.all().length === 1) {
-            const result = await imapService.getFolderStats(folderStatsFolder, scanLimit);
+            const result = await imapService.getFolderStats(folderStatsFolder);
             return createTextResult(result);
           }
           // Merge strategy: fetch stats for the same folder in every account and
@@ -6004,7 +5998,7 @@ export function createServer(
           const perAccount = await Promise.all(
             accountManager.all().map(async (bundle) => ({
               slug: bundle.account.slug,
-              ...(await bundle.imapService.getFolderStats(folderStatsFolder, scanLimit)),
+              ...(await bundle.imapService.getFolderStats(folderStatsFolder)),
             })),
           );
           return createTextResult({
