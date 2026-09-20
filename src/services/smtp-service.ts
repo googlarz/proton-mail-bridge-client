@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import nodemailer, { type SentMessageInfo, type Transporter } from "nodemailer";
+import nodemailer, { type Transporter } from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import sanitizeHtml from "sanitize-html";
 import type { ProtonMailConfig, SendEmailInput } from "../types/index.js";
@@ -97,6 +97,33 @@ export function applySignature(
   };
 }
 
+// What every caller of sendEmail() gets, always complete. nodemailer 10 types `accepted`,
+// `rejected` and `response` as optional, and they may hold address objects rather than
+// plain strings; the draft store, the delivery queue and the tools all need the plain,
+// present values, so normalize once here instead of at every call site.
+export interface SendResult {
+  messageId: string;
+  accepted: string[];
+  rejected: string[];
+  response: string;
+}
+
+function addressList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (typeof entry === "string" ? entry : String((entry as { address?: unknown } | null)?.address ?? "")))
+    .filter((entry) => entry.length > 0);
+}
+
+export function normalizeSendResult(info: { messageId?: string; accepted?: unknown; rejected?: unknown; response?: string }): SendResult {
+  return {
+    messageId: info.messageId ?? "",
+    accepted: addressList(info.accepted),
+    rejected: addressList(info.rejected),
+    response: info.response ?? "",
+  };
+}
+
 export class SMTPService {
   private transporter?: Transporter;
 
@@ -107,9 +134,9 @@ export class SMTPService {
     await transporter.verify();
   }
 
-  async sendEmail(input: SendEmailInput): Promise<SentMessageInfo> {
+  async sendEmail(input: SendEmailInput): Promise<SendResult> {
     const transporter = this.getTransporter();
-    return transporter.sendMail(this.buildMailOptions(input));
+    return normalizeSendResult(await transporter.sendMail(this.buildMailOptions(input)));
   }
 
   // preserveBcc: only ever true for syncDraftToRemote's own call (saving to the
@@ -142,7 +169,7 @@ export class SMTPService {
     return injectBccHeader(raw, input.bcc);
   }
 
-  async sendTestEmail(to: string, customMessage?: string, from?: string): Promise<SentMessageInfo> {
+  async sendTestEmail(to: string, customMessage?: string, from?: string): Promise<SendResult> {
     const message =
       customMessage ??
       [

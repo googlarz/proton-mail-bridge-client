@@ -26,3 +26,16 @@ updates:
       production-dependencies:
         dependency-type: production
         update-types: ["minor", "patch"]
+    ignore:
+      # This package declares support for Node >=20. better-sqlite3 13 requires Node >=22
+      # and crashes (SIGSEGV) when the index is opened on Node 20, so stay on the 12.x
+      # line (minor and patch updates still arrive). Revisit together with raising
+      # `engines.node` and the CI matrix; the allowScripts pin in package.json must
+      # then be updated as well.
+      - dependency-name: "better-sqlite3"
+        update-types: ["version-update:semver-major"]
+      # Type definitions should describe the OLDEST Node this package supports, not the
+      # newest: @types/node 26 lets code call APIs Node 20 does not have and still
+      # compile, so the failure would only show up at runtime.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]

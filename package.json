@@ -71,7 +71,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.11.0",
-    "better-sqlite3": "^12.8.0",
+    "better-sqlite3": "^12.11.1",
     "imapflow": "^1.4.8",
     "mailparser": "^3.9.14",
     "nodemailer": "^9.1.1",
@@ -96,7 +96,7 @@
     "access": "public"
   },
   "allowScripts": {
-    "better-sqlite3@12.8.0": true
+    "better-sqlite3@12.11.1": true
   },
   "overrides": {
     "html-to-text": "10.0.1"
