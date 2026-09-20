@@ -7,6 +7,8 @@ All notable changes to this project are documented here.
 ### Changed
 - **`nodemailer` 9.1.1 → 10.0.10** (major). Upstream's only breaking change is a Node >=20 requirement, which this package already has. nodemailer 10 ships its own types, so `@types/nodemailer` was removed. What went over the wire was checked before adopting it, not just that the code compiles: see the new transport tests below.
 - **`better-sqlite3` stays on the 12.x line, updated 12.8.0 → 12.11.1**, and Dependabot now ignores its major updates. better-sqlite3 13 requires Node >=22 and crashes the process (SIGSEGV) when the index is opened on Node 20, which this package still supports (`engines.node >=20`). The `allowScripts` pin in `package.json` now names the installed version. Moving to 13 means raising `engines.node` and the CI matrix in a deliberate release; a test keeps the pin in step with the lockfile.
+- **GitHub Actions bumped to `actions/checkout` v7.0.1, `actions/setup-node` v7.0.0 and `actions/upload-artifact` v7.0.1**, still pinned to commit SHAs that were re-checked against each action's own release tag. The test workflow already ran on the new versions; nothing in the release flow downloads artifacts, so the `upload-artifact` changes between v4 and v7 do not affect it.
+- **`mailparser` 3.9.23 → 3.9.28**: adds nested `libmime`, `mailsplit` and `encoding-japanese` and a newer nested `nodemailer` (a separate copy from ours). Checked with the unit tests and a read-only run against a real Bridge, which parses real messages.
 - **Dependabot also ignores `@types/node` major updates**: type definitions should describe the oldest supported Node, and `@types/node` 26 would let code call APIs Node 20 does not have and still compile.
 
 ### Fixed
