@@ -45,3 +45,16 @@ test("every TOOL_ONLY_COMMANDS entry has a non-empty help string", () => {
   const missingHelp = TOOL_ONLY_COMMANDS.filter((entry) => !entry.help || !entry.help.trim());
   assert.deepEqual(missingHelp, []);
 });
+
+// The README and docs/cli.md promise a CLI command for every MCP tool. list_accounts (added
+// with multi-account support) slipped through: nothing checked. Every tool name must at
+// least appear in the CLI source — either as a TOOL_ONLY_COMMANDS entry or in one of the
+// hand-written commands' callTool/handler — so a new tool with no CLI path fails here.
+test("every MCP tool is reachable from the CLI", async () => {
+  const indexSource = await readFile(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
+  const cliSource = await readFile(fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "utf8");
+  const realToolNames = [...new Set([...indexSource.matchAll(/^\s*name:\s*"([a-z_0-9]+)",$/gm)].map((m) => m[1]))];
+  assert.ok(realToolNames.length >= 90, "found the tool list");
+  const unreachable = realToolNames.filter((name) => !cliSource.includes(`"${name}"`));
+  assert.deepEqual(unreachable, []);
+});

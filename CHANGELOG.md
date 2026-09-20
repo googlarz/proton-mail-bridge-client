@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.30] — 2026-09-20
+
+### Fixed
+- **`list_accounts` had no CLI command**, although the README and `docs/cli.md` promise one for every MCP tool. It was the only one of the 96 tools without a path from the CLI (it arrived with multi-account support after the promise was written). Added `list-accounts` (per-account connection status and index freshness; `--checkConnections` verifies live). Verified against a real 3-account Bridge.
+
+### Added
+- `test/cli-tool-only-commands.test.mjs`: "every MCP tool is reachable from the CLI" — a new tool with no CLI path now fails the suite (verified to fail without the fix).
+
+### Docs
+- README: tool count corrected from 95 to 96 (the full tier exposes 96; `core` 25), so the claims in the intro, the CLI bullet and the CLI reference now hold.
+- Repository About text and topics rewritten on GitHub (not part of the package): plain "MCP server and CLI" wording with the clients, local-first, unofficial, 96 tools and the safety modes; 12 topics added (`mcp-server`, `proton-mail`, `claude-desktop`, `imap`, `smtp`, `cli`, `ai-agents`, `local-first`, `typescript`, `email-automation`, `sqlite`, `proton`).
+
 ## [2.1.29] — 2026-09-19
 
 ### Changed

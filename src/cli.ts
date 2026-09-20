@@ -1791,6 +1791,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "rename-label", tool: "rename_label", positionals: ["name", "newName"], help: "Rename a Proton label" },
   { command: "delete-label", tool: "delete_label", positionals: ["name"], help: "Delete a Proton label" },
   { command: "get-connection-status", tool: "get_connection_status", positionals: [], help: "(tool form; see also `connection-status`)" },
+  { command: "list-accounts", tool: "list_accounts", positionals: [], help: "List the configured Proton addresses with each one's connection status and index freshness (multi-account setups; pass --checkConnections to verify live)" },
   { command: "get-runtime-status", tool: "get_runtime_status", positionals: [], help: "(tool form; see also `runtime-status`)" },
   { command: "run-doctor", tool: "run_doctor", positionals: [], help: "Full production health check (tool form; see also `doctor`)" },
   { command: "run-background-sync", tool: "run_background_sync", positionals: [], help: "Trigger the configured background sync cycle now" },
