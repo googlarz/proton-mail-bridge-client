@@ -128,6 +128,15 @@ try {
   const resourcesAfter = await client.listResources();
   check("resources/list now enumerates indexed mail", resourcesAfter.resources.length > 0, `${resourcesAfter.resources.length} listed`);
 
+  // IDLE end to end (imapflow's IDLE machinery is what a client-library upgrade can change):
+  // the call must actually hold an IDLE session for about the requested time, then return
+  // cleanly. It returns at once if a watcher already holds this folder, so this runs on the
+  // instance whose background watcher is OFF.
+  const idle = await call("wait_for_mailbox_changes", { folder: "INBOX", timeoutSeconds: 5 });
+  check("IDLE session holds for the requested time and returns cleanly", !idle.isError && typeof idle.data?.changed === "boolean" && idle.ms >= 3000 && idle.ms < 15000, `${idle.ms}ms, changed=${idle.data?.changed}`);
+  const afterIdle = await call("search_emails", { query: "zzqxnomatch", folder: "INBOX", limit: 3 });
+  check("the connection is healthy after an IDLE session", !afterIdle.isError && afterIdle.ms < 15000, `${afterIdle.ms}ms`);
+
   const doctor = await call("run_doctor");
   check("run_doctor", !doctor.isError, `${doctor.ms}ms`);
 } catch (error) {

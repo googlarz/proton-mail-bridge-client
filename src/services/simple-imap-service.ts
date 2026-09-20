@@ -1864,7 +1864,9 @@ export class SimpleIMAPService {
   ): Promise<string[]> {
     const notApplied: string[] = [];
     const msg = await client.fetchOne(String(uid), { flags: true }, { uid: true });
-    if (msg === false) {
+    // imapflow 2 types fetchOne as FetchMessageObject | false | undefined: false when the
+    // message does not exist, undefined when no mailbox is selected. Neither is a message.
+    if (!msg) {
       // IMAP's STORE command silently no-ops for a UID that doesn't exist —
       // no error, no exception — so the preceding messageFlagsAdd/Remove
       // call above already "succeeded" against nothing. This re-FETCH is
@@ -2085,7 +2087,7 @@ export class SimpleIMAPService {
         // deliberately-fake UID reported deleted:true. Confirm the message
         // actually exists before issuing a permanent delete against it.
         const exists = await client.fetchOne(String(uid), { uid: true }, { uid: true });
-        if (exists === false) {
+        if (!exists) {
           throw new Error(`Email not found for id ${emailId}`);
         }
         const deleted = await client.messageDelete(String(uid), { uid: true });
@@ -2144,7 +2146,7 @@ export class SimpleIMAPService {
       this.withMailbox(folder, true, async (client) => {
         this.assertMailboxUidValidity(client, expectedUidValidity);
         const msg = await client.fetchOne(String(uid), { uid: true, envelope: true }, { uid: true });
-        if (msg !== false) {
+        if (msg) {
           sourceExists = true;
           messageId = msg.envelope?.messageId;
         }
