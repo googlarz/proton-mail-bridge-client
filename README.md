@@ -650,6 +650,12 @@ Use `Folders/Name` for real folders (e.g., `Folders/Receipts`), not just `Name`.
 
 ---
 
+## Related projects
+
+- **[proton-drive-mcp](https://github.com/googlarz/proton-drive-mcp)** — the companion MCP server and CLI for **Proton Drive**: upload, download, share and manage your end-to-end encrypted files from Claude. Run it next to this server to work with Proton Mail and Proton Drive in one conversation, for example by saving an attachment with `save_attachment` and then uploading it to Drive. If `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` points inside a folder that the Proton Drive desktop app syncs, attachments saved there also end up in Drive without any extra step.
+
+---
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
