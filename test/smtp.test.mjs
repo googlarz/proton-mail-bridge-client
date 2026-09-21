@@ -516,3 +516,35 @@ test("buildRawMessage preserves Bcc when preserveBcc is true, and drops it (node
   const withPreserve = (await service.buildRawMessage(input, true)).toString("utf8");
   assert.ok(withPreserve.includes("Bcc: hidden@example.com"), "preserveBcc:true must keep the Bcc header, for the draft-save path only");
 });
+
+test("buildRawMessage keeps safe inline styles and data:image logos in an HTML signature", async () => {
+  const service = new SMTPService(createConfig());
+  const logo = "data:image/png;base64,iVBORw0KGgo=";
+  const raw = await service.buildRawMessage({
+    to: ["a@example.com"],
+    subject: "Signature",
+    body: "fallback",
+    isHtml: true,
+    htmlBody: `<p style="color:#c00;font-family:Arial, 'Helvetica'">Best</p><hr style="border-top:2px solid #cc0000"><img src="${logo}" width="80">`,
+  });
+  const message = raw.toString("utf8").replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+  assert.ok(message.includes("color:#c00"), "safe style must survive");
+  assert.ok(message.includes("border-top:2px solid #cc0000"), "border style must survive");
+  assert.ok(message.includes(logo), "data:image/png logo must survive");
+});
+
+test("buildRawMessage still strips CSS url(), remote images, and non-raster data: URIs", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["a@example.com"],
+    subject: "Beacons",
+    body: "fallback",
+    isHtml: true,
+    htmlBody: '<p style="background-color:red;background-image:url(http://evil.example/b.png);color:red">x</p><div style="width:expression(alert(1))">y</div><img src="data:image/svg+xml;base64,PHN2Zz4="><img src="data:text/html;base64,PHA+"><img src="https://evil.example/t.png">',
+  });
+  const message = raw.toString("utf8").replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+  assert.ok(!message.includes("evil.example"), "no remote URL may survive");
+  assert.ok(!/url\(|expression/i.test(message), "url()/expression() must be dropped");
+  assert.ok(!message.includes("svg+xml") && !message.includes("text/html;base64"), "non-raster data: URIs must be dropped");
+  assert.ok(message.includes("color:red"), "harmless style still kept");
+});

@@ -6,6 +6,23 @@ import type { ProtonMailConfig, SendEmailInput } from "../types/index.js";
 import { htmlToMarkdown, isValidEmail } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 
+const DATA_IMAGE_SRC = /^data:image\/(png|jpe?g|gif);base64,[a-z0-9+/=\s]+$/i;
+
+const NO_URL = "(?!.*(url|expression))";
+const COLOR = /^(#[0-9a-f]{3,8}|rgba?\([\d\s,.%]+\)|[a-z]+)$/i;
+const LENGTH = new RegExp(`^${NO_URL}[\\w\\s.%-]+$`, "i");
+const FONT_FAMILY = /^[\w\s,'"-]+$/;
+const BORDER = new RegExp(`^${NO_URL}[\\w\\s#.(),%-]+$`, "i");
+const SAFE_STYLES: Record<string, RegExp[]> = Object.fromEntries([
+  ...["color", "background-color"].map((p) => [p, [COLOR]]),
+  ...["font-size", "font-weight", "font-style", "line-height", "text-align", "text-decoration",
+    "vertical-align", "width", "height", "padding", "margin",
+    "padding-top", "padding-right", "padding-bottom", "padding-left",
+    "margin-top", "margin-right", "margin-bottom", "margin-left"].map((p) => [p, [LENGTH]]),
+  ["font-family", [FONT_FAMILY]],
+  ...["border", "border-top", "border-right", "border-bottom", "border-left"].map((p) => [p, [BORDER]]),
+]);
+
 export function sanitizeHeader(value: string): string {
   return value.replace(/[\r\n\0]/g, " ").trim();
 }
@@ -248,6 +265,7 @@ export class SMTPService {
         "span",
         "div",
         "img",
+        "hr",
       ],
       allowedAttributes: {
         a: ["href"],
@@ -255,8 +273,12 @@ export class SMTPService {
         // signature logo), not something that can carry an exfiltration risk
         // the way src's scheme can.
         img: ["src", "alt", "width", "height"],
-        "*": [],
+        "*": ["style"],
       },
+      // Inline formatting (colours, fonts, borders, spacing) so an HTML signature
+      // keeps its look. Only whitelisted properties, and no value may contain
+      // url()/expression() — a CSS url() is a remote-fetch beacon just like <img>.
+      allowedStyles: { "*": SAFE_STYLES },
       allowedSchemes: ["http", "https", "mailto"],
       // Found live (external review): a signature configured with an inline
       // logo (attached with a Content-ID, referenced as <img src="cid:...">,
@@ -271,7 +293,7 @@ export class SMTPService {
       // loads it. cid: only ever resolves to this message's own attached
       // parts, so it carries none of that risk.
       allowedSchemesByTag: {
-        img: ["cid"],
+        img: ["cid", "data"],
       },
       allowedSchemesAppliedToAttributes: ["href", "src"],
       // Found live (external review): allowedSchemesByTag only checks a URL that
@@ -283,6 +305,16 @@ export class SMTPService {
       // recipient client that resolves it and loads remote images fires a
       // request to that host.
       allowProtocolRelative: false,
+      // "data" above only admits the scheme; a data: image needs no network
+      // request, but only raster image types are accepted (no svg/html payloads).
+      transformTags: {
+        img: (tagName, attribs) => {
+          if (/^data:/i.test(attribs.src ?? "") && !DATA_IMAGE_SRC.test(attribs.src)) {
+            delete attribs.src;
+          }
+          return { tagName, attribs };
+        },
+      },
     });
   }
 

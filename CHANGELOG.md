@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.34] — 2026-09-21
+
+### Fixed
+- **HTML signatures lost their look in drafts and sent mail.** The outgoing-HTML sanitizer stripped every `style` attribute and any non-`cid:` image, so a signature's colours, fonts, borders and a `data:` logo vanished. It now keeps `style` for a whitelist of properties (colour, font, text alignment, spacing, size, borders) and adds `<hr>`; any value containing `url()` or `expression()` is dropped. `<img src="data:image/png|jpeg|gif;base64,...">` is accepted (no network request); SVG/HTML `data:` URIs, remote `http(s)`/protocol-relative images and CSS `url()` stay blocked. No new env var and no need to set `PROTONMAIL_ALLOW_UNSAFE_HTML` or pass `sanitizeHtml:false`.
+
+### Added
+- Two tests in `test/smtp.test.mjs` (styles + data logo survive; beacons, `url()`, `expression()`, non-raster `data:` are still stripped).
+
 ## [2.1.33] — 2026-09-20
 
 ### Changed
