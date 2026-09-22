@@ -603,6 +603,12 @@ export class LocalIndexService {
 
   async recordSnapshot(input: {
     folders: FolderInfo[];
+    // True only when `folders` is the complete, unfiltered folder list (as
+    // collectEmailsForIndex always provides — see applySnapshot's comment).
+    // Defaults to false so a caller seeding/merging a deliberately partial
+    // folders array (most callers in tests) never risks pruning folders it
+    // simply didn't mention this round.
+    folderListComplete?: boolean;
     emails: EmailSummary[];
     syncedAt: string;
     folderStats: Array<MailboxSyncCheckpoint>;
@@ -1661,6 +1667,7 @@ export class LocalIndexService {
     db: Database.Database,
     input: {
       folders: FolderInfo[];
+      folderListComplete?: boolean;
       emails: EmailSummary[];
       syncedAt: string;
       folderStats: Array<MailboxSyncCheckpoint>;
@@ -1787,6 +1794,9 @@ export class LocalIndexService {
       WHERE email_id IN (SELECT email_id FROM messages WHERE folder = ?)
     `);
     const deleteMessagesForFolder = db.prepare(`DELETE FROM messages WHERE folder = ?`);
+    const listStoredFolderPaths = db.prepare(`SELECT path FROM folders`);
+    const deleteSyncStateForFolder = db.prepare(`DELETE FROM sync_state WHERE folder = ?`);
+    const deleteFolderRow = db.prepare(`DELETE FROM folders WHERE path = ?`);
     const createSnapshotUidTable = db.prepare(`
       CREATE TEMP TABLE IF NOT EXISTS temp_snapshot_uids (
         uid INTEGER PRIMARY KEY
@@ -1830,6 +1840,28 @@ export class LocalIndexService {
         if (folderStat.folderObservedEmpty) {
           deleteFtsForFolder.run(folderStat.folder);
           deleteMessagesForFolder.run(folderStat.folder);
+        }
+      }
+
+      // Only prune when the caller has asserted `folders` is the complete,
+      // unfiltered folder list (collectEmailsForIndex's real callers always
+      // pass folderListComplete:true — see its own comment). A caller that
+      // seeds/merges a deliberately partial folders array must not have
+      // folders it simply didn't mention this round wiped out. When it does
+      // hold, any locally-indexed path missing from it was genuinely deleted
+      // or renamed on the server (e.g. from Proton webmail, not through this
+      // server's own delete_folder/delete_label) — without this, that
+      // folder's messages, FTS rows and sync checkpoint stayed in the local
+      // index forever, inflating folder_stats/analytics with a folder that
+      // no longer exists, since nothing else ever pruned the `folders` table.
+      if (input.folderListComplete) {
+        const currentPaths = new Set(input.folders.map((folder) => folder.path));
+        for (const stored of listStoredFolderPaths.all() as Array<{ path: string }>) {
+          if (currentPaths.has(stored.path)) continue;
+          deleteFtsForFolder.run(stored.path);
+          deleteMessagesForFolder.run(stored.path);
+          deleteSyncStateForFolder.run(stored.path);
+          deleteFolderRow.run(stored.path);
         }
       }
 

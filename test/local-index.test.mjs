@@ -2577,3 +2577,63 @@ test("deliveredTo round-trips through recordSnapshot and is preserved on a flags
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+// Found live: nothing ever pruned the `folders` table (or that folder's
+// messages/FTS rows/sync checkpoint) when a folder disappeared from the
+// server's own folder list — e.g. deleted from Proton webmail, not through
+// this server's own delete_folder/delete_label. A stale folder stayed in
+// folder_stats/analytics forever. collectEmailsForIndex always supplies the
+// complete, unfiltered folder list (see its own comment), so applySnapshot
+// prunes any locally-indexed path missing from it — but ONLY when the caller
+// asserts that with folderListComplete:true, so a caller merging a
+// deliberately partial folders array (like every other test in this file)
+// never has folders it simply didn't mention this round wiped out.
+test("recordSnapshot with folderListComplete:true prunes a folder removed from the server, but a partial list never does", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-index-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const inboxFolder = { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 };
+  const archiveFolder = { path: "Archive", name: "Archive", delimiter: "/", specialUse: "\\Archive", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 };
+  const archiveEmail = {
+    id: "Archive::1", folder: "Archive", uid: 1, seq: 1, messageId: "<a@example.com>", subject: "Old",
+    from: [{ address: "alice@example.com" }], to: [{ address: "owner@example.com" }], cc: [], bcc: [], replyTo: [],
+    date: "2026-01-01T00:00:00.000Z", internalDate: "2026-01-01T00:00:00.000Z", isRead: true, isStarred: false,
+    flags: [], preview: "Old note", hasAttachments: false, attachments: [], labels: [],
+  };
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-01-01T00:00:00.000Z",
+      folders: [inboxFolder, archiveFolder],
+      folderListComplete: true,
+      folderStats: [{ folder: "INBOX", fetched: 0, total: 1 }, { folder: "Archive", fetched: 1, total: 1 }],
+      emails: [archiveEmail],
+    });
+    assert.equal((await service.getStatus()).folders.some((f) => f.path === "Archive"), true, "Archive must be indexed after the first snapshot");
+
+    // A partial, incremental-looking sync of INBOX alone must NOT touch Archive,
+    // even though Archive is absent from this call's folders array.
+    await service.recordSnapshot({
+      syncedAt: "2026-01-01T00:05:00.000Z",
+      folders: [inboxFolder],
+      folderStats: [{ folder: "INBOX", fetched: 0, total: 1 }],
+      emails: [],
+    });
+    assert.equal((await service.getStatus()).folders.some((f) => f.path === "Archive"), true, "a partial (folderListComplete unset) sync must not prune Archive");
+
+    // The real thing: Archive was actually deleted server-side, so the next
+    // complete folder list from the server no longer includes it.
+    await service.recordSnapshot({
+      syncedAt: "2026-01-01T00:10:00.000Z",
+      folders: [inboxFolder],
+      folderListComplete: true,
+      folderStats: [{ folder: "INBOX", fetched: 0, total: 1 }],
+      emails: [],
+    });
+    const status = await service.getStatus();
+    assert.equal(status.folders.some((f) => f.path === "Archive"), false, "Archive must be pruned once a complete folder list confirms it's gone");
+    assert.equal((await service.listRecentMessages(10)).some((m) => m.folder === "Archive"), false, "Archive's messages must be pruned too");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

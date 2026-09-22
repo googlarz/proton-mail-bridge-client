@@ -2975,6 +2975,7 @@ async function ensureFreshLocalIndex(
 
   const indexStatus = await localIndexService.recordSnapshot({
     folders: snapshot.folders,
+    folderListComplete: true,
     emails: snapshot.emails,
     syncedAt: snapshot.syncedAt,
     folderStats: snapshot.folderStats,
@@ -7378,6 +7379,7 @@ export function createServer(
             });
             const indexStatus = await localIndexService.recordSnapshot({
               folders: snapshot.folders,
+              folderListComplete: true,
               emails: snapshot.emails,
               syncedAt: snapshot.syncedAt,
               folderStats: snapshot.folderStats,

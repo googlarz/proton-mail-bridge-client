@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.36] — 2026-09-22
+
+### Fixed
+- **A folder deleted outside this server (e.g. in Proton webmail) stayed in the local index forever.** Nothing ever pruned the `folders` table, or that folder's messages/FTS rows/sync checkpoint, when it disappeared from the server's own folder list — only `delete_folder`/`delete_label` (this server's own path) ever removed a folder locally. `folder_stats`, analytics, and `get_index_status` kept reporting a folder that no longer existed, with a stale message count, indefinitely. `recordSnapshot` now prunes any locally-indexed folder missing from a *complete* folder list, gated by a new `folderListComplete` flag so a caller merging a deliberately partial folder list (an incremental single-folder sync) never has folders it simply didn't mention that round wiped out; the three real sync paths (`sync_emails`, `get_index_status`'s per-call override, and background sync) already always fetch the complete list and now assert it.
+
+### Added
+- A `recordSnapshot`/`folderListComplete` regression test in `test/local-index.test.mjs`: proves a folder is pruned once a complete list confirms it's gone, and that a partial list never prunes anything.
+
 ## [2.1.35] — 2026-09-22
 
 ### Fixed
