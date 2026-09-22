@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   ensureDestructiveConfirmed,
   ensureEmailActionAllowed,
+  ensureFlagChangeAllowed,
   ensureSendAllowed,
   resolveRemoteDraftSync,
   sanitizeRuntimeConfig,
@@ -97,4 +98,52 @@ test("confirmDestructive: throws when flag is on and confirmed is not true", () 
 test("confirmDestructive: passes when flag is on and confirmed is true", () => {
   const runtime = createRuntime({ confirmDestructive: true });
   assert.doesNotThrow(() => ensureDestructiveConfirmed(runtime, true, "send email to bob@example.com"));
+});
+
+// Found live: update_message_flags/bulk_update_flags/flag_thread set the same
+// \Seen/\Flagged/\Deleted state as mark_email_read/star_email/delete_email but
+// went straight to ensureMailboxWriteAllowed, skipping both
+// PROTONMAIL_ALLOWED_ACTIONS and PROTONMAIL_CONFIRM_DESTRUCTIVE entirely — a
+// policy that excluded "delete" from allowedActions, or required
+// confirmation, could be bypassed just by setting \Deleted via a flags tool
+// instead of calling delete_email.
+test("ensureFlagChangeAllowed blocks a disallowed action even when only requested as a raw flag", () => {
+  const runtime = createRuntime({ allowedActions: ["mark_read"] });
+  assert.doesNotThrow(() => ensureFlagChangeAllowed(runtime, ["\\Seen"], [], undefined));
+  assert.throws(
+    () => ensureFlagChangeAllowed(runtime, ["\\Flagged"], [], undefined),
+    /star.*disabled by the current runtime policy/i,
+  );
+  assert.throws(
+    () => ensureFlagChangeAllowed(runtime, ["\\Deleted"], [], undefined),
+    /delete.*disabled by the current runtime policy/i,
+  );
+  assert.throws(
+    () => ensureFlagChangeAllowed(runtime, [], ["\\Seen"], undefined),
+    /mark_unread.*disabled by the current runtime policy/i,
+  );
+});
+
+test("ensureFlagChangeAllowed requires confirmation to set \\Deleted when confirmDestructive is on", () => {
+  const runtime = createRuntime({ allowedActions: ["delete"], confirmDestructive: true });
+  assert.throws(
+    () => ensureFlagChangeAllowed(runtime, ["\\Deleted"], [], undefined),
+    /Confirmation required/i,
+  );
+  assert.doesNotThrow(() => ensureFlagChangeAllowed(runtime, ["\\Deleted"], [], true));
+});
+
+test("ensureFlagChangeAllowed clearing \\Deleted (undelete) needs the restore action, not delete", () => {
+  const runtime = createRuntime({ allowedActions: ["restore"], confirmDestructive: true });
+  assert.doesNotThrow(() => ensureFlagChangeAllowed(runtime, [], ["\\Deleted"], undefined));
+});
+
+test("ensureFlagChangeAllowed ignores flags with no named-action equivalent (e.g. \\Answered)", () => {
+  const runtime = createRuntime({ allowedActions: [] });
+  assert.doesNotThrow(() => ensureFlagChangeAllowed(runtime, ["\\Answered"], [], undefined));
+});
+
+test("ensureFlagChangeAllowed still enforces read-only mode", () => {
+  const runtime = createRuntime({ readOnly: true, allowedActions: ["mark_read"] });
+  assert.throws(() => ensureFlagChangeAllowed(runtime, ["\\Seen"], [], undefined), /read-only mode/i);
 });

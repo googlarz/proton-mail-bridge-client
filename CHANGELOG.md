@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.35] — 2026-09-22
+
+### Fixed
+- **`update_message_flags`, `bulk_update_flags`, and `flag_thread` could bypass `PROTONMAIL_ALLOWED_ACTIONS` and `PROTONMAIL_CONFIRM_DESTRUCTIVE`.** These three tools mutate the same `\Seen`/`\Flagged`/`\Deleted` state as `mark_email_read`/`star_email`/`delete_email`, but only checked read-only mode — not the per-action allowlist or destructive-confirmation gate those named tools enforce. A policy excluding `"delete"` from `PROTONMAIL_ALLOWED_ACTIONS`, or requiring confirmation for destructive actions, could be bypassed simply by setting `\Deleted` (or `\Seen`/`\Flagged`) as a raw flag instead of calling the named tool. Fixed by routing all three through a new `ensureFlagChangeAllowed`, mapping `\Seen`→mark_read/mark_unread, `\Flagged`→star/unstar, `\Deleted`→delete/restore, same as the named tools; a flag with no named-action equivalent (e.g. `\Answered`) is unaffected. `update_message_flags`, `bulk_update_flags`, and `flag_thread` now also accept `confirmed`.
+- **`delete_email`, `bulk_delete`, `delete_thread`, `move_thread`, and `empty_folder` never checked `PROTONMAIL_ALLOWED_ACTIONS`.** They already enforced read-only mode and (where applicable) destructive confirmation, but not the per-action allowlist that `move_email`/`trash_email`/`archive_email`/`restore_email` do — so excluding `"delete"` or `"move"` from `PROTONMAIL_ALLOWED_ACTIONS` had no effect on these five tools. `bulk_delete`/`delete_thread` are gated as `"trash"` when moving to Trash and `"delete"` only when `permanent:true`, matching their own existing confirmation logic; `delete_email`/`empty_folder` are always `"delete"`; `move_thread` is `"move"`.
+
+### Added
+- `test/flag-tool-action-policy.test.mjs`: drives the real MCP handlers end-to-end (in-memory transport, no network) to prove the flags-tool bypass is closed, without over-blocking flags with no named-action equivalent.
+- Five unit tests for `ensureFlagChangeAllowed` in `test/runtime-policy.test.mjs`.
+
 ## [2.1.34] — 2026-09-21
 
 ### Fixed

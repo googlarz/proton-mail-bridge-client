@@ -99,6 +99,43 @@ export function ensureOutboundRecipientsAllowed(
   }
 }
 
+// update_message_flags/bulk_update_flags/flag_thread mutate the same
+// \Seen/\Flagged/\Deleted state as mark_email_read/star_email/delete_email,
+// but as raw IMAP flags rather than a named action — so, unlike those named
+// tools, they never passed through ensureEmailActionAllowed or
+// ensureDestructiveConfirmed. That let PROTONMAIL_ALLOWED_ACTIONS (e.g.
+// excluding "delete") and PROTONMAIL_CONFIRM_DESTRUCTIVE be bypassed simply
+// by setting the equivalent flag instead of calling the named tool. Every
+// flag-mutating tool must call this before touching the mailbox.
+export function ensureFlagChangeAllowed(
+  runtime: ProtonRuntimeConfig,
+  flagsToAdd: string[],
+  flagsToRemove: string[],
+  confirmed: boolean | undefined,
+): void {
+  ensureMailboxWriteAllowed(runtime);
+  const adding: Record<string, EmailAction> = {
+    "\\seen": "mark_read",
+    "\\flagged": "star",
+    "\\deleted": "delete",
+  };
+  const removing: Record<string, EmailAction> = {
+    "\\seen": "mark_unread",
+    "\\flagged": "unstar",
+    "\\deleted": "restore",
+  };
+  for (const [flags, map] of [[flagsToAdd, adding], [flagsToRemove, removing]] as const) {
+    for (const flag of flags) {
+      const action = map[flag.toLowerCase()];
+      if (!action) continue;
+      ensureEmailActionAllowed(runtime, action);
+      if (action === "delete") {
+        ensureDestructiveConfirmed(runtime, confirmed, "Mark message(s) \\Deleted");
+      }
+    }
+  }
+}
+
 export function ensureDestructiveConfirmed(
   runtime: ProtonRuntimeConfig,
   confirmed: boolean | undefined,

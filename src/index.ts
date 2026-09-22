@@ -69,6 +69,7 @@ import { logger } from "./utils/logger.js";
 import {
   ensureDestructiveConfirmed,
   ensureEmailActionAllowed,
+  ensureFlagChangeAllowed,
   ensureMailboxWriteAllowed,
   ensureOutboundRecipientsAllowed,
   ensureRemoteDraftSyncAllowed,
@@ -960,7 +961,7 @@ const TOOLS = [
   },
   {
     name: "update_message_flags",
-    description: "Add or remove arbitrary IMAP flags on a single message, then verify the server applied them. Returns notApplied[] listing flags the server silently dropped. Use for custom IMAP flags (e.g. \\\\Answered) or when mark_email_read / star_email don't cover the flag you need. Prefer bulk_update_flags to update flags across multiple messages at once.",
+    description: "Add or remove arbitrary IMAP flags on a single message, then verify the server applied them. Returns notApplied[] listing flags the server silently dropped. Use for custom IMAP flags (e.g. \\\\Answered) or when mark_email_read / star_email don't cover the flag you need. Prefer bulk_update_flags to update flags across multiple messages at once. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/delete_email: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -976,6 +977,7 @@ const TOOLS = [
           items: { type: "string" },
           description: "IMAP flags to clear.",
         },
+        confirmed: { type: "boolean", description: "Pass true to confirm setting \\\\Deleted. Required when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
       required: ["emailId"],
     },
@@ -1064,7 +1066,7 @@ const TOOLS = [
   },
   {
     name: "bulk_update_flags",
-    description: "Add or remove IMAP flags on multiple messages simultaneously. Use when the same flag change (e.g. \\\\Seen, \\\\Flagged) should apply to several messages. Accepts emailIds[] OR match+folder (XOR). Returns notApplied[] per message for flags the server silently dropped. Prefer update_message_flags for a single message when you need per-flag server verification.",
+    description: "Add or remove IMAP flags on multiple messages simultaneously. Use when the same flag change (e.g. \\\\Seen, \\\\Flagged) should apply to several messages. Accepts emailIds[] OR match+folder (XOR). Returns notApplied[] per message for flags the server silently dropped. Prefer update_message_flags for a single message when you need per-flag server verification. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/bulk_delete: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1076,6 +1078,7 @@ const TOOLS = [
         flagsToRemove: { type: "array", items: { type: "string" }, description: "IMAP flags to clear." },
         dryRun: { type: "boolean", default: false },
         maxBatchSize: { type: "number", description: "Maximum number of messages to process. Defaults to 500. Use to prevent runaway operations." },
+        confirmed: { type: "boolean", description: "Pass true to confirm setting \\\\Deleted. Required when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
     },
   },
@@ -1145,7 +1148,7 @@ const TOOLS = [
   },
   {
     name: "flag_thread",
-    description: "Add or remove IMAP flags across all messages in a thread, identified by RFC 5322 Message-ID header. Use when you have the raw Message-ID and want to flag an entire conversation at once. Prefer apply_thread_action with action 'mark_read', 'mark_unread', 'star', or 'unstar' when you have a local threadId from get_threads.",
+    description: "Add or remove IMAP flags across all messages in a thread, identified by RFC 5322 Message-ID header. Use when you have the raw Message-ID and want to flag an entire conversation at once. Prefer apply_thread_action with action 'mark_read', 'mark_unread', 'star', or 'unstar' when you have a local threadId from get_threads. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/delete_email: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1155,6 +1158,7 @@ const TOOLS = [
         flagsToRemove: { type: "array", items: { type: "string" } },
         acrossFolders: { type: "boolean", default: false },
         dryRun: { type: "boolean", default: false },
+        confirmed: { type: "boolean", description: "Pass true to confirm setting \\\\Deleted. Required when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
       required: ["messageId"],
     },
@@ -5928,7 +5932,6 @@ export function createServer(
         }
 
         case "update_message_flags": {
-          ensureMailboxWriteAllowed(config.runtime);
           const rawEmailId = requireString(args, "emailId");
           const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const flagsToAdd = Array.isArray(args.flagsToAdd)
@@ -5940,6 +5943,7 @@ export function createServer(
           if (flagsToAdd.length === 0 && flagsToRemove.length === 0) {
             throw new McpError(ErrorCode.InvalidParams, "Provide at least one flag in flagsToAdd or flagsToRemove.");
           }
+          ensureFlagChangeAllowed(config.runtime, flagsToAdd, flagsToRemove, normalizeBoolean(args.confirmed, false));
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
             bundle.imapService.updateMessageFlags(emailId, flagsToAdd, flagsToRemove, uidValidity),
@@ -6016,7 +6020,7 @@ export function createServer(
               "empty_folder is disabled. Set PROTONMAIL_ALLOW_EMPTY_FOLDER=true to enable.",
             );
           }
-          ensureMailboxWriteAllowed(config.runtime);
+          ensureEmailActionAllowed(config.runtime, "delete");
           const folder = requireString(args, "folder");
           const confirmed = normalizeBoolean(args.confirmed, false);
           if (!confirmed) {
@@ -6111,9 +6115,12 @@ export function createServer(
         }
 
         case "bulk_delete": {
-          ensureMailboxWriteAllowed(config.runtime);
           const permanent = normalizeBoolean(args.permanent, false);
           if (permanent) ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), "Permanently delete multiple emails");
+          // Same distinction as delete_email/delete_thread: a non-permanent
+          // bulk_delete only moves messages to Trash, so it's gated as
+          // "trash" (which a policy may allow independently of "delete").
+          ensureEmailActionAllowed(config.runtime, permanent ? "delete" : "trash");
           const emailIds = Array.isArray(args.emailIds)
             ? (args.emailIds as unknown[]).map(String) : undefined;
           const match = args.match && typeof args.match === "object"
@@ -6189,7 +6196,6 @@ export function createServer(
         }
 
         case "bulk_update_flags": {
-          ensureMailboxWriteAllowed(config.runtime);
           const emailIds = Array.isArray(args.emailIds)
             ? (args.emailIds as unknown[]).map(String) : undefined;
           const match = args.match && typeof args.match === "object"
@@ -6200,6 +6206,7 @@ export function createServer(
           const flagsToAdd = Array.isArray(args.flagsToAdd) ? (args.flagsToAdd as unknown[]).map(String) : [];
           const flagsToRemove = Array.isArray(args.flagsToRemove) ? (args.flagsToRemove as unknown[]).map(String) : [];
           if (flagsToAdd.length === 0 && flagsToRemove.length === 0) throw new McpError(ErrorCode.InvalidParams, "Provide flagsToAdd or flagsToRemove.");
+          ensureFlagChangeAllowed(config.runtime, flagsToAdd, flagsToRemove, normalizeBoolean(args.confirmed, false));
           const folder = optionalString(args, "folder") ?? "INBOX";
           const max = getBulkMaxBatchSize(args);
           const dryRun = normalizeBoolean(args.dryRun, false);
@@ -6379,7 +6386,7 @@ export function createServer(
         }
 
         case "move_thread": {
-          ensureMailboxWriteAllowed(config.runtime);
+          ensureEmailActionAllowed(config.runtime, "move");
           // A threadId only ever names ONE account — a thread can't span
           // multiple mailboxes/accounts — so this reuses
           // resolveAccountForEmailId's generic "<slug>::" prefix stripping
@@ -6402,9 +6409,10 @@ export function createServer(
         }
 
         case "delete_thread": {
-          ensureMailboxWriteAllowed(config.runtime);
           const permanentThread = normalizeBoolean(args.permanent, false);
           if (permanentThread) ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), "Permanently delete thread");
+          // Same "trash" vs "delete" distinction as bulk_delete above.
+          ensureEmailActionAllowed(config.runtime, permanentThread ? "delete" : "trash");
           // See move_thread's comment on scoping by the threadId's own
           // "<slug>::" prefix — same convention, same single-account
           // limitation.
@@ -6421,10 +6429,10 @@ export function createServer(
         }
 
         case "flag_thread": {
-          ensureMailboxWriteAllowed(config.runtime);
           const flagsToAdd = Array.isArray(args.flagsToAdd) ? (args.flagsToAdd as unknown[]).map(String) : [];
           const flagsToRemove = Array.isArray(args.flagsToRemove) ? (args.flagsToRemove as unknown[]).map(String) : [];
           if (flagsToAdd.length === 0 && flagsToRemove.length === 0) throw new McpError(ErrorCode.InvalidParams, "Provide flagsToAdd or flagsToRemove.");
+          ensureFlagChangeAllowed(config.runtime, flagsToAdd, flagsToRemove, normalizeBoolean(args.confirmed, false));
           // See move_thread's comment on scoping by the threadId's own
           // "<slug>::" prefix — same convention, same single-account
           // limitation.
@@ -6796,7 +6804,7 @@ export function createServer(
 
         case "delete_email": {
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${String(args.emailId ?? "?")} (cannot be recovered)`);
-          ensureMailboxWriteAllowed(config.runtime);
+          ensureEmailActionAllowed(config.runtime, "delete");
           const rawEmailId = requireString(args, "emailId");
           const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
