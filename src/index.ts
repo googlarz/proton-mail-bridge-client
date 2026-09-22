@@ -6476,7 +6476,7 @@ export function createServer(
         }
 
         case "delete_label": {
-          ensureMailboxWriteAllowed(config.runtime);
+          ensureEmailActionAllowed(config.runtime, "delete");
           const rawName = requireString(args, "name");
           if (!rawName.trim()) throw new McpError(ErrorCode.InvalidParams, "Label name cannot be empty.");
           const labelPath = rawName.startsWith("Labels/") ? rawName : `Labels/${rawName}`;
@@ -6531,7 +6531,7 @@ export function createServer(
           );
 
         case "delete_folder":
-          ensureMailboxWriteAllowed(config.runtime);
+          ensureEmailActionAllowed(config.runtime, "delete");
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args?.confirmed, false), "Permanently delete folder and all messages in it: " + requireString(args, "path"));
           return createTextResult(
             await withAudit(auditService, name, args, async () =>

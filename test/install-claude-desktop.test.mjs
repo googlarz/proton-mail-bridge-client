@@ -253,3 +253,34 @@ test("buildClaudeDesktopServerConfig resolves a stable Node command by default",
     Object.defineProperty(process, "execPath", { value: previousExecPath, configurable: true });
   }
 });
+
+// Found live: this file holds live Bridge credentials (PROTONMAIL_ACCOUNTS_JSON
+// etc. land in serverConfig.env), but was written with writeFile's default mode
+// (umask-dependent, typically world/group-readable) and its timestamped backup
+// with copyFile (same). Every other place in this codebase that persists a
+// secret (audit log, draft store, delivery queue, account marker) is 0o600 —
+// this was the one outlier.
+test("installClaudeDesktopConfig writes the config file, its directory, and any backup as 0o600/0o700", async () => {
+  const { installClaudeDesktopConfig } = await import("../dist/scripts/install-claude-desktop.js");
+  const { mkdtemp, stat, writeFile: wf, readdir } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const root = await mkdtemp(join(tmpdir(), "install-config-perms-"));
+  const configDir = join(root, "nested", "Claude");
+  const configPath = join(configDir, "claude_desktop_config.json");
+
+  // useRepoRuntime:true skips the runtime dist copy/npm install entirely — this
+  // test only cares about the config file's own permissions.
+  const first = await installClaudeDesktopConfig({ configPath, useRepoRuntime: true, includeEnv: false });
+  assert.equal((await stat(configPath)).mode & 0o777, 0o600, "config file must not be group/world-readable");
+  assert.equal((await stat(configDir)).mode & 0o777, 0o700, "config directory must not be group/world-readable");
+  assert.equal(first.backupPath, undefined, "no backup on first install (nothing existed yet)");
+
+  // Second install: a real .bak-<timestamp> is created from the existing config.
+  await wf(configPath, '{"stale":true}\n', "utf8"); // simulate a pre-existing world-readable file
+  const second = await installClaudeDesktopConfig({ configPath, useRepoRuntime: true, includeEnv: false });
+  assert.ok(second.backupPath, "a backup must be recorded on the second install");
+  assert.equal((await stat(second.backupPath)).mode & 0o777, 0o600, "the backup must not be group/world-readable either");
+  assert.ok((await readdir(configDir)).some((name) => name.startsWith("claude_desktop_config.json.bak-")));
+});

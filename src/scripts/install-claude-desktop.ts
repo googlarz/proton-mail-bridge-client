@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { constants as fsConstants, realpathSync } from "node:fs";
-import { access, copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -362,7 +362,13 @@ async function backupConfigIfPresent(configPath: string): Promise<string | undef
   try {
     await access(configPath, fsConstants.F_OK);
     const backupPath = `${configPath}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    // configPath holds live Bridge credentials (PROTONMAIL_ACCOUNTS_JSON etc.) —
+    // copyFile inherits the umask like a plain write, so without this the backup
+    // could land world/group-readable even though the file it's copied from is
+    // tightened below. Matches the 0o600 convention used everywhere else in this
+    // codebase that persists secrets (audit log, draft store, delivery queue).
     await copyFile(configPath, backupPath);
+    await chmod(backupPath, 0o600);
     return backupPath;
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
@@ -390,9 +396,12 @@ export async function installClaudeDesktopConfig(options: InstallOptions = {}): 
   });
   const merged = mergeClaudeDesktopConfig(existing, serverName, serverConfig);
 
-  await mkdir(dirname(configPath), { recursive: true });
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
   const backupPath = await backupConfigIfPresent(configPath);
-  await writeFile(configPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  // See backupConfigIfPresent's comment: this file holds live Bridge credentials.
+  await writeFile(configPath, `${JSON.stringify(merged, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  // writeFile's mode only applies to a newly created file; tighten an existing one too.
+  await chmod(configPath, 0o600);
 
   return {
     configPath,

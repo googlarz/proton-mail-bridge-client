@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.37] — 2026-09-22
+
+### Fixed
+- **`delete_folder`, `delete_label`, and the CLI's `move`/`delete`/`delete-folder` shortcuts never checked `PROTONMAIL_ALLOWED_ACTIONS`.** Same class of gap as 2.1.35: `delete_folder`/`delete_label` already required `confirmed:true` but only checked read-only mode, not the per-action allowlist — so excluding `"delete"` had no effect on either, even though they permanently delete a folder and every message in it. The CLI's `move`/`delete` commands had the identical gap (the CLI's `archive`/`trash`/`restore`/`mark-read`/`star` shortcuts already enforce this correctly).
+- **`claude_desktop_config.json` — which holds live Bridge credentials — and its install-time backup were written world/group-readable.** Every other place in this codebase that persists a secret (audit log, draft store, delivery queue, account marker) writes at `0o600`/`0o700`; the installer was the one outlier, using plain `writeFile`/`copyFile` with no mode. Now matches the rest of the codebase.
+
+### Added
+- Regression tests for all four: `test/flag-tool-action-policy.test.mjs` (`delete_folder`/`delete_label`), `test/cli-send-policy.test.mjs` (CLI `move`/`delete`/`delete-folder`), and `test/install-claude-desktop.test.mjs` (config file/directory/backup permissions).
+
 ## [2.1.36] — 2026-09-22
 
 ### Fixed

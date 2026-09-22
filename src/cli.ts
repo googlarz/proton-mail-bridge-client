@@ -825,7 +825,10 @@ async function runMove(parsed: ParsedCliArgs): Promise<void> {
   if (!targetFolder) throw new Error("move requires a target folder as a second argument or --folder");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, imapService, auditService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
+    // Same bypass as archive/trash/restore/mark-read/star's fix above — this
+    // called ensureMailboxWriteAllowed only, so PROTONMAIL_ALLOWED_ACTIONS
+    // excluding "move" had no effect on this shortcut.
+    ensureEmailActionAllowed(config.runtime, "move");
     // Found live: every write command in this file called the service
     // directly, so none of them ever produced an audit.log entry — unlike
     // the identical action through an MCP tool call, which withAudit always
@@ -913,7 +916,8 @@ async function runDelete(parsed: ParsedCliArgs): Promise<void> {
   if (!emailId) throw new Error("delete requires an emailId");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, imapService, auditService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
+    // Same PROTONMAIL_ALLOWED_ACTIONS bypass as runMove's fix above.
+    ensureEmailActionAllowed(config.runtime, "delete");
     // Found live: this called the service directly, bypassing the MCP
     // tool layer's ensureDestructiveConfirmed entirely — with
     // PROTONMAIL_CONFIRM_DESTRUCTIVE=true, `tool delete_email` correctly
@@ -1113,8 +1117,8 @@ async function runDeleteFolder(parsed: ParsedCliArgs): Promise<void> {
   if (!path) throw new Error("delete-folder requires a path argument");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, imapService, auditService }) => {
-    ensureMailboxWriteAllowed(config.runtime);
     // Same bypass as runDelete's identical gap — see its comment.
+    ensureEmailActionAllowed(config.runtime, "delete");
     ensureDestructiveConfirmed(config.runtime, isTruthyFlag(parsed.flags.confirmed), `Permanently delete folder and all messages in it: ${path}`);
     const result = await withAudit(auditService, "delete_folder", { path }, () => imapService.deleteFolder(path));
     process.stdout.write(wantJson ? json(result) : `Deleted folder: ${result.path}\n`);

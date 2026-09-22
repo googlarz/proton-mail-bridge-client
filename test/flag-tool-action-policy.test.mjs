@@ -106,3 +106,26 @@ test("update_message_flags with only allowed, non-mapped flags reaches past the 
     );
   });
 });
+
+// Found live: delete_folder and delete_label already required confirmed:true
+// but, like the destructive tools above, only checked ensureMailboxWriteAllowed
+// — never ensureEmailActionAllowed — so PROTONMAIL_ALLOWED_ACTIONS excluding
+// "delete" had no effect on either, even though delete_folder/delete_label
+// permanently delete a folder and every message in it.
+test("delete_folder rejects when 'delete' is not in PROTONMAIL_ALLOWED_ACTIONS", async () => {
+  await withServer({}, async (client) => {
+    await assert.rejects(
+      client.callTool({ name: "delete_folder", arguments: { path: "Folders/Old", confirmed: true } }),
+      /disabled by the current runtime policy/i,
+    );
+  });
+});
+
+test("delete_label rejects when 'delete' is not in PROTONMAIL_ALLOWED_ACTIONS", async () => {
+  await withServer({}, async (client) => {
+    await assert.rejects(
+      client.callTool({ name: "delete_label", arguments: { name: "Old", confirmed: true } }),
+      /disabled by the current runtime policy/i,
+    );
+  });
+});

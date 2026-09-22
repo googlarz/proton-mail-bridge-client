@@ -16,3 +16,26 @@ test("CLI reply/forward delegate to the MCP handlers instead of calling SMTP dir
   assert.match(replyBody, /name: "reply_to_email"/);
   assert.match(forwardBody, /name: "forward_email"/);
 });
+
+// Found live: archive/trash/restore/mark-read/star already call
+// ensureEmailActionAllowed (each pinned with its own comment in cli.ts), but
+// move and delete still called ensureMailboxWriteAllowed only — so
+// PROTONMAIL_ALLOWED_ACTIONS excluding "move"/"delete" had no effect on
+// these two CLI shortcuts, even though the matching MCP tools (move_email,
+// delete_email) enforce it. Same gap for delete-folder vs delete_folder/
+// delete_label. Structural check, same style as the reply/forward test
+// above: no server is spun up here, this pins that the right gate is wired
+// into the right command.
+test("CLI move/delete/delete-folder call ensureEmailActionAllowed, not just ensureMailboxWriteAllowed", async () => {
+  const source = await readFile(new URL("../dist/cli.js", import.meta.url), "utf8");
+  const body = (start, end) => source.slice(source.indexOf(start), source.indexOf(end));
+
+  const moveBody = body("async function runMove", "async function runArchive");
+  assert.match(moveBody, /ensureEmailActionAllowed\(config\.runtime, "move"\)/);
+
+  const deleteBody = body("async function runDelete", "async function runSend");
+  assert.match(deleteBody, /ensureEmailActionAllowed\(config\.runtime, "delete"\)/);
+
+  const deleteFolderBody = source.slice(source.indexOf("async function runDeleteFolder"));
+  assert.match(deleteFolderBody, /ensureEmailActionAllowed\(config\.runtime, "delete"\)/);
+});
