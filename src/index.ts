@@ -468,7 +468,7 @@ const TOOLS = [
   },
   {
     name: "list_drafts",
-    description: "List all locally saved drafts with their status, subject, and timestamps. Attachment content is omitted here (filename/type/size only) — use get_draft for the full attachment content of one draft. Each draft's body is also truncated to a short preview (bodyTruncated:true, bodyLength gives the real size) — use get_draft for the full body of one draft. Use to review in-progress or unsent messages. Does NOT list drafts stored only on the Proton server — use list_remote_drafts for those. Prefer get_draft when you already have a draftId and need the full content.",
+    description: "List all locally saved drafts with their status, subject, and timestamps. Does NOT list drafts stored only on the Proton server — use list_remote_drafts for those. Prefer get_draft when you already have a draftId and need the full content. Attachment content is omitted here (filename/type/size only) — use get_draft for the full attachment content of one draft. Each draft's body is also truncated to a short preview (bodyTruncated:true, bodyLength gives the real size) — use get_draft for the full body of one draft. Use to review in-progress or unsent messages.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -939,7 +939,7 @@ const TOOLS = [
   },
   {
     name: "update_message_labels",
-    description: "Add or remove Proton labels on a single message without moving it. Labels live under the Labels/ namespace (e.g. 'Labels/Work'). Use for one message at a time. Prefer bulk_update_labels to apply label changes across multiple messages. Create missing labels first with create_folder using a 'Labels/' prefix.",
+    description: "Add or remove Proton labels on a single message without moving it. Prefer bulk_update_labels to apply label changes across multiple messages. Labels live under the Labels/ namespace (e.g. 'Labels/Work'). Use for one message at a time. Create missing labels first with create_folder using a 'Labels/' prefix.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -961,7 +961,7 @@ const TOOLS = [
   },
   {
     name: "update_message_flags",
-    description: "Add or remove arbitrary IMAP flags on a single message, then verify the server applied them. Returns notApplied[] listing flags the server silently dropped. Use for custom IMAP flags (e.g. \\\\Answered) or when mark_email_read / star_email don't cover the flag you need. Prefer bulk_update_flags to update flags across multiple messages at once. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/delete_email: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
+    description: "Add or remove arbitrary IMAP flags on a single message, then verify the server applied them. Prefer bulk_update_flags to update flags across multiple messages at once. Returns notApplied[] listing flags the server silently dropped. Use for custom IMAP flags (e.g. \\\\Answered) or when mark_email_read / star_email don't cover the flag you need. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/delete_email: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1019,7 +1019,7 @@ const TOOLS = [
   },
   {
     name: "empty_folder",
-    description: "Permanently delete ALL messages in a folder at once. Use only when the goal is to clear an entire folder (e.g. emptying Trash or Spam). Only available when PROTONMAIL_ALLOW_EMPTY_FOLDER=true. Irreversible. Prefer bulk_delete when removing a subset of messages rather than everything in the folder.",
+    description: "Permanently delete ALL messages in a folder at once. Prefer bulk_delete when removing a subset of messages rather than everything in the folder. Use only when the goal is to clear an entire folder (e.g. emptying Trash or Spam). Only available when PROTONMAIL_ALLOW_EMPTY_FOLDER=true. Irreversible.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -1049,7 +1049,7 @@ const TOOLS = [
   },
   {
     name: "bulk_delete",
-    description: "Delete multiple emails by explicit ID list or by search criteria (from/subject/date/flags). Use when you have specific IDs to delete or want to filter by sender, subject, or date range. Accepts emailIds[] OR match criteria (XOR). permanent:true permanently expunges; false moves to Trash. Use dryRun to preview. Prefer empty_folder to clear an entire folder. Prefer delete_email for a single message. Prefer batch_email_action when the same set of IDs needs a mix of actions, not just deletion.",
+    description: "Delete multiple emails by explicit ID list or by search criteria (from/subject/date/flags). Prefer empty_folder to clear an entire folder. Prefer delete_email for a single message. Prefer batch_email_action when the same set of IDs needs a mix of actions, not just deletion. Use when you have specific IDs to delete or want to filter by sender, subject, or date range. Accepts emailIds[] OR match criteria (XOR). permanent:true permanently expunges; false moves to Trash. Use dryRun to preview.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -1066,7 +1066,7 @@ const TOOLS = [
   },
   {
     name: "bulk_update_flags",
-    description: "Add or remove IMAP flags on multiple messages simultaneously. Use when the same flag change (e.g. \\\\Seen, \\\\Flagged) should apply to several messages. Accepts emailIds[] OR match+folder (XOR). Returns notApplied[] per message for flags the server silently dropped. Prefer update_message_flags for a single message when you need per-flag server verification. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/bulk_delete: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
+    description: "Add or remove IMAP flags on multiple messages simultaneously. Prefer update_message_flags for a single message when you need per-flag server verification. Use when the same flag change (e.g. \\\\Seen, \\\\Flagged) should apply to several messages. Accepts emailIds[] OR match+folder (XOR). Returns notApplied[] per message for flags the server silently dropped. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/bulk_delete: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1203,7 +1203,7 @@ const TOOLS = [
   },
   {
     name: "batch_email_action",
-    description: "Apply one action to a known list of email IDs in a single IMAP pass. Use when you already have the IDs and want to archive, trash, move, mark-read/unread, star/unstar, restore, or permanently delete them. Actions: mark_read, mark_unread, star, unstar, archive, trash, restore, move (requires targetFolder), delete (permanent expunge). Supports dryRun. Prefer bulk_delete when selecting messages by search criteria (from/subject/date) rather than by ID. Prefer apply_thread_action when acting on a thread by threadId. Prefer empty_folder to clear an entire folder.",
+    description: "Apply one action to a known list of email IDs in a single IMAP pass. Prefer bulk_delete when selecting messages by search criteria (from/subject/date) rather than by ID. Prefer apply_thread_action when acting on a thread by threadId. Prefer empty_folder to clear an entire folder. Use when you already have the IDs and want to archive, trash, move, mark-read/unread, star/unstar, restore, or permanently delete them. Actions: mark_read, mark_unread, star, unstar, archive, trash, restore, move (requires targetFolder), delete (permanent expunge). Supports dryRun.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",

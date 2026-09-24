@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.38] — 2026-09-24
+
+### Changed
+- **Tool descriptions: moved the "Prefer X" disambiguation sentence earlier for the 7 tools where it was buried at the very end of a long description** (`list_drafts`, `empty_folder`, `bulk_delete`, `bulk_update_flags`, `update_message_labels`, `update_message_flags`, `batch_email_action`) — a model skimming a long description is more likely to miss which sibling tool it should have picked when that sentence is last rather than near the front. Text-only; no behavior, schema, or tool-name change. The other ~45 tools with a "Prefer X" sentence already have it in the first 1–2 sentences and are unchanged — this was a targeted fix for the outliers, not a rewrite of the whole file's established style.
+
 ## [2.1.37] — 2026-09-22
 
 ### Fixed
