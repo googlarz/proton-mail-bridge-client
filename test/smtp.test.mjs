@@ -548,3 +548,58 @@ test("buildRawMessage still strips CSS url(), remote images, and non-raster data
   assert.ok(!message.includes("svg+xml") && !message.includes("text/html;base64"), "non-raster data: URIs must be dropped");
   assert.ok(message.includes("color:red"), "harmless style still kept");
 });
+
+test("buildRawMessage strips an embedded newline used to defeat the url()/expression() lookahead", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["a@example.com"],
+    subject: "Newline bypass",
+    body: "fallback",
+    isHtml: true,
+    htmlBody: '<div style="border:1px solid\nurl(evil)">x</div>',
+  });
+  const message = raw.toString("utf8").replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+  assert.ok(!message.includes("url(evil)"), "newline must not defeat the NO_URL lookahead");
+});
+
+test("buildRawMessage strips a CRLF used to defeat the url()/expression() lookahead", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["a@example.com"],
+    subject: "CRLF bypass",
+    body: "fallback",
+    isHtml: true,
+    htmlBody: '<div style="border:1px solid\r\nurl(evil)">x</div>',
+  });
+  const message = raw.toString("utf8").replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+  assert.ok(!message.includes("url(evil)"), "CRLF must not defeat the NO_URL lookahead");
+});
+
+test("buildRawMessage still keeps a legitimate multi-word border value with no embedded newline", async () => {
+  const service = new SMTPService(createConfig());
+  const raw = await service.buildRawMessage({
+    to: ["a@example.com"],
+    subject: "Legit border",
+    body: "fallback",
+    isHtml: true,
+    htmlBody: '<div style="border:1px solid #cc0000">x</div>',
+  });
+  const message = raw.toString("utf8").replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+  assert.ok(message.includes("border:1px solid #cc0000"), "legitimate border value must still survive");
+});
+
+test("buildRawMessage strips an oversized inline data:image but keeps one under the limit", async () => {
+  const service = new SMTPService(createConfig());
+  const oversized = `data:image/png;base64,${Buffer.alloc(513 * 1024).toString("base64")}`;
+  const smallLogo = "data:image/png;base64,iVBORw0KGgo=";
+  const raw = await service.buildRawMessage({
+    to: ["a@example.com"],
+    subject: "Inline image size",
+    body: "fallback",
+    isHtml: true,
+    htmlBody: `<img src="${oversized}" alt="big"><img src="${smallLogo}" alt="small">`,
+  });
+  const message = raw.toString("utf8").replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+  assert.ok(!message.includes(oversized), "oversized data:image must be stripped");
+  assert.ok(message.includes(smallLogo), "small data:image logo under the limit must still survive");
+});

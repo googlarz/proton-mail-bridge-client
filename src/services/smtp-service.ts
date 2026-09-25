@@ -8,7 +8,17 @@ import { logger } from "../utils/logger.js";
 
 const DATA_IMAGE_SRC = /^data:image\/(png|jpe?g|gif);base64,[a-z0-9+/=\s]+$/i;
 
-const NO_URL = "(?!.*(url|expression))";
+// A real signature logo is a small, roughly-square raster icon; 512KB decoded is
+// generous for that while still bounding worst-case abuse (a prompt-injected
+// multi-MB image inflating the outbound MIME message).
+const MAX_INLINE_DATA_IMAGE_BYTES = 512 * 1024;
+
+// [\s\S] instead of "." so the lookahead scans the WHOLE value even when it
+// contains a raw newline — JS regex "." does not match "\n" without the "s"
+// flag, so a value like "1px solid\nurl(evil)" would otherwise defeat this
+// lookahead (it only saw up to the first newline) while still matching
+// BORDER's character class (which includes \s, i.e. matches \n).
+const NO_URL = "(?![\\s\\S]*(url|expression))";
 const COLOR = /^(#[0-9a-f]{3,8}|rgba?\([\d\s,.%]+\)|[a-z]+)$/i;
 const LENGTH = new RegExp(`^${NO_URL}[\\w\\s.%-]+$`, "i");
 const FONT_FAMILY = /^[\w\s,'"-]+$/;
@@ -309,8 +319,17 @@ export class SMTPService {
       // request, but only raster image types are accepted (no svg/html payloads).
       transformTags: {
         img: (tagName, attribs) => {
-          if (/^data:/i.test(attribs.src ?? "") && !DATA_IMAGE_SRC.test(attribs.src)) {
-            delete attribs.src;
+          const src = attribs.src ?? "";
+          if (/^data:/i.test(src)) {
+            if (!DATA_IMAGE_SRC.test(src)) {
+              delete attribs.src;
+            } else {
+              const base64 = src.slice(src.indexOf(",") + 1);
+              const decodedBytes = Math.floor(base64.length * 0.75);
+              if (decodedBytes > MAX_INLINE_DATA_IMAGE_BYTES) {
+                delete attribs.src;
+              }
+            }
           }
           return { tagName, attribs };
         },

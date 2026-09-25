@@ -82,9 +82,9 @@ export function ensureMailboxWriteAllowed(runtime: ProtonRuntimeConfig): void {
 }
 
 // Shared by every outbound-send path (send_email, reply/reply-all/forward,
-// unsubscribe_sender, and the delivery queue's fire-time re-check) so
-// RESTRICT_OUTBOUND_TO_SELF can't be bypassed by adding a new send path and
-// forgetting the inline check.
+// send_draft, schedule_draft, unsubscribe_sender, send_test_email, and the
+// delivery queue's fire-time re-check) so RESTRICT_OUTBOUND_TO_SELF can't be
+// bypassed by adding a new send path and forgetting the inline check.
 export function ensureOutboundRecipientsAllowed(
   runtime: ProtonRuntimeConfig,
   selfAddress: string,

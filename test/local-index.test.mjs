@@ -2637,3 +2637,95 @@ test("recordSnapshot with folderListComplete:true prunes a folder removed from t
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+// Regression test: getFolders() returns whatever the IMAP LIST response
+// contains with no validation, so a successful-but-empty response (plausible
+// during a reconnect/transient degraded state) can still arrive here with
+// folderListComplete:true. That must never be read as "confirmed complete
+// and every previously-indexed folder is gone" — it's indistinguishable from
+// a degenerate response, and treating it as authoritative would wipe the
+// entire local index in one transaction with no real folder deletion having
+// happened.
+test("recordSnapshot with folderListComplete:true but an empty folders array prunes nothing", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-index-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const inboxFolder = { path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 };
+  const archiveFolder = { path: "Archive", name: "Archive", delimiter: "/", specialUse: "\\Archive", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 };
+  const archiveEmail = {
+    id: "Archive::1", folder: "Archive", uid: 1, seq: 1, messageId: "<a@example.com>", subject: "Old",
+    from: [{ address: "alice@example.com" }], to: [{ address: "owner@example.com" }], cc: [], bcc: [], replyTo: [],
+    date: "2026-01-01T00:00:00.000Z", internalDate: "2026-01-01T00:00:00.000Z", isRead: true, isStarred: false,
+    flags: [], preview: "Old note", hasAttachments: false, attachments: [], labels: [],
+  };
+
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-01-01T00:00:00.000Z",
+      folders: [inboxFolder, archiveFolder],
+      folderListComplete: true,
+      folderStats: [{ folder: "INBOX", fetched: 0, total: 1 }, { folder: "Archive", fetched: 1, total: 1 }],
+      emails: [archiveEmail],
+    });
+    assert.equal((await service.getStatus()).folders.some((f) => f.path === "Archive"), true, "Archive must be indexed after the first snapshot");
+
+    // A degenerate response: folderListComplete:true but folders is empty.
+    await service.recordSnapshot({
+      syncedAt: "2026-01-01T00:05:00.000Z",
+      folders: [],
+      folderListComplete: true,
+      folderStats: [],
+      emails: [],
+    });
+
+    const status = await service.getStatus();
+    assert.equal(status.folders.some((f) => f.path === "INBOX"), true, "INBOX must survive an empty-but-complete folder list");
+    assert.equal(status.folders.some((f) => f.path === "Archive"), true, "Archive must survive an empty-but-complete folder list");
+    assert.equal((await service.listRecentMessages(10)).some((m) => m.folder === "Archive"), true, "Archive's messages must not be pruned by an empty folder list");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+// Regression test: recordSnapshot is called from BackgroundSyncService and
+// from the manual sync_emails MCP tool with no mutual exclusion. Two
+// concurrent recordSnapshot calls must not interleave their DB writes; the
+// final state must exactly match one call's complete outcome, never a mix.
+test("concurrent recordSnapshot calls are serialized, not interleaved", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-index-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+
+  const folderX = { path: "FolderX", name: "FolderX", delimiter: "/", specialUse: null, listed: true, subscribed: true, flags: [], messages: 0, unseen: 0 };
+  const folderY = { path: "FolderY", name: "FolderY", delimiter: "/", specialUse: null, listed: true, subscribed: true, flags: [], messages: 0, unseen: 0 };
+
+  const snapshotA = {
+    syncedAt: "2026-01-01T00:00:00.000Z",
+    folders: [folderX],
+    folderListComplete: true,
+    folderStats: [{ folder: "FolderX", fetched: 0, total: 0 }],
+    emails: [],
+  };
+  const snapshotB = {
+    syncedAt: "2026-01-01T00:00:01.000Z",
+    folders: [folderY],
+    folderListComplete: true,
+    folderStats: [{ folder: "FolderY", fetched: 0, total: 0 }],
+    emails: [],
+  };
+
+  try {
+    await Promise.all([service.recordSnapshot(snapshotA), service.recordSnapshot(snapshotB)]);
+
+    const status = await service.getStatus();
+    const paths = status.folders.map((f) => f.path).sort();
+    const isSnapshotAResult = paths.length === 1 && paths[0] === "FolderX";
+    const isSnapshotBResult = paths.length === 1 && paths[0] === "FolderY";
+    assert.equal(
+      isSnapshotAResult || isSnapshotBResult,
+      true,
+      `final folder set must match exactly one snapshot's outcome, got: ${JSON.stringify(paths)}`,
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

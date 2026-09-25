@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.39] — 2026-09-25
+
+Found by a dedicated audit pass this session (5 parallel review agents plus a live read-only Bridge smoke test) after 2.1.35–2.1.38 shipped, before any further release.
+
+### Fixed
+- **`PROTONMAIL_READ_ONLY` did not block local draft or template writes.** `create_draft`, `create_reply_draft`, `create_forward_draft`, `update_draft`, `delete_draft`, `create_template`, `delete_template` only gated the *remote* sync/delete side; the local write itself had no read-only check. Also `cancel_send`, `clear_cache`, `clear_index`, which had no policy gate of any kind.
+- **6 of 9 outbound-send paths (`send_email`, `reply_to_email`, `reply_all_email`, `forward_email`, `send_draft`, `schedule_draft`) hand-rolled their own `RESTRICT_OUTBOUND_TO_SELF` check instead of the shared `ensureOutboundRecipientsAllowed`.** The inline copies did exact-match only, so a self-send to `you+tag@yourdomain` was wrongly rejected as external by these 6 paths (the shared helper's `isSelfAddress()` correctly normalizes `+tag` aliases). Also fixes `send_draft`'s stale IMAP-vs-SMTP-username comparison in a multi-account setup that its own code comment had flagged. All 6 now consistently use the sending account's own address, not always the primary account's.
+- **A successful-but-empty folder list could wipe the entire local index.** `recordSnapshot`'s folder-pruning (added 2.1.36) treated any `folderListComplete:true` call as authoritative, including an empty `folders: []` — plausible during a Bridge reconnect/transient state, not reproduced live but structurally reachable. Now requires `folders.length > 0` before pruning anything.
+- **`recordSnapshot` had no lock between the manual `sync_emails` tool call and background sync.** Two full snapshot cycles could race at the DB-write level, with whichever transaction committed second silently overwriting fresher data with a stale view. Now serialized per `LocalIndexService` instance (per-account) via an internal promise queue — this makes write ordering deterministic; it does not eliminate staleness from two concurrent network fetches racing before either write happens.
+- **A newline in a CSS value defeated the sanitizer's `NO_URL` guard.** `border:1px solid\nurl(evil)` survived sanitization verbatim — JS regex `.` doesn't match `\n`, so the lookahead only scanned up to the first line. Not currently exploitable for exfiltration (no url-fetching CSS property is in the current allowlist), but violated the sanitizer's own documented guarantee and would become one the moment a property like `background-image` is ever added the same way. Fixed at the shared `NO_URL` definition.
+- **No size limit on inline `data:` image logos in outbound HTML**, allowing a multi-MB inline image (e.g. via a prompt-injected signature) into an outbound message with nothing bounding it. Capped at 512KB decoded — generous for a real signature logo.
+- **Documented (not fixed — accepted tradeoff):** a folder renamed server-side between two syncs is indistinguishable from delete+recreate given only a before/after folder-path list, so it loses its sync checkpoint and forces a full re-sync rather than being detected as a rename.
+
+### Added
+- `test/read-only-local-writes.test.mjs` (10 tests): drives the real MCP handlers end-to-end proving each of the 7 read-only draft/template gaps and 3 zero-gate tools now reject under `readOnly:true` and still work under `readOnly:false`.
+- `test/outbound-restriction-consolidation.test.mjs`: proves all 6 consolidated send paths now correctly allow a `+tag` self-send.
+- Two new tests in `test/local-index.test.mjs`: empty-folder-list-does-not-prune, and concurrent `recordSnapshot` calls are serialized rather than interleaved.
+- Four new tests in `test/smtp.test.mjs`: the newline `NO_URL` bypass (and its `\r\n` variant, plus a negative control), and the oversized/normal `data:` image size cap.
+
+
 ## [2.1.38] — 2026-09-24
 
 ### Changed

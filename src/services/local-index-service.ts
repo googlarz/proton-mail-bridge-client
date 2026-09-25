@@ -592,6 +592,20 @@ export class LocalIndexService {
   private readonly legacyIndexPath: string;
   private db?: Database.Database;
   private initialized = false;
+  // Serializes this instance's own recordSnapshot DB writes against each
+  // other: recordSnapshot is called from BackgroundSyncService.runNow()
+  // (which already serializes ITS OWN concurrent calls via activeRun) and,
+  // separately, from the manual sync_emails MCP tool with no lock between
+  // the two call sites. Each queued call awaits the previous one's promise
+  // before running, so applySnapshot transactions never interleave and the
+  // last one to commit is the last one to have STARTED its write, not
+  // whichever happened to finish first. This does NOT prevent staleness
+  // from the async network fetch (collectEmailsForIndex) that happens in
+  // the caller BEFORE recordSnapshot is invoked — two fetches can still
+  // race, and a fetch that started earlier can still queue its write after
+  // a fetch that started later and already committed fresher data. This
+  // lock only makes the DB-write ordering deterministic, not the data current.
+  private snapshotQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -613,10 +627,17 @@ export class LocalIndexService {
     syncedAt: string;
     folderStats: Array<MailboxSyncCheckpoint>;
   }): Promise<LocalIndexStatus> {
-    const db = await this.ensureDb();
-    const ownerEmail = lowerCaseAddress(this.config.smtp.username);
-    this.applySnapshot(db, input, ownerEmail, input.folderStats.some((entry) => entry.strategy === "full"));
-    return this.getStatus();
+    const run = this.snapshotQueue.then(async () => {
+      const db = await this.ensureDb();
+      const ownerEmail = lowerCaseAddress(this.config.smtp.username);
+      this.applySnapshot(db, input, ownerEmail, input.folderStats.some((entry) => entry.strategy === "full"));
+      return this.getStatus();
+    });
+    // Keep chaining even if this call rejects, so a failed snapshot doesn't
+    // wedge the queue for every call queued after it; the caller still sees
+    // the original rejection via the returned/awaited `run` promise.
+    this.snapshotQueue = run.catch(() => undefined);
+    return run;
   }
 
   async getStatus(): Promise<LocalIndexStatus> {
@@ -1854,7 +1875,27 @@ export class LocalIndexService {
       // folder's messages, FTS rows and sync checkpoint stayed in the local
       // index forever, inflating folder_stats/analytics with a folder that
       // no longer exists, since nothing else ever pruned the `folders` table.
-      if (input.folderListComplete) {
+      //
+      // `folders.length > 0` is also required: getFolders() returns whatever
+      // the IMAP LIST response contains with no validation, so a successful
+      // but empty response (plausible during a reconnect/transient degraded
+      // state at the server) would still arrive here with folderListComplete
+      // true. An empty list is indistinguishable from "the server briefly
+      // returned nothing" and must never be read as "confirmed complete and
+      // every previously-known folder is gone" — treating it that way would
+      // prune every stored folder, message, FTS row and sync checkpoint in
+      // one transaction, a full local-index wipe with no real folder
+      // deletion having happened.
+      //
+      // Known, accepted tradeoff (not a bug): a folder renamed server-side
+      // between two complete-list syncs looks identical to delete+recreate
+      // here — old-path-missing plus new-path-present in the same snapshot.
+      // The old path gets pruned (losing its sync checkpoint and all
+      // message read/starred/label state) and the new path starts fresh
+      // with a full re-sync. Renames aren't distinguishable from
+      // delete+recreate given only a before/after folder-path list, so this
+      // is left as-is rather than attempting rename detection.
+      if (input.folderListComplete && input.folders.length > 0) {
         const currentPaths = new Set(input.folders.map((folder) => folder.path));
         for (const stored of listStoredFolderPaths.all() as Array<{ path: string }>) {
           if (currentPaths.has(stored.path)) continue;

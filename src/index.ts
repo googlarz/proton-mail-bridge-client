@@ -4208,15 +4208,14 @@ export function createServer(
           // dryRun: preview without sending
           const dryRunSend = normalizeBoolean(args.dryRun, false);
 
-          // RESTRICT_OUTBOUND_TO_SELF check
-          if (config.runtime.restrictOutboundToSelf) {
-            const selfAddr = config.smtp.username.toLowerCase();
-            const allR = [...to, ...(cc ?? []), ...(bcc ?? [])];
-            const ext = allR.filter(r => r.toLowerCase() !== selfAddr);
-            if (ext.length > 0) {
-              throw new McpError(ErrorCode.InvalidParams, `RESTRICT_OUTBOUND_TO_SELF is enabled. Cannot send to: ${ext.join(", ")}`);
-            }
-          }
+          // RESTRICT_OUTBOUND_TO_SELF check — shared helper so a self-send to
+          // "you+tag@..." isn't wrongly rejected (see its comment in runtime-policy.ts).
+          // `from`'s own account (if any) is the correct "self" for a multi-account send.
+          ensureOutboundRecipientsAllowed(
+            config.runtime,
+            (from ? accountManager.byAddress(from)?.config.smtp.username : undefined) ?? config.smtp.username,
+            [...to, ...(cc ?? []), ...(bcc ?? [])],
+          );
 
           if (dryRunSend) {
             return createTextResult({ dryRun: true, wouldSendTo: { to, cc: cc ?? [], bcc: bcc ?? [] }, subject, note: "No email was sent." });
@@ -4303,6 +4302,9 @@ export function createServer(
         }
 
         case "cancel_send": {
+          // Zero policy gate: canceling a queued send mutates local delivery-queue
+          // state, but nothing here ever checked read-only mode.
+          ensureMailboxWriteAllowed(config.runtime);
           // The queue id carries an account-slug prefix when the item was enqueued
           // through a non-primary account (see send_email/schedule_draft) — resolve
           // it back to that account's own deliveryQueueService, same as an
@@ -4495,14 +4497,9 @@ export function createServer(
             ? buildReplyHtml(detail, signedReply.htmlBody)
             : signedReply.htmlBody;
 
-          if (config.runtime.restrictOutboundToSelf) {
-            const selfAddr = config.smtp.username.toLowerCase();
-            const allR = [...to, ...cc, ...extraBcc];
-            const ext = allR.filter(r => r.toLowerCase() !== selfAddr);
-            if (ext.length > 0) {
-              throw new McpError(ErrorCode.InvalidParams, `RESTRICT_OUTBOUND_TO_SELF is enabled. Cannot send to: ${ext.join(", ")}`);
-            }
-          }
+          // Shared helper, and the sending account's own address as "self" —
+          // see send_email's comment.
+          ensureOutboundRecipientsAllowed(config.runtime, sendBundleForReply.config.smtp.username, [...to, ...cc, ...extraBcc]);
 
           if (dryRunReply) {
             return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc: extraBcc }, subject: prefixedSubject(detail.subject, "Re:"), note: "No email was sent." }, false, [emailSource({ ...detail, id: prefixedIdFor(readBundleReply, detail.id) })]);
@@ -4590,14 +4587,9 @@ export function createServer(
           }
 
           const dryRunRa = normalizeBoolean(args.dryRun, false);
-          if (config.runtime.restrictOutboundToSelf) {
-            const selfAddr = config.smtp.username.toLowerCase();
-            const allR = [...toRa, ...ccRa, ...extraBccRa];
-            const ext = allR.filter(r => r.toLowerCase() !== selfAddr);
-            if (ext.length > 0) {
-              throw new McpError(ErrorCode.InvalidParams, `RESTRICT_OUTBOUND_TO_SELF is enabled. Cannot send to: ${ext.join(", ")}`);
-            }
-          }
+          // Shared helper, and the sending account's own address as "self" —
+          // see send_email's comment.
+          ensureOutboundRecipientsAllowed(config.runtime, sendBundleForRa.config.smtp.username, [...toRa, ...ccRa, ...extraBccRa]);
           if (dryRunRa) {
             return createTextResult({ dryRun: true, wouldSendTo: { to: toRa, cc: ccRa, bcc: extraBccRa }, subject: prefixedSubject(detailRa.subject, "Re:"), note: "No email was sent." });
           }
@@ -4701,14 +4693,9 @@ export function createServer(
           ensureValidEmails(bcc, "bcc");
 
           const dryRunFwd = normalizeBoolean(args.dryRun, false);
-          if (config.runtime.restrictOutboundToSelf) {
-            const selfAddr = config.smtp.username.toLowerCase();
-            const allR = [...to, ...cc, ...bcc];
-            const ext = allR.filter(r => r.toLowerCase() !== selfAddr);
-            if (ext.length > 0) {
-              throw new McpError(ErrorCode.InvalidParams, `RESTRICT_OUTBOUND_TO_SELF is enabled. Cannot send to: ${ext.join(", ")}`);
-            }
-          }
+          // Shared helper, and the sending account's own address as "self" —
+          // see send_email's comment.
+          ensureOutboundRecipientsAllowed(config.runtime, sendBundleForFwd.config.smtp.username, [...to, ...cc, ...bcc]);
           if (dryRunFwd) {
             return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc }, subject: prefixedSubject(detail.subject, "Fwd:"), note: "No email was sent." });
           }
@@ -4787,6 +4774,9 @@ export function createServer(
         }
 
         case "create_draft": {
+          // Local draft write — was only gated on the remote-sync side, so
+          // PROTONMAIL_READ_ONLY never actually stopped a local draft being created.
+          ensureMailboxWriteAllowed(config.runtime);
           const to = parseEmails(optionalString(args, "to"));
           const cc = parseEmails(optionalString(args, "cc"));
           const bcc = parseEmails(optionalString(args, "bcc"));
@@ -4882,6 +4872,8 @@ export function createServer(
         }
 
         case "create_reply_draft": {
+          // Local draft write — same gap as create_draft, see its comment.
+          ensureMailboxWriteAllowed(config.runtime);
           // emailId carries the same "<slug>::" account prefix as everywhere else —
           // this previously always read via the PRIMARY account's imapService
           // regardless of that prefix, so replying to a non-primary account's email
@@ -4993,6 +4985,8 @@ export function createServer(
         }
 
         case "create_forward_draft": {
+          // Local draft write — same gap as create_draft, see its comment.
+          ensureMailboxWriteAllowed(config.runtime);
           // Same emailId account resolution as create_reply_draft — see its comment.
           const { bundle: createForwardReadBundle, rest: createForwardEmailIdRest } = resolveAccountForEmailId(
             requireString(args, "emailId"),
@@ -5188,6 +5182,8 @@ export function createServer(
         }
 
         case "update_draft": {
+          // Local draft write — same gap as create_draft, see its comment.
+          ensureMailboxWriteAllowed(config.runtime);
           const { bundle: updateDraftBundle, rest: updateDraftIdRest } = resolveAccountForDraftId(
             requireString(args, "draftId"),
           );
@@ -5409,20 +5405,10 @@ export function createServer(
           if (draft.replyTo && !isValidEmail(draft.replyTo)) {
             throw new McpError(ErrorCode.InvalidParams, "replyTo must be a valid email address.");
           }
-          if (config.runtime.restrictOutboundToSelf) {
-            const allRecipients = [...draft.to, ...draft.cc, ...draft.bcc];
-            // Found live: with PROTONMAIL_IMAP_USERNAME set to a different
-            // address than the account's send identity, this compared
-            // recipients against the IMAP login instead — rejecting mail to
-            // the real self as "external" (and, the other way round, would
-            // let mail to that IMAP-only address through as if it were
-            // self). Every other RESTRICT_OUTBOUND_TO_SELF check in this
-            // file already uses smtp.username, since that's the identity
-            // mail actually sends as; this was the one inconsistent copy.
-            const selfAddr = config.smtp.username.toLowerCase();
-            const external = allRecipients.filter(r => r.toLowerCase() !== selfAddr);
-            if (external.length > 0) throw new McpError(ErrorCode.InvalidParams, "PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF is enabled. All recipients must be the authenticated user.");
-          }
+          // Shared helper, and the sending account's own address as "self" —
+          // see send_email's comment. isSelfAddress also fixes the IMAP-vs-SMTP
+          // username mismatch the old inline check's comment warned about.
+          ensureOutboundRecipientsAllowed(config.runtime, sendBundleForDraft.config.smtp.username, [...draft.to, ...draft.cc, ...draft.bcc]);
 
           if (normalizeBoolean(args.dryRun, false)) {
             return createTextResult({
@@ -5640,13 +5626,9 @@ export function createServer(
           if (draft.replyTo && !isValidEmail(draft.replyTo)) {
             throw new McpError(ErrorCode.InvalidParams, "replyTo must be a valid email address.");
           }
-          if (config.runtime.restrictOutboundToSelf) {
-            const allRecipients = [...draft.to, ...draft.cc, ...draft.bcc];
-            // Same fix as send_draft's identical check — see its comment.
-            const selfAddr = config.smtp.username.toLowerCase();
-            const external = allRecipients.filter((r) => r.toLowerCase() !== selfAddr);
-            if (external.length > 0) throw new McpError(ErrorCode.InvalidParams, "PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF is enabled. All recipients must be the authenticated user.");
-          }
+          // Shared helper, and the sending account's own address as "self" —
+          // see send_draft's identical fix.
+          ensureOutboundRecipientsAllowed(config.runtime, sendBundleForScheduleDraft.config.smtp.username, [...draft.to, ...draft.cc, ...draft.bcc]);
 
           const queued = await withAudit(auditService, name, args, async () =>
             sendBundleForScheduleDraft.deliveryQueueService.enqueue(
@@ -5686,6 +5668,8 @@ export function createServer(
         }
 
         case "delete_draft": {
+          // Local draft write — same gap as create_draft, see its comment.
+          ensureMailboxWriteAllowed(config.runtime);
           const { bundle: deleteDraftBundle, rest: deleteDraftIdRest } = resolveAccountForDraftId(
             requireString(args, "draftId"),
           );
@@ -6763,6 +6747,8 @@ export function createServer(
         }
 
         case "create_template": {
+          // Local template write — same gap as create_draft, see its comment.
+          ensureMailboxWriteAllowed(config.runtime);
           const result = await withAudit(auditService, name, args, async () =>
             templateService.create({
               name: requireString(args, "name"),
@@ -6787,6 +6773,8 @@ export function createServer(
         }
 
         case "delete_template": {
+          // Local template write — same gap as create_draft, see its comment.
+          ensureMailboxWriteAllowed(config.runtime);
           const templateId = requireString(args, "id");
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args?.confirmed, false), "Permanently delete template: " + templateId);
           const result = await withAudit(auditService, name, args, async () =>
@@ -8272,6 +8260,9 @@ export function createServer(
         }
 
         case "clear_cache":
+          // Zero policy gate: this mutates local cache state, but nothing here
+          // ever checked read-only mode.
+          ensureMailboxWriteAllowed(config.runtime);
           analyticsService.clearCache();
           return createTextResult({
             clearedAt: new Date().toISOString(),
@@ -8279,6 +8270,8 @@ export function createServer(
           });
 
         case "clear_index":
+          // Zero policy gate — same gap as clear_cache, see its comment.
+          ensureMailboxWriteAllowed(config.runtime);
           return createTextResult({
             clearedAt: new Date().toISOString(),
             ...(await localIndexService.clear()),
