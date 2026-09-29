@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.40] — 2026-09-29
+
+### Fixed
+- **The local index could not be closed.** `LocalIndexService` only had a private `closeDb()` that nothing called, so the SQLite handle stayed open until the process died. The server now closes every account's index on shutdown (waiting for any queued snapshot write first, which also checkpoints the WAL), via a new public `close()` that is safe to call twice and reopens on next use. On Windows an open handle also blocks deleting the file, which is how this was found.
+
+### Changed
+- **CI now tests macOS and Windows** (Node 22) besides Ubuntu on Node 20/22/24, since the darwin and win32 `.mcpb` bundles ship to users. The Windows suite went from 56 failures to green: 46 were the un-closable index above, 10 assert POSIX file modes/symlinks/paths and are skipped on win32.
+- **`.mcpb` bundles are built when a release is published** (was: on tag push, which finished before the hand-made release existed and needed manual reruns) and attached to it by a follow-up job.
+
+### Added
+- Test for `close()` (idempotent, reopens); `test/helpers/close-indexes.mjs` for tests that build services indirectly.
+
 ## [2.1.39] — 2026-09-25
 
 Found by a dedicated audit pass this session (5 parallel review agents plus a live read-only Bridge smoke test) after 2.1.35–2.1.38 shipped, before any further release.
