@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AccountManager } from "../dist/services/account-manager.js";
 import { withAccountPrefix } from "../dist/utils/helpers.js";
+import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 
 // These tests exercise the exact merge logic used by src/index.ts's
 // search_indexed_emails and get_labels handlers (fanning out across
@@ -164,8 +165,9 @@ test("search_indexed_emails fan-out: results from both accounts appear, correctl
     assert.equal(primaryEmail.subject, "Primary invoice");
     assert.equal(secondEmail.subject, "Second invoice");
   } finally {
+    await closeTrackedIndexes();
     await rm(dataDirA, { recursive: true, force: true });
-    await rm(dataDirB, { recursive: true, force: true });
+        await rm(dataDirB, { recursive: true, force: true });
   }
 });
 
@@ -187,8 +189,9 @@ test("get_labels fan-out: same-named labels from both accounts are summed into o
     assert.equal(inbox.messageCount, 2);
     assert.equal(inbox.unreadCount, 2);
   } finally {
+    await closeTrackedIndexes();
     await rm(dataDirA, { recursive: true, force: true });
-    await rm(dataDirB, { recursive: true, force: true });
+        await rm(dataDirB, { recursive: true, force: true });
   }
 });
 
@@ -215,6 +218,7 @@ test("single-account AccountManager produces identical search results to calling
     assert.equal(merged.total, direct.total);
     assert.ok(merged.emails.every((email) => !email.id.includes("::") || email.id === "INBOX::1"));
   } finally {
+    await closeTrackedIndexes();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

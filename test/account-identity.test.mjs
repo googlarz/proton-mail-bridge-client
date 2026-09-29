@@ -14,6 +14,7 @@ import { DraftStoreService } from "../dist/services/draft-store-service.js";
 import { access, constants as fsConstants } from "node:fs/promises";
 import { SimpleIMAPService } from "../dist/services/simple-imap-service.js";
 import { createEmailId } from "../dist/utils/helpers.js";
+import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 
 function createConfig(dataDir, username) {
   return {
@@ -61,6 +62,7 @@ async function withTempDir(fn) {
   try {
     await fn(dataDir);
   } finally {
+    await closeTrackedIndexes();
     await rm(dataDir, { recursive: true, force: true });
   }
 }

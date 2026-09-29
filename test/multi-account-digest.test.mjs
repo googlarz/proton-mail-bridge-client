@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { AccountManager } from "../dist/services/account-manager.js";
 import { tagAccountIds } from "../dist/index.js";
 import { withAccountPrefix } from "../dist/utils/helpers.js";
+import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 
 // Exercises the exact merge/tagging building blocks the fanned-out digest/
 // follow-up tools in index.ts's CallToolRequestSchema switch statement use
@@ -151,8 +152,9 @@ test("tagAccountIds prefixes thread/message ids for a non-primary account and is
     // Original (untagged) result must be untouched (tagAccountIds clones).
     assert.ok(!secondaryResult.threads[0].id.startsWith("second-example-com::"));
   } finally {
+    await closeTrackedIndexes();
     await rm(primaryDataDir, { recursive: true, force: true });
-    await rm(secondaryDataDir, { recursive: true, force: true });
+        await rm(secondaryDataDir, { recursive: true, force: true });
   }
 });
 
@@ -193,8 +195,9 @@ test("merging two accounts' actionable threads by (score, then latestDate) surfa
     // The primary's own id is never given the account prefix.
     assert.ok(!merged[0].id.startsWith("second-example-com::"));
   } finally {
+    await closeTrackedIndexes();
     await rm(primaryDataDir, { recursive: true, force: true });
-    await rm(secondaryDataDir, { recursive: true, force: true });
+        await rm(secondaryDataDir, { recursive: true, force: true });
   }
 });
 
@@ -245,6 +248,7 @@ test("a single-account AccountManager produces the exact same getActionableThrea
 
     assert.deepEqual(merged, direct.threads);
   } finally {
+    await closeTrackedIndexes();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

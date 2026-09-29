@@ -10,6 +10,7 @@ import { createServer } from "../dist/index.js";
 import { DraftStoreService } from "../dist/services/draft-store-service.js";
 import { DeliveryQueueService } from "../dist/services/delivery-queue-service.js";
 import { slugifyAccountAddress, withAccountPrefix } from "../dist/utils/helpers.js";
+import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 
 // First test that drives the real MCP handlers (createServer + in-memory transport)
 // for a multi-account config. Found by external review of 2.1.18: MCP resources were
@@ -63,8 +64,9 @@ async function withServer(seed, fn) {
   } finally {
     await client.close();
     await server.close();
+    await closeTrackedIndexes();
     await rm(primaryDir, { recursive: true, force: true });
-    await rm(secondaryDir, { recursive: true, force: true });
+        await rm(secondaryDir, { recursive: true, force: true });
   }
 }
 
