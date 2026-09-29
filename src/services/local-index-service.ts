@@ -3008,6 +3008,14 @@ export class LocalIndexService {
     };
   }
 
+  // Waits for any queued snapshot write, then releases the SQLite handle (and
+  // checkpoints the WAL). Called on server shutdown; also lets Windows delete the
+  // db file, which it refuses to do while a handle is open. Safe to call twice.
+  async close(): Promise<void> {
+    await this.snapshotQueue.catch(() => undefined);
+    this.closeDb();
+  }
+
   private closeDb(): void {
     if (this.db) {
       this.db.close();

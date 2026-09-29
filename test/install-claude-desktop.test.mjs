@@ -11,6 +11,9 @@ import {
   resolveStableNodeCommand,
 } from "../dist/scripts/install-claude-desktop.js";
 
+// These assert POSIX file modes, symlinks or hardcoded "/" paths, which Windows does not have.
+const WIN_SKIP = { skip: process.platform === "win32" ? "POSIX-only" : false };
+
 test("collectInstallEnv keeps only PROTONMAIL_* and DEBUG keys", () => {
   const env = collectInstallEnv({
     PROTONMAIL_USERNAME_FILE: "/run/secrets/user",
@@ -26,7 +29,7 @@ test("collectInstallEnv keeps only PROTONMAIL_* and DEBUG keys", () => {
   });
 });
 
-test("buildClaudeDesktopServerConfig points Claude Desktop at dist/index.js", () => {
+test("buildClaudeDesktopServerConfig points Claude Desktop at dist/index.js", WIN_SKIP, () => {
   const { serverName, serverConfig } = buildClaudeDesktopServerConfig({
     cwd: "/tmp/protonmail-pro-mcp",
     command: "/usr/local/bin/node",
@@ -40,7 +43,7 @@ test("buildClaudeDesktopServerConfig points Claude Desktop at dist/index.js", ()
   assert.equal(serverConfig.env.PROTONMAIL_USERNAME_FILE, "/run/secrets/user");
 });
 
-test("buildClaudeDesktopServerConfig prefers a dedicated runtime directory when provided", () => {
+test("buildClaudeDesktopServerConfig prefers a dedicated runtime directory when provided", WIN_SKIP, () => {
   const { serverConfig } = buildClaudeDesktopServerConfig({
     cwd: "/tmp/source-repo",
     runtimeDir: "/tmp/proton-runtime",
@@ -133,12 +136,12 @@ test("mergeClaudeDesktopConfig lets a freshly-collected env override the old one
   assert.deepEqual(merged.mcpServers["proton-mail-bridge"].env, { PROTONMAIL_USERNAME: "fresh@proton.me" });
 });
 
-test("resolveClaudeDesktopConfigPath honors explicit paths", () => {
+test("resolveClaudeDesktopConfigPath honors explicit paths", WIN_SKIP, () => {
   const resolved = resolveClaudeDesktopConfigPath(join("/tmp", "claude.json"));
   assert.equal(resolved, "/tmp/claude.json");
 });
 
-test("resolveClaudeDesktopRuntimeDir honors explicit paths", () => {
+test("resolveClaudeDesktopRuntimeDir honors explicit paths", WIN_SKIP, () => {
   const resolved = resolveClaudeDesktopRuntimeDir(join("/tmp", "proton-runtime"));
   assert.equal(resolved, "/tmp/proton-runtime");
 });
@@ -190,7 +193,7 @@ test("buildRuntimeInstallArgs uses npm ci only when a lockfile is present", () =
   ]);
 });
 
-test("resolveStableNodeCommand swaps a Homebrew Cellar path for its verified stable symlink", () => {
+test("resolveStableNodeCommand swaps a Homebrew Cellar path for its verified stable symlink", WIN_SKIP, () => {
   // Reproduces the real bug: writing process.execPath verbatim into
   // claude_desktop_config.json pins it to a version-specific Cellar path
   // that `brew upgrade node && brew cleanup` deletes, silently breaking the
@@ -260,7 +263,7 @@ test("buildClaudeDesktopServerConfig resolves a stable Node command by default",
 // with copyFile (same). Every other place in this codebase that persists a
 // secret (audit log, draft store, delivery queue, account marker) is 0o600 —
 // this was the one outlier.
-test("installClaudeDesktopConfig writes the config file, its directory, and any backup as 0o600/0o700", async () => {
+test("installClaudeDesktopConfig writes the config file, its directory, and any backup as 0o600/0o700", WIN_SKIP, async () => {
   const { installClaudeDesktopConfig } = await import("../dist/scripts/install-claude-desktop.js");
   const { mkdtemp, stat, writeFile: wf, readdir } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");

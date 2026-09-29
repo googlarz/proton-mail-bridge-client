@@ -7,6 +7,9 @@ import { pathToFileURL } from "node:url";
 
 import { isMainModule } from "../dist/is-main.js";
 
+// These assert POSIX file modes, symlinks or hardcoded "/" paths, which Windows does not have.
+const WIN_SKIP = { skip: process.platform === "win32" ? "POSIX-only" : false };
+
 // Run `fn` with process.argv[1] temporarily set to `entry`, then restore it.
 function withEntry(entry, fn) {
   const original = process.argv[1];
@@ -28,7 +31,7 @@ test("returns false when there is no entry point", () => {
   });
 });
 
-test("matches the realpath-resolved entry (symlinked bin, default Node)", async () => {
+test("matches the realpath-resolved entry (symlinked bin, default Node)", WIN_SKIP, async () => {
   const dir = await mkdtemp(join(tmpdir(), "protonmail-ismain-test-"));
   try {
     const real = join(dir, "real.js");

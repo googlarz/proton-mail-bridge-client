@@ -5,13 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeAttachmentToDownloadDir } from "../dist/index.js";
 
+// These assert POSIX file modes, symlinks or hardcoded "/" paths, which Windows does not have.
+const WIN_SKIP = { skip: process.platform === "win32" ? "POSIX-only" : false };
+
 async function withDir(fn) {
   const dir = await mkdtemp(join(tmpdir(), "attachment-dl-"));
   try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
 // A09 (audit 2.1.19): get_attachment_content(saveTo) wrote 0644 files in 0755 directories.
-test("saved attachment is owner-only, and so are the directories created for it", async () => {
+test("saved attachment is owner-only, and so are the directories created for it", WIN_SKIP, async () => {
   await withDir(async (dir) => {
     const target = await writeAttachmentToDownloadDir(dir, "sub/dir/file.pdf", Buffer.from("secret"));
     assert.equal((await stat(target)).mode & 0o777, 0o600);
@@ -19,7 +22,7 @@ test("saved attachment is owner-only, and so are the directories created for it"
   });
 });
 
-test("an existing file is tightened to 0600 when overwritten", async () => {
+test("an existing file is tightened to 0600 when overwritten", WIN_SKIP, async () => {
   await withDir(async (dir) => {
     const first = await writeAttachmentToDownloadDir(dir, "f.bin", Buffer.from("a"));
     const { chmod } = await import("node:fs/promises");

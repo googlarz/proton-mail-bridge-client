@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildConfigFromEnv } from "../dist/index.js";
 
+// These assert POSIX file modes, symlinks or hardcoded "/" paths, which Windows does not have.
+const WIN_SKIP = { skip: process.platform === "win32" ? "POSIX-only" : false };
+
 const KEYS = [
   "PROTONMAIL_USERNAME",
   "PROTONMAIL_USERNAME_COMMAND",
@@ -126,7 +129,7 @@ test("buildConfigFromEnv wires PROTONMAIL_SEND_DELAY_SECONDS through to runtime.
   }
 });
 
-test("buildConfigFromEnv reads *_COMMAND secrets", () => {
+test("buildConfigFromEnv reads *_COMMAND secrets", WIN_SKIP, () => {
   const previous = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
 
   try {

@@ -8351,6 +8351,7 @@ export function createServer(
     deliveryQueueService,
     snoozeService,
     auditService,
+    accountManager,
   };
 }
 
@@ -8370,7 +8371,7 @@ export async function main(): Promise<void> {
   // Explicitly chmod it too so the restriction actually takes effect on
   // upgrade, not only on a brand-new dataDir.
   await chmod(config.dataDir, 0o700).catch(() => {});
-  const { server, smtpService, imapService, backgroundSyncService, deliveryQueueService, snoozeService } = createServer(config, {
+  const { server, smtpService, imapService, backgroundSyncService, deliveryQueueService, snoozeService, accountManager } = createServer(config, {
     startBackgroundSync: true,
   });
 
@@ -8389,7 +8390,11 @@ export async function main(): Promise<void> {
     backgroundSyncService.stop();
     deliveryQueueService.stop();
     snoozeService.stop();
-    await Promise.allSettled([imapService.disconnect(), smtpService.close()]);
+    await Promise.allSettled([
+      imapService.disconnect(),
+      smtpService.close(),
+      ...accountManager.all().map((bundle) => bundle.localIndexService.close()),
+    ]);
     process.exit(0);
   };
 
