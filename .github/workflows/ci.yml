@@ -20,6 +20,10 @@ jobs:
           # The darwin .mcpb bundle ships to users, so test on macOS too.
           - os: macos-latest
             node-version: 22
+          # ...and the win32 bundle: Windows refuses to delete open files, which
+          # is how the missing LocalIndexService.close() was found.
+          - os: windows-latest
+            node-version: 22
 
     steps:
       - name: Check out repository
@@ -42,17 +46,3 @@ jobs:
 
       - name: Run test suite
         run: npm test
-
-  # Non-blocking probe for the win32 .mcpb bundle: shows what breaks on Windows
-  # without gating releases on it. Promote to the matrix once it is green.
-  windows-experimental:
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm test
