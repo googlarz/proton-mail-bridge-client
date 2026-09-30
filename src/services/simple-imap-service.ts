@@ -34,6 +34,7 @@ import {
   normalizeLimit,
   parseDateInput,
   htmlToMarkdown,
+  redactInlineData,
   parseEmailId,
   previewText,
   sanitizeFileName,
@@ -3794,7 +3795,7 @@ export class SimpleIMAPService {
       cc: parsed.cc ? mapParsedAddresses(parsed.cc) : summary.cc,
       bcc: parsed.bcc ? mapParsedAddresses(parsed.bcc) : summary.bcc,
       replyTo: parsed.replyTo ? mapParsedAddresses(parsed.replyTo) : summary.replyTo,
-      preview: previewText(parsed.text || htmlText || summary.preview),
+      preview: previewText(redactInlineData(parsed.text) || htmlText || summary.preview),
       references,
       attachments:
         parsedAttachments.length > 0 && parsedAttachments.length >= summary.attachments.length
@@ -3872,7 +3873,7 @@ export class SimpleIMAPService {
       // display happens later, only in the tool-output formatting layer
       // (formatEmailDetailOutput), so composing a reply or forward still
       // quotes the real original rather than a folded marker.
-      text: parsed.text || htmlToMarkdown(typeof parsed.html === "string" ? parsed.html : undefined),
+      text: redactInlineData(parsed.text) || htmlToMarkdown(typeof parsed.html === "string" ? parsed.html : undefined),
       html: parsed.html,
       headers: this.mapHeaders(parsed),
     };

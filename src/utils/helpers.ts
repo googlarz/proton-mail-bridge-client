@@ -232,6 +232,25 @@ export function previewText(value?: string, maxLength = 220): string | undefined
   return `${normalized.slice(0, maxLength - 1)}...`;
 }
 
+// mailparser derives `text` for HTML-only messages with html-to-text, which
+// renders an alt-less <img> as "[<src>]" — for an inlined data: image that is
+// the whole base64 blob. Also covers senders' own text/plain containing one.
+// Replaces data: URIs (and any bracketed very long URL) with a bounded
+// placeholder so it never reaches a preview or the model's context.
+const DATA_URI_IN_BRACKETS = /[[(]\s*data:[^\s\])]*\s*[\])]/gi;
+const BARE_DATA_URI = /data:[a-z0-9.+-]+\/[a-z0-9.+-]+[;,][^\s"'<>)\]]*/gi;
+const LONG_BRACKETED_URL = /\[(?:https?:\/\/)?[^\s\]]{300,}\]/gi;
+
+export function redactInlineData(value?: string): string | undefined {
+  if (!value) {
+    return value;
+  }
+  return value
+    .replace(DATA_URI_IN_BRACKETS, "[image]")
+    .replace(LONG_BRACKETED_URL, "[image]")
+    .replace(BARE_DATA_URI, "[data]");
+}
+
 export function stripHtmlToText(value?: string): string | undefined {
   if (!value) {
     return undefined;
@@ -294,7 +313,7 @@ export function htmlToMarkdown(value?: string): string | undefined {
   // Not previewText: previewText collapses all whitespace to single spaces,
   // which would erase the newlines Markdown structure depends on (headings,
   // list items, paragraph breaks). Cap length only.
-  const trimmed = markdown.trim();
+  const trimmed = redactInlineData(markdown.trim()) ?? "";
   if (!trimmed) {
     return undefined;
   }
