@@ -91,6 +91,51 @@ type MessageRow = {
 const DB_SCHEMA_VERSION = 3;
 const STALE_THRESHOLD_MINUTES = 60;
 const DEFAULT_SNAPSHOT_LIMIT = 5000;
+// Results older than this carry `stale:true` plus a warning. Deliberately much lower than
+// STALE_THRESHOLD_MINUTES (which gates a full auto-refresh): the background sync runs every
+// few minutes, so an index that has not synced for 15 minutes means sync is failing or off.
+const STALE_WARNING_MINUTES = 15;
+
+// Per-thread payload caps for list responses. A thread built by buildThreads() carries every
+// message (full MailboxMessage objects) plus every participant and message id; spreading it
+// into an actionable/digest/follow-up row made 50 threads exceed 800K characters. Field names
+// stay stable — only their size is bounded, and counts (messageCount) remain exact.
+export const THREAD_MAX_PARTICIPANTS = 10;
+export const THREAD_MAX_MESSAGE_IDS = 10;
+export const THREAD_MAX_LABELS = 20;
+export const THREAD_MAX_LATEST_FROM = 5;
+export const THREAD_PREVIEW_MAX_CHARS = 240;
+
+export function shapeThreadForList<T extends { participants?: unknown[]; messageIds?: string[]; normalizedLabels?: string[]; latestFrom?: unknown[]; latestPreview?: string }>(
+  thread: T & { messages?: unknown },
+): Omit<T, "messages"> & {
+  participantsTruncated?: true;
+  messageIdsTruncated?: true;
+  labelsTruncated?: true;
+} {
+  const { messages: _messages, ...rest } = thread;
+  const out: Record<string, unknown> = { ...rest };
+  if (Array.isArray(rest.participants) && rest.participants.length > THREAD_MAX_PARTICIPANTS) {
+    out.participants = rest.participants.slice(0, THREAD_MAX_PARTICIPANTS);
+    out.participantsTruncated = true;
+  }
+  if (Array.isArray(rest.messageIds) && rest.messageIds.length > THREAD_MAX_MESSAGE_IDS) {
+    // Newest messages are the ones a caller acts on; buildThreads orders oldest -> newest.
+    out.messageIds = rest.messageIds.slice(-THREAD_MAX_MESSAGE_IDS);
+    out.messageIdsTruncated = true;
+  }
+  if (Array.isArray(rest.normalizedLabels) && rest.normalizedLabels.length > THREAD_MAX_LABELS) {
+    out.normalizedLabels = rest.normalizedLabels.slice(0, THREAD_MAX_LABELS);
+    out.labelsTruncated = true;
+  }
+  if (Array.isArray(rest.latestFrom) && rest.latestFrom.length > THREAD_MAX_LATEST_FROM) {
+    out.latestFrom = rest.latestFrom.slice(0, THREAD_MAX_LATEST_FROM);
+  }
+  if (typeof rest.latestPreview === "string" && rest.latestPreview.length > THREAD_PREVIEW_MAX_CHARS) {
+    out.latestPreview = `${rest.latestPreview.slice(0, THREAD_PREVIEW_MAX_CHARS)}…`;
+  }
+  return out as never;
+}
 
 function escapeLike(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -687,6 +732,8 @@ export class LocalIndexService {
     emails: EmailSummary[];
     lastSyncAt?: string;
     indexFreshnessMinutes?: number;
+    stale?: true;
+    staleWarning?: string;
     warnings?: string[];
   }> {
     const parsedQuery = parseSearchQuery(filters.query);
@@ -747,12 +794,19 @@ export class LocalIndexService {
         return sortEmailsByNewest([left, right])[0] === left ? -1 : 1;
       });
     const totalCount = matches.length;
+    const freshness = this.indexFreshnessFields(lastSyncAt);
+    const staleWarning = freshness.stale
+      ? `Index last synced ${freshness.indexFreshnessMinutes} minutes ago; messages received since may be missing. Run sync_emails or use search_emails for live results.`
+      : !lastSyncAt
+        ? "Index has never been synced; run sync_emails before relying on these results."
+        : undefined;
 
     return {
       total: totalCount,
       hasMore: totalCount > offset + limit,
       emails: matches.slice(offset, offset + limit),
-      ...this.indexFreshnessFields(lastSyncAt),
+      ...freshness,
+      ...(staleWarning ? { staleWarning } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
   }
@@ -936,12 +990,15 @@ export class LocalIndexService {
       .slice(0, limit);
   }
 
-  async getThreads(input: { query?: string; folder?: string; label?: string; limit?: number } = {}): Promise<{
+  async getThreads(input: { query?: string; folder?: string; label?: string; limit?: number; offset?: number } = {}): Promise<{
     total: number;
     hasMore: boolean;
+    offset: number;
+    nextOffset?: number;
     threads: ThreadSummary[];
     lastSyncAt?: string;
     indexFreshnessMinutes?: number;
+    stale?: true;
     messagesCapped?: boolean;
   }> {
     const db = await this.ensureDb();
@@ -1005,13 +1062,17 @@ export class LocalIndexService {
     });
 
     const limit = input.limit ?? 100;
-    const offset = 0;
+    const offset = Math.max(0, Math.floor(input.offset ?? 0));
     const totalCount = threads.length;
-    const summaries: ThreadSummary[] = threads.map(({ messages: _messages, ...summary }) => summary);
+    const summaries: ThreadSummary[] = threads
+      .slice(offset, offset + limit)
+      .map((thread) => shapeThreadForList(thread));
     return {
       total: totalCount,
       hasMore: totalCount > offset + limit,
-      threads: summaries.slice(offset, offset + limit),
+      offset,
+      ...(totalCount > offset + limit ? { nextOffset: offset + limit } : {}),
+      threads: summaries,
       ...this.indexFreshnessFields(snapshot.updatedAt),
       ...(messagesCapped ? { messagesCapped: true } : {}),
     };
@@ -1069,10 +1130,16 @@ export class LocalIndexService {
     limit?: number;
     unreadOnly?: boolean;
     pendingOn?: "you" | "them" | "any";
+    offset?: number;
   } = {}): Promise<{
     total: number;
     hasMore: boolean;
+    offset: number;
+    nextOffset?: number;
     threads: ActionableThreadSummary[];
+    lastSyncAt?: string;
+    indexFreshnessMinutes?: number;
+    stale?: true;
     messagesCapped?: boolean;
   }> {
     const db = await this.ensureDb();
@@ -1080,7 +1147,7 @@ export class LocalIndexService {
     const syncCheckpoints = this.loadCheckpointsSync(db);
     const pendingFilter = input.pendingOn || "any";
     const limit = input.limit ?? 50;
-    const offset = 0;
+    const offset = Math.max(0, Math.floor(input.offset ?? 0));
     // unreadOnly defaults to true (mirrors the JS-level filter below) — the vast
     // majority of calls are therefore SQL-prefilterable by is_read alone, same as
     // label/query. Only unreadOnly:false with no label/query has nothing SQL-expressible
@@ -1189,7 +1256,10 @@ export class LocalIndexService {
     return {
       total: totalCount,
       hasMore: totalCount > offset + limit,
-      threads: actionable.slice(offset, offset + limit),
+      offset,
+      ...(totalCount > offset + limit ? { nextOffset: offset + limit } : {}),
+      threads: actionable.slice(offset, offset + limit).map((thread) => shapeThreadForList(thread)),
+      ...this.indexFreshnessFields(updatedAt),
       ...(messagesCapped ? { messagesCapped: true } : {}),
     };
   }
@@ -1297,8 +1367,9 @@ export class LocalIndexService {
         attachmentThreads: allActionable.filter((thread) => thread.latestHasAttachments).length,
         staleAwaitingYou: staleAwaitingYou.length,
       },
-      topThreads: allActionable.slice(0, input.limit ?? 10),
-      staleAwaitingYou: staleAwaitingYou.slice(0, input.limit ?? 10),
+      ...this.indexFreshnessFields(updatedAt),
+      topThreads: allActionable.slice(0, input.limit ?? 10).map((thread) => shapeThreadForList(thread)),
+      staleAwaitingYou: staleAwaitingYou.slice(0, input.limit ?? 10).map((thread) => shapeThreadForList(thread)),
     };
   }
 
@@ -1306,6 +1377,7 @@ export class LocalIndexService {
     limit?: number;
     minAgeHours?: number;
     pendingOn?: "you" | "them" | "any";
+    offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     const db = await this.ensureDb();
     const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
@@ -1315,7 +1387,7 @@ export class LocalIndexService {
     const thresholdMs = minAgeHours * 60 * 60 * 1000;
     const now = Date.now();
     const limit = input.limit ?? 25;
-    const offset = 0;
+    const offset = Math.max(0, Math.floor(input.offset ?? 0));
 
     // This method's entire purpose is finding OLD threads (minAgeHours), which is the
     // exact opposite of what the DEFAULT_SNAPSHOT_LIMIT-capped loadSnapshot() gives you
@@ -1382,7 +1454,10 @@ export class LocalIndexService {
       pendingOn,
       total: totalCount,
       hasMore: totalCount > offset + limit,
-      threads: candidates.slice(offset, offset + limit),
+      offset,
+      ...(totalCount > offset + limit ? { nextOffset: offset + limit } : {}),
+      ...this.indexFreshnessFields(snapshot.updatedAt),
+      threads: candidates.slice(offset, offset + limit).map((thread) => shapeThreadForList(thread)),
     };
   }
 
@@ -2815,6 +2890,14 @@ export class LocalIndexService {
       ageMinutes,
       staleThresholdMinutes: STALE_THRESHOLD_MINUTES,
       isStale: typeof ageMinutes === "number" ? ageMinutes > STALE_THRESHOLD_MINUTES : true,
+      lastSyncAt: snapshot.updatedAt,
+      indexFreshnessMinutes: ageMinutes,
+      // Selectable folders the index has never synced: mail arriving there is invisible to
+      // every index-backed tool until sync_emails({folder}) covers them (background sync
+      // only covers PROTONMAIL_AUTO_SYNC_FOLDER, default "INBOX,Sent").
+      unsyncedFolders: snapshot.folders
+        .filter((folder) => !folder.noselect && !folder.flags?.some((flag) => flag.toLowerCase() === "\\noselect") && !snapshot.syncCheckpoints.some((checkpoint) => checkpoint.folder === folder.path))
+        .map((folder) => folder.path),
       folderCount: snapshot.folders.length,
       labelCount,
       threadCount,
@@ -2997,14 +3080,20 @@ export class LocalIndexService {
     return row?.value || undefined;
   }
 
-  private indexFreshnessFields(lastSyncAt?: string): { lastSyncAt?: string; indexFreshnessMinutes?: number } {
+  private indexFreshnessFields(lastSyncAt?: string): {
+    lastSyncAt?: string;
+    indexFreshnessMinutes?: number;
+    stale?: true;
+  } {
     if (!lastSyncAt) {
       return {};
     }
     const freshnessMs = Date.now() - new Date(lastSyncAt).getTime();
+    const indexFreshnessMinutes = Math.max(0, Math.round(freshnessMs / 60_000));
     return {
       lastSyncAt,
-      indexFreshnessMinutes: Math.max(0, Math.round(freshnessMs / 60_000)),
+      indexFreshnessMinutes,
+      ...(indexFreshnessMinutes > STALE_WARNING_MINUTES ? { stale: true as const } : {}),
     };
   }
 

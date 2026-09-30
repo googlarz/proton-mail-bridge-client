@@ -1404,6 +1404,11 @@ const TOOLS = [
       type: "object",
       properties: {
         folder: { type: "string", description: "Folder to sync. Defaults to all folders." },
+        timeBudgetSeconds: {
+          type: "number",
+          description: "Wall-clock budget for a per-call sync (default 45, max 300). Each folder is committed to the index as soon as it is fetched; when the budget is reached no further folder is started and the response reports complete:false with remainingFolders. Call again to continue (least-recently-synced folders go first).",
+          default: 45,
+        },
         full: { type: "boolean", description: "Fetch a larger per-folder sample, and detect/prune messages no longer present in this folder (moved, archived, trashed, or deleted by any client) that the default incremental sync would otherwise leave stale in the index forever.", default: false },
         limitPerFolder: { type: "number", description: "Override the per-folder fetch limit." },
         includeAttachmentText: {
@@ -1470,6 +1475,7 @@ const TOOLS = [
         query: { type: "string", description: "Free-text filter across subject, participants, and labels." },
         label: { type: "string", description: "Require a normalized label on the thread." },
         limit: { type: "number", description: "Maximum threads to return.", default: 100 },
+        offset: { type: "number", description: "Skip this many threads (use nextOffset from the previous response to page).", default: 0 },
       },
     },
   },
@@ -1495,6 +1501,7 @@ const TOOLS = [
           default: true,
         },
         limit: { type: "number", description: "Maximum threads to return.", default: 50 },
+        offset: { type: "number", description: "Skip this many threads (use nextOffset from the previous response to page).", default: 0 },
         syncBefore: {
           type: "boolean",
           description: "Refresh the local mailbox index from IMAP before ranking threads.",
@@ -1532,6 +1539,7 @@ const TOOLS = [
       type: "object",
       properties: {
         limit: { type: "number", description: "Maximum candidate threads to return.", default: 25 },
+        offset: { type: "number", description: "Skip this many candidates (use nextOffset from the previous response to page).", default: 0 },
         minAgeHours: { type: "number", description: "Minimum thread age in hours.", default: 24 },
         pendingOn: {
           type: "string",
@@ -2992,6 +3000,62 @@ async function ensureFreshLocalIndex(
   };
 }
 
+// Default cap on the serialized size of a thread-list response (get_actionable_threads,
+// get_threads, get_follow_up_candidates, get_inbox_digest). Per-thread payloads are already
+// bounded (shapeThreadForList); this is the backstop that keeps a large `limit` from
+// producing a response over the client's tool-output limit. Rows past the budget are dropped
+// from the end and reported via truncatedForSize/nextOffset so the caller can page on.
+export const THREAD_LIST_RESPONSE_BUDGET_CHARS = 60_000;
+
+export function trimThreadsToBudget<T>(
+  threads: T[],
+  budgetChars = THREAD_LIST_RESPONSE_BUDGET_CHARS,
+): { threads: T[]; trimmed: number } {
+  let used = 0;
+  const kept: T[] = [];
+  for (const thread of threads) {
+    const size = JSON.stringify(thread).length;
+    if (kept.length > 0 && used + size > budgetChars) {
+      break;
+    }
+    used += size;
+    kept.push(thread);
+  }
+  return { threads: kept, trimmed: threads.length - kept.length };
+}
+
+function paginationFields(total: number, offset: number, shown: number, trimmed: number) {
+  const nextOffset = offset + shown;
+  return {
+    hasMore: total > nextOffset,
+    offset,
+    ...(total > nextOffset ? { nextOffset } : {}),
+    ...(trimmed > 0 ? { truncatedForSize: true } : {}),
+  };
+}
+
+export async function mailboxChangedSinceCheckpoint(
+  imapService: Pick<SimpleIMAPService, "getFolderStats">,
+  localIndexService: Pick<LocalIndexService, "getSyncCheckpointMap">,
+  folder: string,
+): Promise<boolean> {
+  try {
+    const checkpoint = (await localIndexService.getSyncCheckpointMap())[folder];
+    if (!checkpoint) {
+      return true;
+    }
+    const live = await imapService.getFolderStats(folder);
+    return (
+      (live.uidNext !== undefined && checkpoint.uidNext !== undefined && live.uidNext !== checkpoint.uidNext) ||
+      (checkpoint.total !== undefined && live.total !== checkpoint.total) ||
+      // A backfill/catch-up cursor still pending means the index is knowingly incomplete.
+      checkpoint.incrementalResumeUid !== undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function maybeRefreshLocalIndex(
   imapService: SimpleIMAPService,
   localIndexService: LocalIndexService,
@@ -3004,7 +3068,13 @@ async function maybeRefreshLocalIndex(
 ) {
   const status = await localIndexService.getStatus();
   if (!input.force && status.storedMessageCount > 0 && !status.isStale) {
-    return undefined;
+    // Not stale by age, but age alone cannot see mail that arrived since the last sync
+    // (background sync/IDLE may be off, failing, or not covering this account). Compare the
+    // server's UIDNEXT/MESSAGES for the folder with the stored checkpoint (a single STATUS)
+    // and refresh only if they differ. A failed probe never blocks serving the index.
+    if (!(await mailboxChangedSinceCheckpoint(imapService, localIndexService, input.folder ?? "INBOX"))) {
+      return undefined;
+    }
   }
 
   return ensureFreshLocalIndex(imapService, localIndexService, {
@@ -7417,23 +7487,66 @@ export function createServer(
           // When the caller supplies any of these, run a one-off sync with
           // their actual parameters instead.
           if (folder !== undefined || full !== undefined || limitPerFolder !== undefined || includeAttachmentText !== undefined) {
+            // Commit each folder to the index as soon as it is fetched (rather than one
+            // recordSnapshot after ALL folders), and stop starting new folders once the time
+            // budget is spent. Before this, a full sync over many folders that hit the
+            // client's request timeout lost everything it had already fetched and gave the
+            // caller no way to tell what had synced. The default budget sits below typical
+            // 60s MCP client timeouts; a single folder in flight still runs to completion.
+            const budgetMs = normalizeLimit(args.timeBudgetSeconds, 45, 1, 300) * 1000;
+            const startedAtMs = Date.now();
             const snapshot = await imapService.collectEmailsForIndex({
               folder,
               full,
               limitPerFolder,
               includeAttachmentText,
               checkpoints: await localIndexService.getSyncCheckpointMap(),
+              deadlineAt: startedAtMs + budgetMs,
+              onFolderCollected: async (batch) => {
+                await localIndexService.recordSnapshot({
+                  folders: [],
+                  emails: batch.emails,
+                  syncedAt: batch.checkpoint.lastSyncAt ?? new Date().toISOString(),
+                  folderStats: [batch.checkpoint],
+                });
+              },
             });
+            // Final commit carries the complete folder list (folder counts, pruning of folders
+            // deleted server-side) — no messages, those were committed per folder above.
             const indexStatus = await localIndexService.recordSnapshot({
               folders: snapshot.folders,
               folderListComplete: true,
-              emails: snapshot.emails,
+              emails: [],
               syncedAt: snapshot.syncedAt,
-              folderStats: snapshot.folderStats,
+              folderStats: [],
             });
             return createTextResult({
               checkedAt: new Date().toISOString(),
-              synced: { folder: folder ?? "all", full: Boolean(full), folderStats: snapshot.folderStats },
+              complete: snapshot.complete,
+              remainingFolders: snapshot.remainingFolders,
+              elapsedMs: Date.now() - startedAtMs,
+              budgetMs,
+              ...(snapshot.complete
+                ? {}
+                : { note: "Time budget reached; completed folders are already committed. Call sync_emails again with the same arguments to continue with remainingFolders." }),
+              synced: {
+                folder: folder ?? "all",
+                full: Boolean(full),
+                complete: snapshot.complete,
+                remainingFolders: snapshot.remainingFolders,
+                folderStats: snapshot.folderStats,
+                // Per-folder progress: `moreHistory` is true while a full sync is still walking
+                // backward through history or an incremental catch-up cursor is pending.
+                folderProgress: snapshot.folderStats.map((stat) => ({
+                  folder: stat.folder,
+                  fetched: stat.fetched ?? 0,
+                  total: stat.total,
+                  strategy: stat.strategy,
+                  moreHistory:
+                    stat.incrementalResumeUid !== undefined ||
+                    (Boolean(full) && stat.backfilledToUid !== undefined && stat.backfilledToUid > 1),
+                })),
+              },
               index: {
                 updatedAt: indexStatus.updatedAt,
                 storedMessageCount: indexStatus.storedMessageCount,
@@ -7458,7 +7571,23 @@ export function createServer(
         }
 
         case "get_index_status":
-          return createTextResult(await localIndexService.getStatus());
+        {
+          const indexStatus = await localIndexService.getStatus();
+          const syncCfg = backgroundSyncService.getStatus();
+          return createTextResult({
+            ...indexStatus,
+            // What keeps this index current, so a stale/missing message can be explained:
+            // only these folders are synced in the background, and IDLE watches just the first.
+            backgroundSync: {
+              enabled: syncCfg.enabled,
+              intervalMinutes: syncCfg.intervalMinutes,
+              folders: syncCfg.folder,
+              idleWatching: syncCfg.idleWatching,
+              lastSuccessAt: syncCfg.lastSuccessAt,
+              lastError: syncCfg.lastError,
+            },
+          });
+        }
 
         case "search_indexed_emails":
         {
@@ -7550,6 +7679,7 @@ export function createServer(
             query: optionalString(args, "query"),
             label: optionalString(args, "label"),
             limit: typeof args.limit === "number" ? args.limit : undefined,
+            offset: typeof args.offset === "number" ? args.offset : undefined,
           };
           if (accountManager.all().length === 1) {
             await maybeRefreshLocalIndex(imapService, localIndexService, {
@@ -7557,7 +7687,12 @@ export function createServer(
               limitPerFolder: 100,
             });
             const result = await localIndexService.getThreads(threadsInput);
-            return createTextResult(result, false, result.threads.map(threadSource));
+            const budgeted = trimThreadsToBudget(result.threads);
+            return createTextResult(
+              { ...result, threads: budgeted.threads, ...paginationFields(result.total, result.offset, budgeted.threads.length, budgeted.trimmed) },
+              false,
+              budgeted.threads.map(threadSource),
+            );
           }
           // Merge strategy: refresh and query each account's own thread index
           // independently, tag thread ids with the account slug, concatenate,
@@ -7570,7 +7705,14 @@ export function createServer(
                 folder: "INBOX",
                 limitPerFolder: 100,
               });
-              return { bundle, result: await bundle.localIndexService.getThreads(threadsInput) };
+              return {
+                bundle,
+                result: await bundle.localIndexService.getThreads({
+                  ...threadsInput,
+                  limit: (threadsInput.limit ?? 100) + (threadsInput.offset ?? 0),
+                  offset: 0,
+                }),
+              };
             }),
           );
           const threadsLimit = threadsInput.limit ?? 100;
@@ -7581,10 +7723,17 @@ export function createServer(
               messageIds: thread.messageIds.map((id) => withAccountPrefix(accountSlugForTag(bundle, primarySlugForThreads), id)),
             })),
           );
-          const mergedThreads = sortByDateDesc(taggedThreads, (thread) => thread.latestDate).slice(0, threadsLimit);
+          const threadsOffset = threadsInput.offset ?? 0;
+          const pagedThreads = sortByDateDesc(taggedThreads, (thread) => thread.latestDate).slice(threadsOffset, threadsOffset + threadsLimit);
+          const budgetedThreads = trimThreadsToBudget(pagedThreads);
+          const mergedThreads = budgetedThreads.threads;
           const totalThreads = threadsPerAccount.reduce((sum, { result }) => sum + result.total, 0);
           return createTextResult(
-            { total: totalThreads, hasMore: totalThreads > mergedThreads.length, threads: mergedThreads },
+            {
+              total: totalThreads,
+              ...paginationFields(totalThreads, threadsOffset, mergedThreads.length, budgetedThreads.trimmed),
+              threads: mergedThreads,
+            },
             false,
             mergedThreads.map(threadSource),
           );
@@ -7593,6 +7742,7 @@ export function createServer(
         case "get_actionable_threads":
         {
           const limit = typeof args.limit === "number" ? args.limit : 50;
+          const offset = typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : 0;
           // Fan-out merge: ask every account for its own top-`limit` actionable threads
           // (each account's own getActionableThreads already sorts by score, then
           // recency — see local-index-service.ts), tag every thread/message id with its
@@ -7617,7 +7767,7 @@ export function createServer(
                     ? args.pendingOn
                     : undefined,
                 unreadOnly: normalizeBoolean(args.unreadOnly, true),
-                limit,
+                limit: limit + offset,
               });
               return { bundle, refresh, result };
             }),
@@ -7628,20 +7778,24 @@ export function createServer(
               if (right.score !== left.score) return right.score - left.score;
               return new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime();
             })
-            .slice(0, limit);
+            .slice(offset, offset + limit);
+          const budgetedActionable = trimThreadsToBudget(mergedThreads);
           const totalCount = perAccount.reduce((sum, { result }) => sum + result.total, 0);
           const messagesCapped = perAccount.some(({ result }) => result.messagesCapped);
           const latestRefresh = perAccount.map(({ refresh }) => refresh).find((refresh) => refresh);
+          const actionableFreshness = perAccount.find(({ result }) => result.lastSyncAt)?.result;
           return createTextResult(
             {
               total: totalCount,
-              hasMore: totalCount > limit,
-              threads: mergedThreads,
+              ...paginationFields(totalCount, offset, budgetedActionable.threads.length, budgetedActionable.trimmed),
+              threads: budgetedActionable.threads,
+              ...(actionableFreshness?.lastSyncAt ? { lastSyncAt: actionableFreshness.lastSyncAt, indexFreshnessMinutes: actionableFreshness.indexFreshnessMinutes } : {}),
+              ...(perAccount.some(({ result }) => result.stale) ? { stale: true } : {}),
               ...(messagesCapped ? { messagesCapped: true } : {}),
               ...(latestRefresh ? { indexUpdatedAt: latestRefresh.indexStatus.updatedAt } : {}),
             },
             false,
-            mergedThreads.map(threadSource),
+            budgetedActionable.threads.map(threadSource),
           );
         }
 
@@ -7681,8 +7835,16 @@ export function createServer(
             if (right.score !== left.score) return right.score - left.score;
             return new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime();
           };
-          const topThreads = perAccount.flatMap((entry) => entry.topThreads).sort(byScoreThenDate).slice(0, limit);
-          const staleAwaitingYou = perAccount.flatMap((entry) => entry.staleAwaitingYou).sort(byScoreThenDate).slice(0, limit);
+          const topBudget = trimThreadsToBudget(
+            perAccount.flatMap((entry) => entry.topThreads).sort(byScoreThenDate).slice(0, limit),
+            THREAD_LIST_RESPONSE_BUDGET_CHARS / 2,
+          );
+          const staleBudget = trimThreadsToBudget(
+            perAccount.flatMap((entry) => entry.staleAwaitingYou).sort(byScoreThenDate).slice(0, limit),
+            THREAD_LIST_RESPONSE_BUDGET_CHARS / 2,
+          );
+          const topThreads = topBudget.threads;
+          const staleAwaitingYou = staleBudget.threads;
           const countKeys = new Set(perAccount.flatMap((entry) => Object.keys(entry.counts)));
           const counts: Record<string, number> = {};
           for (const key of countKeys) {
@@ -7694,6 +7856,7 @@ export function createServer(
             counts,
             topThreads,
             staleAwaitingYou,
+            ...(topBudget.trimmed > 0 || staleBudget.trimmed > 0 ? { truncatedForSize: true } : {}),
           };
           return createTextResult(
             result,
@@ -7705,6 +7868,7 @@ export function createServer(
         case "get_follow_up_candidates":
         {
           const limit = typeof args.limit === "number" ? args.limit : 25;
+          const offset = typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : 0;
           // Fan-out merge: ask every account for its own top-`limit` follow-up
           // candidates (each account's own getFollowUpCandidates sorts by ageHours, then
           // score), tag ids with the account's slug, concatenate, re-sort by that same
@@ -7718,7 +7882,7 @@ export function createServer(
                 limitPerFolder: 100,
               });
               const result = await bundle.localIndexService.getFollowUpCandidates({
-                limit,
+                limit: limit + offset,
                 minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : undefined,
                 pendingOn:
                   args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any"
@@ -7739,7 +7903,8 @@ export function createServer(
               if ((right.ageHours ?? 0) !== (left.ageHours ?? 0)) return (right.ageHours ?? 0) - (left.ageHours ?? 0);
               return right.score - left.score;
             })
-            .slice(0, limit);
+            .slice(offset, offset + limit);
+          const followUpBudget = trimThreadsToBudget(threads);
           const totalCount = perAccount.reduce((sum, entry) => sum + entry.total, 0);
           const result = {
             generatedAt: new Date().toISOString(),
@@ -7747,13 +7912,13 @@ export function createServer(
             minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : 24,
             pendingOn: args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any" ? args.pendingOn : "you",
             total: totalCount,
-            hasMore: totalCount > limit,
-            threads,
+            ...paginationFields(totalCount, offset, followUpBudget.threads.length, followUpBudget.trimmed),
+            threads: followUpBudget.threads,
           };
           return createTextResult(
             result,
             false,
-            threads
+            followUpBudget.threads
               .filter((thread): thread is ActionableThreadSummary & { ageHours?: number } & { id: string; subject: string; latestDate?: string; messageCount: number; normalizedLabels?: string[]; participants?: EmailAddress[] } =>
                 Boolean(thread && typeof thread === "object" && "id" in thread),
               )

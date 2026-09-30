@@ -463,6 +463,11 @@ export interface SyncEmailsInput {
   limitPerFolder?: number;
   includeAttachmentText?: boolean;
   checkpoints?: Record<string, MailboxSyncCheckpoint>;
+  // Epoch ms after which no further folder is started (a folder in flight always finishes).
+  deadlineAt?: number;
+  // Called after each folder is collected. When set, collected emails are handed to the
+  // callback (so the caller can commit them) instead of accumulating in the return value.
+  onFolderCollected?: (batch: { folder: string; checkpoint: MailboxSyncCheckpoint; emails: EmailSummary[] }) => Promise<void>;
 }
 
 export interface MailboxSyncCheckpoint {
@@ -508,6 +513,9 @@ export interface LocalIndexStatus {
   ageMinutes?: number;
   staleThresholdMinutes: number;
   isStale: boolean;
+  lastSyncAt?: string;
+  indexFreshnessMinutes?: number;
+  unsyncedFolders: string[];
   folderCount: number;
   labelCount: number;
   threadCount: number;

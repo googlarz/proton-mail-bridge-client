@@ -3208,16 +3208,32 @@ export class SimpleIMAPService {
     folders: FolderInfo[];
     folderStats: Array<MailboxSyncCheckpoint>;
     emails: EmailSummary[];
+    complete: boolean;
+    remainingFolders: string[];
   }> {
-    const folders = await this.resolveFolders(input.folder);
+    let folders = await this.resolveFolders(input.folder);
+    if (!input.folder?.trim() && input.checkpoints) {
+      // All-folders sync under a time budget: visit never-synced / least-recently-synced
+      // folders first so a follow-up call after a deadline continues where the last one
+      // stopped instead of re-syncing the same leading folders forever.
+      const checkpoints = input.checkpoints;
+      const lastSync = (folder: string) => Date.parse(checkpoints[folder]?.lastSyncAt ?? "") || 0;
+      folders = [...folders].sort((a, b) => lastSync(a) - lastSync(b));
+    }
     const full = Boolean(input.full);
     const limit = normalizeLimit(input.limitPerFolder, full ? 250 : 50, 1, 500);
     const includeAttachmentText = input.includeAttachmentText !== false;
     const folderStats: Array<MailboxSyncCheckpoint> = [];
     const emails: EmailSummary[] = [];
+    const remainingFolders: string[] = [];
     const syncedAt = new Date().toISOString();
 
     for (const folder of folders) {
+      // At least one folder always runs, so a call can never return having made no progress.
+      if (input.deadlineAt !== undefined && folderStats.length > 0 && Date.now() >= input.deadlineAt) {
+        remainingFolders.push(folder);
+        continue;
+      }
       const batch = await this.collectFolderForIndex(folder, {
         full,
         limit,
@@ -3226,7 +3242,11 @@ export class SimpleIMAPService {
         syncedAt,
       });
       folderStats.push(batch.checkpoint);
-      emails.push(...batch.emails);
+      if (input.onFolderCollected) {
+        await input.onFolderCollected({ folder, checkpoint: batch.checkpoint, emails: batch.emails });
+      } else {
+        emails.push(...batch.emails);
+      }
     }
 
     this.lastSyncAt = syncedAt;
@@ -3236,6 +3256,8 @@ export class SimpleIMAPService {
       folders: await this.getFolders(true),
       folderStats,
       emails,
+      complete: remainingFolders.length === 0,
+      remainingFolders,
     };
   }
 
