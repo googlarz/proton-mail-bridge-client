@@ -212,9 +212,13 @@ test("Finding 1: a scheduled send holding SMTP mid-flight blocks a concurrent ma
     // draft itself before ever reaching the barriered SMTP call below.
     const checkDuePromise = queue.checkDue();
 
-    // Give checkDue's claim step a moment to run before the manual attempt,
-    // without depending on exact timing beyond "the claim happens first".
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Wait until the scheduled send has actually claimed the draft before the manual
+    // attempt. A fixed sleep here was flaky: on a slow runner (Windows CI) the claim took
+    // longer than the sleep, so the manual send won the race and the test's premise broke.
+    for (let waited = 0; (await draftStore.getDraft(draft.id)).status !== "sending"; waited += 5) {
+      assert.ok(waited < 5000, "the scheduled send never claimed the draft");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
 
     // Concurrent manual send_draft while the scheduled send's SMTP call is
     // still held on the barrier — this is the exact race from the report.
