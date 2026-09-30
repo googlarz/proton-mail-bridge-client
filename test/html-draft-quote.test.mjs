@@ -72,3 +72,31 @@ test("create_forward_draft with isHtml forwards as HTML, not a plain-text block"
     assert.match(html, /<p>---------- Forwarded message ---------<\/p>/);
   });
 });
+
+// Found in a real test to Gmail: the quoted original's signature logo (a data: image) showed as a
+// broken-image box and copied ~40 KB of base64 into the reply; the header date was raw ISO.
+import { buildReplyHtml, buildForwardHtml, formatQuoteDate, stripUnshippableImages } from "../dist/index.js";
+
+test("stripUnshippableImages replaces data: and cid: images with their alt text and keeps real images", () => {
+  const html = `<p>x</p><img src="data:image/png;base64,AAAA" alt="Logo"><img src='cid:abc'><img src="https://e.x/a.png" alt="Remote">`;
+  const out = stripUnshippableImages(html);
+  assert.ok(!/data:image|cid:/.test(out));
+  assert.match(out, /\[Logo\]/);
+  assert.match(out, /https:\/\/e\.x\/a\.png/, "ordinary http(s) images are left for the sanitizer to judge");
+});
+
+test("a reply quoting an HTML original with an inline logo carries no base64 and a readable date", () => {
+  const big = "A".repeat(50_000);
+  const detail = { ...original, html: `<p>Hi</p><img src="data:image/png;base64,${big}" alt="Logo" width="10">` };
+  const html = buildReplyHtml(detail, "<p>Thanks</p>");
+  assert.ok(!html.includes("base64"), "the quote must not copy the original's inline image");
+  assert.ok(html.length < 1000);
+  assert.ok(!/T\d\d:\d\d:\d\d/.test(html), "no raw ISO timestamp in the attribution line");
+  assert.match(html, /Wed 30 Sep\w* 2026, \d\d:\d\d/);
+  assert.ok(!buildForwardHtml(detail, "<p>FYI</p>").includes("base64"));
+});
+
+test("formatQuoteDate formats a real date and passes anything else through", () => {
+  assert.match(formatQuoteDate("2026-09-30T12:00:00.000Z"), /^Wed 30 Sep\w* 2026, \d\d:\d\d$/);
+  assert.equal(formatQuoteDate("an unknown date"), "an unknown date");
+});

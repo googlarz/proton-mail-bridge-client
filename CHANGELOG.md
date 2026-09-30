@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.43] — 2026-09-30
+
+Found by sending a real reply-to-own-mail test to Gmail.
+
+### Fixed
+- **A quoted original's inline logo showed as a broken image, and its base64 was copied into every reply.** `buildReplyHtml`/`buildForwardHtml` quoted the original's HTML as is, including `data:` images (e.g. a signature logo) that Gmail and Outlook do not display, and `cid:` images that refer to a part the reply does not carry. Each is now replaced by its alt text (or dropped); ordinary http(s) images are left to the sanitizer.
+- **The "On <date>, X wrote:" line showed a raw ISO timestamp** (`2026-09-30T08:11:15.000Z`). It now reads like `Wed 30 Sept 2026, 10:11` (server local time); an unparseable date is passed through unchanged.
+
+### Added
+- **`get_inbox_digest` takes `offset`** and reports `paging.topThreads` / `paging.staleAwaitingYou` (`hasMore`, `nextOffset`), so rows trimmed for size are reachable. Sections page independently; offset 0 keeps the previous shape.
+
+### Verified live (not just in tests)
+A reply drafted on a message sent from the odysseia account went to the original recipient, carried `In-Reply-To`/`References` (Gmail threaded it), came `From:` the odysseia address with SPF/DKIM/DMARC passing, and quoted the original as a readable HTML blockquote. The missing `In-Reply-To` seen earlier on a sent reply was only the rewritten copy in Proton's Sent folder, not what was transmitted.
+
 ## [2.1.42] — 2026-09-30
 
 Defects reported from real use, plus everything an independent review of these changes found before release. Each was reproduced with a failing test first; one report (base64 in plaintext) turned out to be a read-side leak rather than a sending bug.

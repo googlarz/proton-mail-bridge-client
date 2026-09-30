@@ -2313,10 +2313,34 @@ function quotePlainText(value: string): string {
     .join("\n");
 }
 
+// "2026-09-30T08:11:15.000Z" is not how anyone writes "On <date>, X wrote:". Falls back to the
+// raw value when it is not a parseable date (an "unknown date" placeholder, a header string).
+export function formatQuoteDate(value: string): string {
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) return value;
+  return new Date(time).toLocaleString("en-GB", {
+    weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+  }).replace(",", "");
+}
+
+// The quoted original's images cannot travel with a reply: a data: image is dropped by Gmail/Outlook
+// (a broken-image box) and copies its base64 into every reply, and a cid: image refers to a part
+// that is not attached here. Replace each with its alt text, or nothing.
+export function stripUnshippableImages(html: string): string {
+  return html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const src = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag);
+    const value = (src?.[1] ?? src?.[2] ?? src?.[3] ?? "").trim().toLowerCase();
+    if (!value.startsWith("data:") && !value.startsWith("cid:")) return tag;
+    const alt = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+    const text = (alt?.[1] ?? alt?.[2] ?? "").trim();
+    return text ? `[${text}]` : "";
+  });
+}
+
 function buildReplyText(detail: EmailDetail, body: string): string {
   const originalText = detail.text || detail.preview || "";
   const fromText = formatAddressList(detail.from);
-  const dateText = detail.date || detail.internalDate || "an unknown date";
+  const dateText = formatQuoteDate(detail.date || detail.internalDate || "an unknown date");
 
   return [
     body.trim(),
@@ -2358,10 +2382,10 @@ function buildForwardText(detail: EmailDetail, body?: string): string {
 // alternative (see smtp-service.ts's plainTextToHtml comment).
 export function buildReplyHtml(detail: EmailDetail, htmlBody: string): string {
   const originalHtml = typeof detail.html === "string" && detail.html
-    ? detail.html
+    ? stripUnshippableImages(detail.html)
     : plainTextToHtml(detail.text || detail.preview || "");
   const fromText = formatAddressList(detail.from);
-  const dateText = detail.date || detail.internalDate || "an unknown date";
+  const dateText = formatQuoteDate(detail.date || detail.internalDate || "an unknown date");
   return [
     htmlBody,
     `<p>On ${escapeHtmlForQuote(dateText)}, ${escapeHtmlForQuote(fromText || "the sender")} wrote:</p>`,
@@ -2371,7 +2395,7 @@ export function buildReplyHtml(detail: EmailDetail, htmlBody: string): string {
 
 export function buildForwardHtml(detail: EmailDetail, htmlBody?: string): string {
   const originalHtml = typeof detail.html === "string" && detail.html
-    ? detail.html
+    ? stripUnshippableImages(detail.html)
     : plainTextToHtml(detail.text || detail.preview || "");
   return [
     htmlBody?.trim() || "",
