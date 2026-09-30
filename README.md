@@ -485,6 +485,10 @@ PROTONMAIL_CLAUDE_RUNTIME_DIR=''      # where the Claude Desktop installer puts 
 
 ---
 
+## Ask before sending: address and signature (optional skill)
+
+With several accounts or a signature, the server sends from whichever `from` the caller passes and cannot know which one you meant. [`skills/send-with-identity`](skills/send-with-identity/SKILL.md) is a Claude skill that makes the agent ask "from which address, and with which signature?" before every send, reply, forward or schedule, then pass `from` and its own signature with `appendSignature: false` so nothing is doubled. It does not replace your explicit approval to send. Copy the folder to `~/.claude/skills/send-with-identity`, and fill in your addresses and signatures there (keep that copy private).
+
 ## Compared with Claude's native Gmail connector
 
 | Capability | Gmail connector | Proton Mail Bridge Client |
