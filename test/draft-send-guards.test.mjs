@@ -42,7 +42,8 @@ async function withTempDir(fn) {
   try {
     await fn(dataDir);
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    // Retries: a send this test left in flight can still be writing when the dir is removed (ENOTEMPTY).
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
 
