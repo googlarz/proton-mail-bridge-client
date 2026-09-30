@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.41] — 2026-09-30
+
+### Security
+- **`ip-address` 10.4.0 → 10.7.2** (transitive, via `@modelcontextprotocol/sdk` → `express-rate-limit`). Clears `npm audit`'s moderate advisories GHSA-rpw4-54j3-4h4q (`Address6.isLinkLocal()` matched fe80::/64 instead of fe80::/10) and GHSA-2vr4-cq9g-pvrc (NAT64 range 64:ff9b:1::/48 unclassified), both SSRF/trust-boundary classification bugs. This server speaks stdio and does not use express-rate-limit, so it was not reachable here; fixed so the audit is clean.
+- `fast-uri` 3.1.7 → 3.1.8 (transitive).
+
+Lockfile only, no code change.
+
 ## [2.1.40] — 2026-09-29
 
 ### Fixed
