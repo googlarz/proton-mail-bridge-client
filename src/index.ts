@@ -1518,6 +1518,7 @@ const TOOLS = [
       type: "object",
       properties: {
         limit: { type: "number", description: "Maximum threads per digest section.", default: 10 },
+        offset: { type: "number", description: "Skip this many threads in each section (use paging.<section>.nextOffset from the previous response to continue).", default: 0 },
         minAgeHours: {
           type: "number",
           description: "How old a thread must be before it is considered stale waiting on you.",
@@ -7871,6 +7872,10 @@ export function createServer(
         case "get_inbox_digest":
         {
           const limit = typeof args.limit === "number" ? args.limit : 10;
+          const offset = typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : 0;
+          // Each account is asked for offset+limit+1 rows per section: enough to slice the requested
+          // page from the merged list and to know whether another page exists.
+          const perAccountWindow = offset + limit + 1;
           // Fan-out merge: get_inbox_digest already internally aggregates two lists
           // (topThreads by score/recency, staleAwaitingYou by score/recency) plus a
           // `counts` summary — mirror that same internal merge style across accounts.
@@ -7888,7 +7893,7 @@ export function createServer(
                 limitPerFolder: 100,
               });
               const result = await bundle.localIndexService.getInboxDigest({
-                limit,
+                limit: perAccountWindow,
                 minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : undefined,
               });
               const slug = slugForBundle(bundle);
@@ -7904,14 +7909,10 @@ export function createServer(
             if (right.score !== left.score) return right.score - left.score;
             return new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime();
           };
-          const topBudget = trimThreadsToBudget(
-            perAccount.flatMap((entry) => entry.topThreads).sort(byScoreThenDate).slice(0, limit),
-            THREAD_LIST_RESPONSE_BUDGET_CHARS / 2,
-          );
-          const staleBudget = trimThreadsToBudget(
-            perAccount.flatMap((entry) => entry.staleAwaitingYou).sort(byScoreThenDate).slice(0, limit),
-            THREAD_LIST_RESPONSE_BUDGET_CHARS / 2,
-          );
+          const mergedTop = perAccount.flatMap((entry) => entry.topThreads).sort(byScoreThenDate);
+          const mergedStale = perAccount.flatMap((entry) => entry.staleAwaitingYou).sort(byScoreThenDate);
+          const topBudget = trimThreadsToBudget(mergedTop.slice(offset, offset + limit), THREAD_LIST_RESPONSE_BUDGET_CHARS / 2);
+          const staleBudget = trimThreadsToBudget(mergedStale.slice(offset, offset + limit), THREAD_LIST_RESPONSE_BUDGET_CHARS / 2);
           const topThreads = topBudget.threads;
           const staleAwaitingYou = staleBudget.threads;
           const countKeys = new Set(perAccount.flatMap((entry) => Object.keys(entry.counts)));
@@ -7925,6 +7926,12 @@ export function createServer(
             counts,
             topThreads,
             staleAwaitingYou,
+            // Each section pages independently with the same offset/limit: pass nextOffset back as
+            // `offset` to continue (a section with hasMore:false is exhausted).
+            paging: {
+              topThreads: paginationFields(mergedTop.length, offset, topThreads.length, topBudget.trimmed),
+              staleAwaitingYou: paginationFields(mergedStale.length, offset, staleAwaitingYou.length, staleBudget.trimmed),
+            },
             ...(topBudget.trimmed > 0 || staleBudget.trimmed > 0 ? { truncatedForSize: true } : {}),
           };
           return createTextResult(
