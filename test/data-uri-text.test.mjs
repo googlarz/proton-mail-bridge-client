@@ -13,8 +13,21 @@ test("redactInlineData replaces bracketed and bare data: URIs", () => {
   assert.equal(redactInlineData("plain text"), "plain text");
 });
 
-test("redactInlineData replaces very long bracketed URLs", () => {
-  assert.equal(redactInlineData(`[https://x.test/${"a".repeat(400)}]`), "[image]");
+// A password-reset / magic link can be 400+ characters; only data: URIs are redacted.
+test("redactInlineData leaves long http(s) links alone", () => {
+  const link = `[https://x.test/reset?token=${"a".repeat(400)}]`;
+  assert.equal(redactInlineData(`Click here\n${link}`), `Click here\n${link}`);
+});
+
+// The first version of this scrubber was quadratic: a hostile inbound mail could freeze the
+// server (a 240 KB body of "[data:" took ~20 s). It runs on every message read.
+test("redactInlineData is linear on hostile input", () => {
+  for (const chunk of ["[", "[data:", "(data:x", "data:", "[[[[a", `[${"a".repeat(299)}`]) {
+    const input = chunk.repeat(Math.ceil(1_000_000 / chunk.length));
+    const started = Date.now();
+    redactInlineData(input);
+    assert.ok(Date.now() - started < 1000, `1 MB of ${JSON.stringify(chunk)} took ${Date.now() - started} ms`);
+  }
 });
 
 test("htmlToMarkdown never emits a data: URI, with or without alt", () => {

@@ -2404,7 +2404,11 @@ export function getReplyRecipients(
   const isSelf = (address: string): boolean =>
     isSelfAddress(address, ownerEmail) || otherSelfAddresses.some((own) => isSelfAddress(address, own));
   const notSelf = (addresses: string[]): string[] => uniqueAddresses(addresses.filter((address) => !isSelf(address)));
-  const primary = addressValues(detail.replyTo).length > 0 ? detail.replyTo : detail.from;
+  // On a message we sent ourselves, Reply-To is OUR own header (e.g. an alias we set), not where the
+  // recipients want answers — it must not redirect the reply to ourselves or a third party.
+  const fromAddresses = addressValues(detail.from);
+  const sentBySelf = fromAddresses.length > 0 && fromAddresses.every(isSelf);
+  const primary = !sentBySelf && addressValues(detail.replyTo).length > 0 ? detail.replyTo : detail.from;
   const primaryAddresses = addressValues(primary);
   const strippedTo = notSelf(primaryAddresses);
   // A message the user SENT (from = self, nothing else in reply-to) is answered
@@ -3056,6 +3060,36 @@ export async function mailboxChangedSinceCheckpoint(
   }
 }
 
+// Bounded, best-effort refresh before an indexed search. The IMAP probe has connect timeouts
+// but nothing bounds a Bridge that accepts the connection and then stalls, and the point of
+// the indexed search is to answer without Bridge. So: give up after a few seconds, and after a
+// failure skip the probe for a while instead of paying the timeout on every search.
+const SEARCH_REFRESH_TIMEOUT_MS = 3_000;
+const SEARCH_REFRESH_BACKOFF_MS = 60_000;
+const searchRefreshSkipUntil = new WeakMap<AccountBundle, number>();
+
+async function refreshIndexForSearch(bundle: AccountBundle): Promise<void> {
+  const slug = bundle.account.slug;
+  if (Date.now() < (searchRefreshSkipUntil.get(bundle) ?? 0)) return;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, { folder: "INBOX", limitPerFolder: 100 }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`refresh did not finish in ${SEARCH_REFRESH_TIMEOUT_MS} ms`)), SEARCH_REFRESH_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    searchRefreshSkipUntil.set(bundle, Date.now() + SEARCH_REFRESH_BACKOFF_MS);
+    logger.warn("search_indexed_emails: refresh skipped, serving the local index", "MCPServer", {
+      account: slug,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function maybeRefreshLocalIndex(
   imapService: SimpleIMAPService,
   localIndexService: LocalIndexService,
@@ -3075,6 +3109,14 @@ async function maybeRefreshLocalIndex(
     if (!(await mailboxChangedSinceCheckpoint(imapService, localIndexService, input.folder ?? "INBOX"))) {
       return undefined;
     }
+    // Only the probed folder moved, so refresh only that one. An unscoped refresh here would
+    // sync EVERY folder (with attachment text) whenever a single INBOX message arrives — the
+    // pattern that used to blow past the client's 60 s request timeout.
+    return ensureFreshLocalIndex(imapService, localIndexService, {
+      folder: input.folder ?? "INBOX",
+      full: input.full,
+      limitPerFolder: input.limitPerFolder ?? 100,
+    });
   }
 
   return ensureFreshLocalIndex(imapService, localIndexService, {
@@ -5016,7 +5058,9 @@ export function createServer(
               cc,
               bcc: extraBcc,
               subject: prefixedSubject(detail.subject, "Re:"),
-              body: buildReplyText(detail, body),
+              // An HTML draft needs an HTML quote: a plain-text "> ..." quote appended to an HTML
+              // body collapses its newlines (HTML whitespace) into one run-on blob.
+              body: isHtml ? buildReplyHtml(detail, body) : buildReplyText(detail, body),
               isHtml,
               // Found live (external review): a `from` naming a real alias NOT
               // itself a separately-configured account (e.g. a genuine alias
@@ -5130,7 +5174,9 @@ export function createServer(
               cc,
               bcc,
               subject: prefixedSubject(detail.subject, "Fwd:"),
-              body: buildForwardText(detail, optionalString(args, "body")),
+              body: normalizeBoolean(args.isHtml, false)
+                ? buildForwardHtml(detail, optionalString(args, "body"))
+                : buildForwardText(detail, optionalString(args, "body")),
               isHtml: normalizeBoolean(args.isHtml, false),
               // Same fix as create_reply_draft — see its comment.
               from: optionalString(args, "from"),
@@ -5974,6 +6020,7 @@ export function createServer(
             };
             let result: Awaited<ReturnType<typeof imapService.searchEmails>>;
             let liveHasMore = false;
+            let liveFailedAccounts: Array<{ account: string; error: string }> = [];
             if (accountManager.all().length === 1) {
               result = await imapService.searchEmails(liveSearchInput);
               liveHasMore = result.emails.length === effectiveLimit;
@@ -5985,9 +6032,23 @@ export function createServer(
               const primarySlugForLive = accountManager.primary().account.slug;
               const targets = searchAccount ? [searchAccount] : accountManager.all();
               const perAccountLive: Array<{ bundle: AccountBundle; result: Awaited<ReturnType<typeof imapService.searchEmails>> }> = [];
+              const failedAccounts: Array<{ account: string; error: string }> = [];
+              let firstFailure: unknown;
               for (const bundle of targets) {
-                perAccountLive.push({ bundle, result: await bundle.imapService.searchEmails(liveSearchInput) });
+                try {
+                  perAccountLive.push({ bundle, result: await bundle.imapService.searchEmails(liveSearchInput) });
+                } catch (error) {
+                  // An implicit all-accounts search must not fail because ONE account is unreachable or
+                  // lacks the requested folder/label; report it and return the rest. An explicit
+                  // `account`, a bad argument (dates), or every account failing still throws.
+                  const invalidArgument = error instanceof Error && error.message.includes("Invalid date");
+                  if (searchAccount || invalidArgument || targets.length === 1) throw error;
+                  firstFailure ??= error;
+                  failedAccounts.push({ account: bundle.account.slug, error: error instanceof Error ? error.message : String(error) });
+                }
               }
+              if (perAccountLive.length === 0) throw firstFailure;
+              liveFailedAccounts = failedAccounts;
               const tagged = perAccountLive.flatMap(({ bundle, result: r }) =>
                 r.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlugForLive), email.id) })),
               );
@@ -6008,6 +6069,7 @@ export function createServer(
                 emails: projectFields(result.emails, parseFieldsArg(args.fields)),
                 returned: result.emails.length,
                 hasMore: liveHasMore,
+                ...(liveFailedAccounts.length > 0 ? { failedAccounts: liveFailedAccounts } : {}),
               },
               false,
               result.emails.map(emailSource),
@@ -7524,6 +7586,7 @@ export function createServer(
               checkedAt: new Date().toISOString(),
               complete: snapshot.complete,
               remainingFolders: snapshot.remainingFolders,
+              ...(snapshot.failedFolders.length > 0 ? { failedFolders: snapshot.failedFolders } : {}),
               elapsedMs: Date.now() - startedAtMs,
               budgetMs,
               ...(snapshot.complete
@@ -7611,6 +7674,12 @@ export function createServer(
             limit: typeof args.limit === "number" ? args.limit : undefined,
           };
           const indexedAccount = resolveAccountArg(args);
+          // Serve fresh data: a cheap UIDNEXT/message-count probe, refreshing only when the
+          // mailbox moved. This search used to read the index as-is, so mail that arrived
+          // after the last sync was reported missing. A refresh failure (Bridge down) must
+          // never block serving the local index, which is the point of this tool.
+          const refreshTargets = indexedAccount ? [indexedAccount] : accountManager.all();
+          await Promise.all(refreshTargets.map((bundle) => refreshIndexForSearch(bundle)));
           if (accountManager.all().length === 1) {
             const result = await localIndexService.search(searchIndexedInput);
             return createTextResult(
@@ -8190,7 +8259,9 @@ export function createServer(
               cc,
               bcc: extraBcc,
               subject: prefixedSubject(detail.subject, "Re:"),
-              body: buildReplyText(detail, body),
+              // An HTML draft needs an HTML quote: a plain-text "> ..." quote appended to an HTML
+              // body collapses its newlines (HTML whitespace) into one run-on blob.
+              body: isHtml ? buildReplyHtml(detail, body) : buildReplyText(detail, body),
               isHtml,
               // Same fix as create_reply_draft — see its comment.
               from: optionalString(args, "from"),

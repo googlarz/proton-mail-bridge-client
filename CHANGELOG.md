@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.42] — 2026-09-30
+
+Defects reported from real use, plus everything an independent review of these changes found before release. Each was reproduced with a failing test first; one report (base64 in plaintext) turned out to be a read-side leak rather than a sending bug.
+
+### Fixed
+- **Replying to a message you sent went back to yourself.** `getReplyRecipients` removed your address from the reply target, found nothing left and fell back to self. It now treats your `+tag` aliases and every other configured account as "self" and replies to the original To (reply-all: original To and Cc). A genuine note-to-self still replies to self. Applies to `reply_to_email`, `reply_all_email`, `create_reply_draft`, `create_thread_reply_draft`.
+- **`search_emails` searched only the primary account** while `search_indexed_emails` searched all, so a live search for mail on a secondary account returned nothing. Both tools now take an optional `account` (address or slug; unknown value is a clear error), default to all accounts with `<slug>::`-prefixed ids, and their descriptions say which accounts they search. `search_emails` queries accounts one at a time (one IMAP connection each).
+- **`search_indexed_emails` could report a reply as missing.** It never refreshed the index at all (only the stats/thread tools did), and the refresh elsewhere only looked at age (60 min) and INBOX. It now probes UIDNEXT/message count first and refreshes only if the mailbox moved; a failed refresh (Bridge down) still serves the local index. Results and the thread/digest tools report `lastSyncAt`, `indexFreshnessMinutes` and `stale` (older than 15 min); `get_index_status` adds `unsyncedFolders` and the background-sync config.
+- **`sync_emails` with `full:true` lost everything on a timeout.** Progress was committed once, after every folder. It now commits per folder, works through never-synced/least-recently-synced folders first, stops starting new folders after `timeBudgetSeconds` (default 45, max 300), and reports `complete`, `remainingFolders`, `elapsedMs` and per-folder progress, so the next call continues. A folder already in flight still runs to completion (at most 500 messages), so one very large folder can still overrun a client timeout.
+- **`get_actionable_threads` and the other thread lists returned very large responses** because every thread row carried its full message objects. Rows are now shaped (participants, message ids, labels and previews capped, `messageCount` exact) under a 60,000-character response budget with `offset`/`nextOffset`/`hasMore`. On a synthetic 2,000-message index: actionable 879K→60K, threads 232K→75K, digest 351K→24K, follow-ups 429K→31K characters.
+- **A base64 image without `alt` showed up as `[data:image/png;base64,...]` in message text.** The leak was on the read side, not in what we send: mailparser generates the text for an HTML-only message and renders such an image as `[src]`. The text and preview returned to the model now replace it with `[image]` (bare data: URIs become `[data]`), which also stops huge base64 from entering the model's context. Outbound SMTP and draft sync were already correct.
+
+- **HTML reply/forward drafts had a collapsed, unreadable quote.** `create_reply_draft`, `create_thread_reply_draft` and `create_forward_draft` always appended a plain-text `> ...` quote, even when the draft body was HTML, so newlines collapsed into one run-on blob with literal `>` marks (seen in a real sent mail). With `isHtml` they now build an HTML `<blockquote>` / forwarded block like `reply_to_email` already did.
+- **A reply to a message you sent followed your own `Reply-To` header** (e.g. an alias you set) instead of going to the original recipients. On a message you sent, `Reply-To` is now ignored.
+
+### Found in review, fixed before release
+- **`redactInlineData` was quadratic** (introduced by the base64 fix above): a hostile inbound body of `[data:` repeated ~240 KB froze the server for ~20 s, and it runs on every message read. Now one linear anchored pattern (1 MB of adversarial input in ~20 ms). It also no longer replaces legitimate long `https://` links (magic/reset links) with `[image]`; only `data:` URIs are redacted.
+- **`search_indexed_emails` could hang when Bridge accepted a connection and then stalled** (the new change probe had connect timeouts only). The refresh is now abandoned after 3 s and skipped for 60 s after a failure.
+- **A single new INBOX message made the analytics tools refresh every folder** (with attachment text), the pattern that used to exceed the client timeout. A change-triggered refresh now stays on the probed folder.
+- **One unreadable folder blocked every folder behind it in an all-folders `sync_emails`** (it never got a checkpoint, so it stayed first forever). It is now recorded in `failedFolders` (and `complete:false`) and the run continues; a dead connection, bad credentials, or an explicitly requested single folder still fail loudly.
+- **A partial `sync_emails` overwrote `last_indexed_at`/`last_indexed_count`** for folders it never reached. They are kept.
+- **`search_emails` without `account` failed entirely when one account was unreachable** or lacked the requested folder. It now returns the other accounts' results plus `failedAccounts`; an explicit `account`, an invalid date, or every account failing still errors.
+
+### Not changed
+- The per-search change probe costs a local `getStatus()` (~60 ms on a 30k-message index); left as is.
+- `get_inbox_digest` reports `truncatedForSize` but has no `offset`.
+
+### Added
+- Tests: `html-draft-quote`, `reply-recipients`, `reply-to-own-sent-draft`, `multi-account-search-tools`, `data-uri-text`, `index-freshness-sync-shaping`, `search-indexed-refresh` (546 total).
+
 ## [2.1.41] — 2026-09-30
 
 ### Security

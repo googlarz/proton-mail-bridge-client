@@ -3210,6 +3210,7 @@ export class SimpleIMAPService {
     emails: EmailSummary[];
     complete: boolean;
     remainingFolders: string[];
+    failedFolders: Array<{ folder: string; error: string }>;
   }> {
     let folders = await this.resolveFolders(input.folder);
     if (!input.folder?.trim() && input.checkpoints) {
@@ -3226,6 +3227,7 @@ export class SimpleIMAPService {
     const folderStats: Array<MailboxSyncCheckpoint> = [];
     const emails: EmailSummary[] = [];
     const remainingFolders: string[] = [];
+    const failedFolders: Array<{ folder: string; error: string }> = [];
     const syncedAt = new Date().toISOString();
 
     for (const folder of folders) {
@@ -3234,13 +3236,24 @@ export class SimpleIMAPService {
         remainingFolders.push(folder);
         continue;
       }
-      const batch = await this.collectFolderForIndex(folder, {
-        full,
-        limit,
-        includeAttachmentText,
-        checkpoint: input.checkpoints?.[folder],
-        syncedAt,
-      });
+      let batch;
+      try {
+        batch = await this.collectFolderForIndex(folder, {
+          full,
+          limit,
+          includeAttachmentText,
+          checkpoint: input.checkpoints?.[folder],
+          syncedAt,
+        });
+      } catch (error) {
+        // One unreadable folder must not block every folder behind it (it would stay first in
+        // the least-recently-synced order forever). But a dead connection or bad credentials
+        // fails every folder alike, and an explicitly requested single folder is the caller's
+        // to hear about — those still throw.
+        if (input.folder?.trim() || isLikelyAuthenticationError(error) || isLikelyConnectionError(error)) throw error;
+        failedFolders.push({ folder, error: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
       folderStats.push(batch.checkpoint);
       if (input.onFolderCollected) {
         await input.onFolderCollected({ folder, checkpoint: batch.checkpoint, emails: batch.emails });
@@ -3256,8 +3269,9 @@ export class SimpleIMAPService {
       folders: await this.getFolders(true),
       folderStats,
       emails,
-      complete: remainingFolders.length === 0,
+      complete: remainingFolders.length === 0 && failedFolders.length === 0,
       remainingFolders,
+      failedFolders,
     };
   }
 

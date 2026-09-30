@@ -1789,8 +1789,10 @@ export class LocalIndexService {
         messages = excluded.messages,
         unseen = excluded.unseen,
         uid_next = excluded.uid_next,
-        last_indexed_at = excluded.last_indexed_at,
-        last_indexed_count = excluded.last_indexed_count
+        -- A snapshot with no stat for this folder (e.g. the folder-list-only commit of a partial
+        -- sync) must not claim the folder was just indexed, or erase its last count.
+        last_indexed_at = COALESCE(excluded.last_indexed_at, folders.last_indexed_at),
+        last_indexed_count = COALESCE(excluded.last_indexed_count, folders.last_indexed_count)
     `);
 
     const upsertMessage = db.prepare(`
@@ -1994,7 +1996,7 @@ export class LocalIndexService {
           messages: folder.messages ?? null,
           unseen: folder.unseen ?? null,
           uid_next: folder.uidNext ?? null,
-          last_indexed_at: input.syncedAt,
+          last_indexed_at: folderStat ? input.syncedAt : null,
           last_indexed_count: folderStat?.fetched ?? null,
         });
       }

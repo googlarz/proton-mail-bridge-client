@@ -75,3 +75,19 @@ test("getReplyRecipients keeps replying to self for a note-to-self even with oth
   const recipients = getReplyRecipients(detail, "owner@example.com", false, ["work@example.com"]);
   assert.deepEqual(recipients.to, ["owner@example.com"]);
 });
+
+test("a reply to a message we sent ignores our own Reply-To and goes to the original recipients", () => {
+  const detail = {
+    from: [{ address: "me@example.com" }],
+    replyTo: [{ address: "alias@elsewhere.test" }],
+    to: [{ address: "bob@example.org" }],
+    cc: [{ address: "alice@example.org" }],
+  };
+  assert.deepEqual(getReplyRecipients(detail, "me@example.com", false), { to: ["bob@example.org"], cc: [] });
+  assert.deepEqual(getReplyRecipients(detail, "me@example.com", true), { to: ["bob@example.org"], cc: ["alice@example.org"] });
+});
+
+test("a reply to someone else's message still honours that message's Reply-To", () => {
+  const detail = { from: [{ address: "list@example.org" }], replyTo: [{ address: "owner@example.org" }], to: [{ address: "me@example.com" }], cc: [] };
+  assert.deepEqual(getReplyRecipients(detail, "me@example.com", false), { to: ["owner@example.org"], cc: [] });
+});

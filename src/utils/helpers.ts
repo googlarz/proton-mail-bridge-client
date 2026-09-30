@@ -232,23 +232,19 @@ export function previewText(value?: string, maxLength = 220): string | undefined
   return `${normalized.slice(0, maxLength - 1)}...`;
 }
 
-// mailparser derives `text` for HTML-only messages with html-to-text, which
-// renders an alt-less <img> as "[<src>]" — for an inlined data: image that is
-// the whole base64 blob. Also covers senders' own text/plain containing one.
-// Replaces data: URIs (and any bracketed very long URL) with a bounded
-// placeholder so it never reaches a preview or the model's context.
-const DATA_URI_IN_BRACKETS = /[[(]\s*data:[^\s\])]*\s*[\])]/gi;
-const BARE_DATA_URI = /data:[a-z0-9.+-]+\/[a-z0-9.+-]+[;,][^\s"'<>)\]]*/gi;
-const LONG_BRACKETED_URL = /\[(?:https?:\/\/)?[^\s\]]{300,}\]/gi;
 
+// One anchored, non-nested pattern: it can only start at a literal "data:" and its character
+// class excludes "[" so a run of brackets cannot restart it. The previous bracket-first regexes
+// were quadratic on hostile input (a 240 KB body of "[data:" took ~20 s on the event loop).
+const DATA_URI = /\[?data:[^\s\[\]()"'<>]*\]?/gi;
+
+// Replaces data: URIs in text derived from mail: "[data:...]" (html-to-text's rendering of an
+// alt-less <img>) becomes "[image]", a bare one "[data]". Long http(s) links are left alone.
 export function redactInlineData(value?: string): string | undefined {
   if (!value) {
     return value;
   }
-  return value
-    .replace(DATA_URI_IN_BRACKETS, "[image]")
-    .replace(LONG_BRACKETED_URL, "[image]")
-    .replace(BARE_DATA_URI, "[data]");
+  return value.replace(DATA_URI, (match) => (match.startsWith("[") && match.endsWith("]") ? "[image]" : "[data]"));
 }
 
 export function stripHtmlToText(value?: string): string | undefined {

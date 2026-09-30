@@ -273,3 +273,40 @@ test("shapeThreadForList truncates oversize fields and flags them", () => {
   assert.equal(shaped.messageIds.at(-1), "m49", "newest ids are kept");
   assert.equal(shaped.messageIdsTruncated, true);
 });
+
+// Found in review: when one folder threw during an all-folders sync, the whole call threw, that
+// folder never got a checkpoint, and it stayed first in least-recently-synced order — so every
+// folder behind it was never reached.
+test("an all-folders sync survives one unreadable folder and reports it", async () => {
+  const { service, visited } = stubbedImap(["A", "B", "C"]);
+  const original = service.collectFolderForIndex;
+  service.collectFolderForIndex = async (path, input) => {
+    if (path === "B") throw new Error("Mailbox does not exist");
+    return original(path, input);
+  };
+  const result = await service.collectEmailsForIndex({ checkpoints: {} });
+  assert.deepEqual(visited, ["A", "C"]);
+  assert.deepEqual(result.folderStats.map((s) => s.folder), ["A", "C"]);
+  assert.deepEqual(result.failedFolders, [{ folder: "B", error: "Mailbox does not exist" }]);
+  assert.equal(result.complete, false, "a run that skipped a folder must not report complete");
+});
+
+test("an explicitly requested single folder that fails still throws, and so does a dead connection", async () => {
+  const single = stubbedImap(["A"]);
+  single.service.collectFolderForIndex = async () => { throw new Error("Mailbox does not exist"); };
+  await assert.rejects(single.service.collectEmailsForIndex({ folder: "A" }), /does not exist/);
+  const dead = stubbedImap(["A", "B"]);
+  dead.service.collectFolderForIndex = async () => { const e = new Error("Connection closed"); e.code = "ECONNRESET"; throw e; };
+  await assert.rejects(dead.service.collectEmailsForIndex({ checkpoints: {} }));
+});
+
+test("a folder-list-only commit keeps each folder's last_indexed values", async () => {
+  await withIndex(async (service) => {
+    const f = { path: "INBOX", name: "INBOX", delimiter: "/", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 };
+    await service.recordSnapshot({ syncedAt: "2026-01-01T00:00:00.000Z", folders: [f], folderStats: [{ folder: "INBOX", fetched: 7, total: 9 }], emails: [makeEmail(1)] });
+    await service.recordSnapshot({ syncedAt: "2026-01-02T00:00:00.000Z", folders: [f], folderListComplete: true, folderStats: [], emails: [] });
+    const inbox = (await service.getStatus()).folders.find((x) => x.path === "INBOX");
+    assert.equal(inbox.lastIndexedAt, "2026-01-01T00:00:00.000Z");
+    assert.equal(inbox.lastIndexedCount, 7);
+  });
+});

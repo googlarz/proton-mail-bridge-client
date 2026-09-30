@@ -70,7 +70,7 @@ async function withServer(fn) {
   await Promise.all([server.connect(st), client.connect(ct)]);
   const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
   try {
-    await fn({ call, calls, secondarySlug: secondary.slug, maxInFlight: () => maxInFlight });
+    await fn({ call, calls, secondarySlug: secondary.slug, maxInFlight: () => maxInFlight, primaryBundle: p, secondBundle: s });
   } finally {
     await client.close();
     await server.close();
@@ -113,5 +113,25 @@ test("search_emails queries accounts one at a time and honours limit across the 
     assert.equal(maxInFlight(), 1, "per-account IMAP searches must not overlap");
     assert.equal(result.emails.length, 1);
     assert.equal(result.hasMore, true);
+  });
+});
+
+// Found in review: the default became "all accounts", so ONE unreachable account (or a folder that
+// exists in only one account) made the whole live search fail. It must return the rest and say what failed.
+test("search_emails without account returns the other accounts' results when one account fails", async () => {
+  await withServer(async ({ call, secondBundle }) => {
+    secondBundle.imapService.searchEmails = async () => { throw new Error("Mailbox does not exist"); };
+    const result = await call("search_emails", { folder: "Sent" });
+    assert.equal(result.emails.length, 1);
+    assert.deepEqual(result.failedAccounts, [{ account: "second-example-com", error: "Mailbox does not exist" }]);
+  });
+});
+
+test("search_emails throws when the account was named explicitly, or when every account fails", async () => {
+  await withServer(async ({ call, primaryBundle, secondBundle }) => {
+    secondBundle.imapService.searchEmails = async () => { throw new Error("boom"); };
+    await assert.rejects(call("search_emails", { folder: "Sent", account: "second@example.com" }), /boom/);
+    primaryBundle.imapService.searchEmails = async () => { throw new Error("boom too"); };
+    await assert.rejects(call("search_emails", { folder: "Sent" }), /boom/);
   });
 });
