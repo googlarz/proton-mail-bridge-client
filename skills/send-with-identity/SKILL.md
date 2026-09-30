@@ -31,7 +31,7 @@ Fill in your own. Keep this file out of any public repo once it holds real addre
 
 ### you@yourcompany.com
 
-Paste the signature HTML here, or keep it in a file next to this one (e.g. `assets/signature.html`) and reference it. An inline logo can be a `<img src="data:image/png;base64,...">` up to 512 KB (larger is stripped by the outbound sanitizer), and inline `style` attributes on a short allowlist survive; remote images are removed.
+Paste the signature HTML here, or keep it in a file next to this one (e.g. `assets/signature.html`) and reference it. Put a logo in as an inline attachment, not a `data:` URI: reference `<img src="cid:logo">` and send `attachments: [{ filename: "logo.png", content: <base64>, contentType: "image/png", cid: "logo", contentDisposition: "inline" }]`. Gmail and Outlook drop `data:` images (the server's sanitizer does accept them up to 512 KB, but recipients' clients may not show them). Inline `style` attributes on a short allowlist survive, remote images are removed, and links must be http/https/mailto (a `tel:` link is stripped, so write the phone as plain text).
 
 Use `none` for an address without a signature so the question is not repeated with a stale suggestion.
 
