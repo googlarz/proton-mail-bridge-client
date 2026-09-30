@@ -50,6 +50,7 @@ import {
   foldQuotedHistory,
   isTextLikeMimeType,
   isValidEmail,
+  isSelfAddress,
   lowerCaseAddress,
   normalizeBoolean,
   normalizeLimit,
@@ -663,11 +664,12 @@ const TOOLS = [
   },
   {
     name: "search_emails",
-    description: "Search emails via live IMAP filters with optional local post-processing for attachments and labels. Use when you need real-time results or must find messages received after the last sync. Prefer search_indexed_emails when the local index is current — it is significantly faster and works even when Bridge IMAP is unavailable. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail. Without `folder` it searches every real folder but not the All Mail / Labels/* / Starred views (they only duplicate mail already in a real folder and made an all-folders search ~3x slower); pass `folder` (e.g. 'Labels/x' or 'All Mail') or `label`/`mailboxRole` to search those.",
+    description: "Search emails via live IMAP filters, across ALL configured accounts by default (accounts are queried one at a time; pass `account` = address or slug to search only one; non-primary ids are prefixed '<slug>::'), with optional local post-processing for attachments and labels. Use when you need real-time results or must find messages received after the last sync. Prefer search_indexed_emails when the local index is current — it is significantly faster and works even when Bridge IMAP is unavailable. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail. Without `folder` it searches every real folder but not the All Mail / Labels/* / Starred views (they only duplicate mail already in a real folder and made an all-folders search ~3x slower); pass `folder` (e.g. 'Labels/x' or 'All Mail') or `label`/`mailboxRole` to search those.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
+        account: { type: "string", description: "Account address or slug to search (see list_accounts). Omit to search ALL configured accounts; non-primary ids come back prefixed '<slug>::'." },
         query: { type: "string", description: "Free-text query across headers and body." },
         folder: { type: "string", description: "Folder to search. Defaults to all folders." },
         label: { type: "string", description: "Label name (Proton: 'Newsletters' = the Labels/Newsletters folder; a folder path such as 'Labels/Newsletters' or 'INBOX' also works). Searches just that label's folder, which is much faster than scanning every folder." },
@@ -1421,11 +1423,12 @@ const TOOLS = [
   {
     name: "search_indexed_emails",
     description:
-      "Search the local SQLite mailbox index without making any IMAP connection. Supports free-text and field shortcuts inline: from:alice@example.com, to:bob, subject:invoice, label:Archive, domain:acme.com. Use for fast, offline-capable searches when the index is populated. Prefer search_emails when you need live IMAP results or when the index is stale or empty. Prefer this over search_emails when the index is current. Use search_emails if messages were received after the last sync. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail.",
+      "Search the local SQLite mailbox index (of ALL configured accounts by default; pass `account` = address or slug to search only one; non-primary ids are prefixed '<slug>::') without making any IMAP connection. Supports free-text and field shortcuts inline: from:alice@example.com, to:bob, subject:invoice, label:Archive, domain:acme.com. Use for fast, offline-capable searches when the index is populated. Prefer search_emails when you need live IMAP results or when the index is stale or empty. Prefer this over search_emails when the index is current. Use search_emails if messages were received after the last sync. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
+        account: { type: "string", description: "Account address or slug to search (see list_accounts). Omit to search ALL configured accounts; non-primary ids come back prefixed '<slug>::'." },
         query: { type: "string", description: "Free-text query across indexed metadata." },
         folder: { type: "string", description: "Folder filter." },
         label: { type: "string", description: "Folder or label filter." },
@@ -2387,29 +2390,31 @@ export function getReplyRecipients(
   detail: EmailDetail,
   ownerEmail: string,
   replyAll: boolean,
+  otherSelfAddresses: string[] = [],
 ): { to: string[]; cc: string[] } {
-  const owner = lowerCaseAddress(ownerEmail);
+  // "Self" = the owner (incl. +tag aliases) or any other configured account.
+  const isSelf = (address: string): boolean =>
+    isSelfAddress(address, ownerEmail) || otherSelfAddresses.some((own) => isSelfAddress(address, own));
+  const notSelf = (addresses: string[]): string[] => uniqueAddresses(addresses.filter((address) => !isSelf(address)));
   const primary = addressValues(detail.replyTo).length > 0 ? detail.replyTo : detail.from;
   const primaryAddresses = addressValues(primary);
-  const strippedTo = uniqueAddresses(primaryAddresses.filter((address) => lowerCaseAddress(address) !== owner));
-  // A self-addressed email (e.g. a "note to self") has no other party to
-  // reply to — stripping the owner then leaves zero recipients and every
-  // reply throws "Unable to infer reply recipient." Every real mail client
-  // replies back to the same address in that case instead of refusing.
-  // Found live: replying to a self-sent test fixture failed outright.
-  const to = strippedTo.length > 0 ? strippedTo : uniqueAddresses(primaryAddresses);
+  const strippedTo = notSelf(primaryAddresses);
+  // A message the user SENT (from = self, nothing else in reply-to) is answered
+  // by writing to the people it was sent to, not back to the user. Only when
+  // there is nobody else (a "note to self") do we fall back to self, as every
+  // mail client does — stripping the owner otherwise leaves zero recipients and
+  // the reply would throw "Unable to infer reply recipient."
+  const originalTo = strippedTo.length === 0 ? notSelf(addressValues(detail.to)) : [];
+  const to =
+    strippedTo.length > 0 ? strippedTo : originalTo.length > 0 ? originalTo : uniqueAddresses(primaryAddresses);
 
   if (!replyAll) {
     return { to, cc: [] };
   }
 
-  const ccPool = uniqueAddresses([
-    ...addressValues(detail.to),
-    ...addressValues(detail.cc),
-  ]).filter((address) => {
-    const normalized = lowerCaseAddress(address);
-    return normalized !== owner && !to.some((recipient) => lowerCaseAddress(recipient) === normalized);
-  });
+  const ccPool = notSelf([...addressValues(detail.to), ...addressValues(detail.cc)]).filter(
+    (address) => !to.some((recipient) => lowerCaseAddress(recipient) === lowerCaseAddress(address)),
+  );
 
   return { to, cc: ccPool };
 }
@@ -3880,6 +3885,29 @@ export function createServer(
   // Resolves an emailId's optional account-slug prefix (see splitAccountPrefix) to its
   // owning AccountBundle, defaulting to the primary account for a plain, unprefixed id —
   // which covers every id that existed before multi-account support, unchanged.
+  // Resolves an optional `account` tool argument (address or slug, case-insensitive) to
+  // its bundle; undefined when omitted. Unknown values are a clear InvalidParams error.
+  function resolveAccountArg(args: Record<string, unknown>): AccountBundle | undefined {
+    const raw = optionalString(args, "account");
+    if (raw === undefined) {
+      return undefined;
+    }
+    const wanted = raw.trim().toLowerCase();
+    const found = accountManager
+      .all()
+      .find((bundle) => bundle.account.slug.toLowerCase() === wanted || bundle.account.address.toLowerCase() === wanted);
+    if (!found) {
+      const known = accountManager.all().map((bundle) => `${bundle.account.address} (${bundle.account.slug})`).join(", ");
+      throw new McpError(ErrorCode.InvalidParams, `Unknown account "${raw}". Configured accounts: ${known}.`);
+    }
+    return found;
+  }
+
+  // Every configured account address — reply helpers treat all of them as "self".
+  function allAccountAddresses(): string[] {
+    return accountManager.all().map((bundle) => bundle.account.address);
+  }
+
   function resolveAccountForEmailId(emailId: string): { bundle: AccountBundle; rest: string } {
     const { accountSlug, rest } = splitAccountPrefix(emailId, accountManager.additionalSlugs());
     return { bundle: accountManager.bySlugOrPrimary(accountSlug), rest };
@@ -4472,7 +4500,7 @@ export function createServer(
           const attachments = optionalAttachmentList(args.attachments);
           const extraCc = parseEmails(optionalString(args, "cc"));
           const extraBcc = parseEmails(optionalString(args, "bcc"));
-          const recipients = getReplyRecipients(detail, readBundleReply.config.smtp.username, replyAll);
+          const recipients = getReplyRecipients(detail, readBundleReply.config.smtp.username, replyAll, allAccountAddresses());
           const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
           const to = uniqueAddresses(recipients.to);
 
@@ -4574,7 +4602,7 @@ export function createServer(
           const attachmentsRa = optionalAttachmentList(args.attachments);
           const extraCcRa = parseEmails(optionalString(args, "cc"));
           const extraBccRa = parseEmails(optionalString(args, "bcc"));
-          const recipientsRa = getReplyRecipients(detailRa, readBundleRa.config.smtp.username, true);
+          const recipientsRa = getReplyRecipients(detailRa, readBundleRa.config.smtp.username, true, allAccountAddresses());
           const ccRa = uniqueAddresses([...recipientsRa.cc, ...extraCcRa]);
           const toRa = uniqueAddresses(recipientsRa.to);
 
@@ -4888,7 +4916,7 @@ export function createServer(
           const attachments = optionalAttachmentList(args.attachments);
           const extraCc = parseEmails(optionalString(args, "cc"));
           const extraBcc = parseEmails(optionalString(args, "bcc"));
-          const recipients = getReplyRecipients(detail, createReplyReadBundle.config.smtp.username, replyAll);
+          const recipients = getReplyRecipients(detail, createReplyReadBundle.config.smtp.username, replyAll, allAccountAddresses());
           const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
           const to = uniqueAddresses(recipients.to);
 
@@ -5847,7 +5875,8 @@ export function createServer(
         case "search_emails": {
           const effectiveLimit = normalizeLimit(args.limit, 50);
           try {
-            const result = await imapService.searchEmails({
+            const searchAccount = resolveAccountArg(args);
+            const liveSearchInput = {
               query: optionalString(args, "query"),
               folder: optionalString(args, "folder"),
               label: optionalString(args, "label"),
@@ -5872,13 +5901,43 @@ export function createServer(
               listId: optionalString(args, "listId"),
               limit: effectiveLimit,
               includeSnippet: normalizeBoolean(args.includeSnippet, false),
-            });
+            };
+            let result: Awaited<ReturnType<typeof imapService.searchEmails>>;
+            let liveHasMore = false;
+            if (accountManager.all().length === 1) {
+              result = await imapService.searchEmails(liveSearchInput);
+              liveHasMore = result.emails.length === effectiveLimit;
+            } else {
+              // Merge strategy (mirrors search_indexed_emails): each account has its own
+              // single IMAP connection, so search the selected accounts strictly one after
+              // another, tag non-primary ids with the account slug, re-sort newest-first
+              // and re-apply the limit across the merged set.
+              const primarySlugForLive = accountManager.primary().account.slug;
+              const targets = searchAccount ? [searchAccount] : accountManager.all();
+              const perAccountLive: Array<{ bundle: AccountBundle; result: Awaited<ReturnType<typeof imapService.searchEmails>> }> = [];
+              for (const bundle of targets) {
+                perAccountLive.push({ bundle, result: await bundle.imapService.searchEmails(liveSearchInput) });
+              }
+              const tagged = perAccountLive.flatMap(({ bundle, result: r }) =>
+                r.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlugForLive), email.id) })),
+              );
+              const merged = sortByDateDesc(tagged, (email) => email.internalDate || email.date).slice(0, effectiveLimit);
+              result = {
+                folders: [...new Set(perAccountLive.flatMap(({ result: r }) => r.folders))],
+                limit: effectiveLimit,
+                total: perAccountLive.reduce((sum, { result: r }) => sum + r.total, 0),
+                totalMatched: perAccountLive.reduce((sum, { result: r }) => sum + r.totalMatched, 0),
+                hasMore: false,
+                emails: merged,
+              };
+              liveHasMore = merged.length === effectiveLimit;
+            }
             return createTextResult(
               {
                 ...result,
                 emails: projectFields(result.emails, parseFieldsArg(args.fields)),
                 returned: result.emails.length,
-                hasMore: result.emails.length === effectiveLimit,
+                hasMore: liveHasMore,
               },
               false,
               result.emails.map(emailSource),
@@ -7422,6 +7481,7 @@ export function createServer(
             dateTo: optionalString(args, "dateTo"),
             limit: typeof args.limit === "number" ? args.limit : undefined,
           };
+          const indexedAccount = resolveAccountArg(args);
           if (accountManager.all().length === 1) {
             const result = await localIndexService.search(searchIndexedInput);
             return createTextResult(
@@ -7437,7 +7497,7 @@ export function createServer(
           // requested limit across the merged set and sum totals/hasMore.
           const primarySlugForSearch = accountManager.primary().account.slug;
           const searchPerAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => ({ bundle, result: await bundle.localIndexService.search(searchIndexedInput) })),
+            (indexedAccount ? [indexedAccount] : accountManager.all()).map(async (bundle) => ({ bundle, result: await bundle.localIndexService.search(searchIndexedInput) })),
           );
           const searchLimit = searchIndexedInput.limit ?? 50;
           const taggedSearchEmails = searchPerAccount.flatMap(({ bundle, result }) =>
@@ -7446,7 +7506,7 @@ export function createServer(
           const mergedSearchEmails = sortByDateDesc(taggedSearchEmails, (email) => email.internalDate || email.date).slice(0, searchLimit);
           const totalSearch = searchPerAccount.reduce((sum, { result }) => sum + result.total, 0);
           const warnings = searchPerAccount.flatMap(({ result }) => result.warnings ?? []);
-          const primarySearchEntry = searchPerAccount.find(({ bundle }) => bundle.account.slug === primarySlugForSearch);
+          const primarySearchEntry = searchPerAccount.find(({ bundle }) => bundle.account.slug === primarySlugForSearch) ?? searchPerAccount[0];
           return createTextResult(
             {
               total: totalSearch,
@@ -7935,7 +7995,7 @@ export function createServer(
           const attachments = optionalAttachmentList(args.attachments);
           const extraCc = parseEmails(optionalString(args, "cc"));
           const extraBcc = parseEmails(optionalString(args, "bcc"));
-          const recipients = getReplyRecipients(detail, threadReplyBundle.config.smtp.username, replyAll);
+          const recipients = getReplyRecipients(detail, threadReplyBundle.config.smtp.username, replyAll, allAccountAddresses());
           const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
           const to = uniqueAddresses(recipients.to);
 

@@ -45,3 +45,33 @@ test("getReplyRecipients replyAll still excludes the owner from cc when self-add
   assert.deepEqual(recipients.to, ["owner@example.com"]);
   assert.deepEqual(recipients.cc, ["third@example.com"]);
 });
+
+test("getReplyRecipients on a message the owner SENT replies to the original To, not to self", () => {
+  const detail = detailWithFrom(["owner@example.com"], { to: ["alice@example.com"], cc: ["bob@example.com"] });
+  const single = getReplyRecipients(detail, "owner@example.com", false);
+  assert.deepEqual(single.to, ["alice@example.com"]);
+  assert.deepEqual(single.cc, []);
+  const all = getReplyRecipients(detail, "owner@example.com", true);
+  assert.deepEqual(all.to, ["alice@example.com"]);
+  assert.deepEqual(all.cc, ["bob@example.com"]);
+});
+
+test("getReplyRecipients treats a +tag alias of the owner as self on a sent message", () => {
+  const detail = detailWithFrom(["owner+news@example.com"], { to: ["alice@example.com", "owner@example.com"] });
+  const recipients = getReplyRecipients(detail, "owner@example.com", true);
+  assert.deepEqual(recipients.to, ["alice@example.com"]);
+  assert.deepEqual(recipients.cc, []);
+});
+
+test("getReplyRecipients treats other configured accounts as self", () => {
+  const detail = detailWithFrom(["work@example.com"], { to: ["alice@example.com", "owner@example.com"] });
+  const recipients = getReplyRecipients(detail, "owner@example.com", true, ["work@example.com", "owner@example.com"]);
+  assert.deepEqual(recipients.to, ["alice@example.com"]);
+  assert.deepEqual(recipients.cc, []);
+});
+
+test("getReplyRecipients keeps replying to self for a note-to-self even with other accounts configured", () => {
+  const detail = detailWithFrom(["owner@example.com"], { to: ["owner@example.com"] });
+  const recipients = getReplyRecipients(detail, "owner@example.com", false, ["work@example.com"]);
+  assert.deepEqual(recipients.to, ["owner@example.com"]);
+});
