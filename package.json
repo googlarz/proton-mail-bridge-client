@@ -36,7 +36,8 @@
     "ci": "npm run lint && npm test",
     "pack:check": "npm pack --dry-run",
     "release:check": "npm run lint && npm test && npm run pack:check",
-    "package:mcpb": "node scripts/build-mcpb.mjs"
+    "package:mcpb": "node scripts/build-mcpb.mjs",
+    "version": "node scripts/sync-versions.mjs"
   },
   "keywords": [
     "protonmail",
