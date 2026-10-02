@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.45] — 2026-10-02
+
+### Changed
+- **README: how the project relates to Proton Bridge.** A short section stating that this is a layer on top of Proton Mail Bridge (Proton's official local IMAP/SMTP gateway), that Bridge's own `--cli` mode manages Bridge itself (accounts, the Bridge password, ports and settings) and is not a mail client, and that Proton does not publish a terminal mail client.
+
+No change to server behaviour.
+
 ## [2.1.44] — 2026-10-02
 
 ### Changed
