@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.44] — 2026-10-02
+
+### Changed
+- **`mcpb/manifest.json` and `server.json` now follow `package.json`.** Both were checked in at 1.19.5 (`server.json` is published to the MCP registry as is; the `.mcpb` build already stamped its own manifest, so the bundles reported the right version). `npm version` now runs `scripts/sync-versions.mjs` to update them, and a test fails the build if they drift.
+- **README: a Quick start at the top** (bundle or npm install, check with `doctor`, first prompts, the main safety options) and a pointer to the companion [proton-drive-mcp](https://github.com/googlarz/proton-drive-mcp). Plus an optional `send-with-identity` Claude skill (`skills/`) that makes the agent ask which address and signature to use before every send.
+
+No change to server behaviour.
+
 ## [2.1.43] — 2026-09-30
 
 Found by sending a real reply-to-own-mail test to Gmail.
