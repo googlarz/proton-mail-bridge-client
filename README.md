@@ -54,6 +54,8 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
 - **Safety controls** — read-only mode, send gate, destructive-action confirmation, per-action allowlist
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
 
+**How this relates to Proton Bridge.** This is a layer on top of [Proton Mail Bridge](https://proton.me/mail/bridge), not a replacement for it. Bridge is Proton's official, local IMAP/SMTP gateway and the only supported way to reach a Proton mailbox from other software; this project talks to it. Bridge's own `--cli` mode manages Bridge itself (signing in, account details and the Bridge password, ports and other settings), it is not a mail client. As far as we know Proton does not publish a terminal mail client, so reading, searching, drafting and sending from Claude or a script is what this adds on top, together with the safety controls above. Bridge has to be running and signed in.
+
 ---
 
 ## Privacy model
