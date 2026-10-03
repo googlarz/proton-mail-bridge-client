@@ -2283,9 +2283,33 @@ export class SimpleIMAPService {
     const folder = input.folder ?? "INBOX";
     const query = this.buildSearchQuery(input);
 
+    // Same local-only filters as searchEmails: IMAP SEARCH can't express them, so without
+    // this they were silently dropped and the unfiltered SEARCH count was returned.
+    const hasLocalOnlyFilters =
+      typeof input.hasAttachment === "boolean" ||
+      Boolean(input.threadId) ||
+      Boolean(input.label) ||
+      Boolean(input.attachmentName) ||
+      Boolean(input.senderDomain) ||
+      Boolean(input.mailboxRole);
+
     const count = await this.withMailbox(folder, true, async (client) => {
-      const uids = await client.search(query, { uid: true });
-      return Array.isArray(uids) ? uids.length : 0;
+      const searchResult = await client.search(query, { uid: true });
+      const uids = Array.isArray(searchResult) ? searchResult : [];
+      if (!hasLocalOnlyFilters || uids.length === 0) {
+        return uids.length;
+      }
+      const uidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
+      let matched = 0;
+      for (let offset = 0; offset < uids.length; offset += SEARCH_FILTER_BATCH_SIZE) {
+        const batch = uids.slice(offset, offset + SEARCH_FILTER_BATCH_SIZE);
+        for await (const message of client.fetch(batch, FETCH_SUMMARY_QUERY, { uid: true })) {
+          if (matchesLocalSearchFilters(this.toSummary(folder, message, uidValidity), input)) {
+            matched += 1;
+          }
+        }
+      }
+      return matched;
     });
 
     return { folder, count };
