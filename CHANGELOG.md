@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.46] — 2026-10-04
+
+### Changed
+- **Dependencies:** `@modelcontextprotocol/sdk` 1.30.1 → 1.31.0, `imapflow` 2.0.6 → 2.1.2, `mailparser` 3.9.28 → 3.9.32, `nodemailer` 10.0.10 → 10.0.13, `sanitize-html` 2.17.7 → 2.18.0 (the Dependabot group in #24, which could not merge on its own, see below). The outbound-HTML sanitizer was re-checked on `sanitize-html` 2.18.0 with the known bypass payloads (CSS `url()` in several spellings including a newline, `expression()`, `@import`, remote and protocol-relative images, SVG `data:`, script and event handlers, `javascript:` links, `cid:` attribute break-out): none leaks, and allowed styles, `<hr>` and `cid:` images are kept.
+
+### Fixed
+- **`imapflow` 2.1 types `status()` as `StatusObject | false`**, which broke the build (six type errors in `getFolderStats`, `getMailboxUidValidity` and the post-move UIDVALIDITY lookup). A `false` result is now treated as "no data": `getFolderStats` falls back to the selected mailbox's own counts, and the UIDVALIDITY lookups return undefined (unverifiable, not blocking), exactly as for a failed lookup.
+
+### Added
+- `test/imap-status-guards.test.mjs`.
+
 ## [2.1.45] — 2026-10-02
 
 ### Changed

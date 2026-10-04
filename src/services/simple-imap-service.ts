@@ -2024,9 +2024,10 @@ export class SimpleIMAPService {
         // no-uidValidity (still fully valid, just not staleness-checkable)
         // format, same as it always did before this field existed.
         if (targetUid !== undefined) {
-          const targetStatus = await client
+          // imapflow 2.1 types status() as `false | StatusObject`; treat false like a failed lookup.
+          const targetStatus = (await client
             .status(targetFolder, { uidValidity: true })
-            .catch(() => undefined);
+            .catch(() => undefined)) || undefined;
           targetFolderUidValidity = targetStatus?.uidValidity?.toString();
         }
       }),
@@ -2302,7 +2303,8 @@ export class SimpleIMAPService {
 
     return this.withMailbox(target, true, async (client) => {
       const mailbox = client.mailbox || undefined;
-      const status = await client.status(target, { messages: true, unseen: true, uidNext: true, uidValidity: true });
+      // `false` (imapflow 2.1) = STATUS gave nothing; fall back to the selected mailbox's own values.
+      const status = (await client.status(target, { messages: true, unseen: true, uidNext: true, uidValidity: true })) || undefined;
       return {
         folder: target,
         total: status?.messages ?? mailbox?.exists ?? 0,
@@ -2323,7 +2325,7 @@ export class SimpleIMAPService {
   // partway through the batch.
   async getMailboxUidValidity(folder: string): Promise<string | undefined> {
     const client = await this.ensureConnected();
-    const status = await client.status(folder, { uidValidity: true });
+    const status = (await client.status(folder, { uidValidity: true })) || undefined;
     return status?.uidValidity?.toString();
   }
 
