@@ -73,8 +73,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
     "better-sqlite3": "^12.11.1",
-    "imapflow": "^2.1.2",
-    "mailparser": "^3.9.32",
+    "imapflow": "^2.2.5",
+    "mailparser": "^3.9.33",
     "nodemailer": "^10.0.13",
     "sanitize-html": "^2.18.0",
     "turndown": "^7.2.4"
