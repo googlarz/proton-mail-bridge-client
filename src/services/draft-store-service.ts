@@ -520,6 +520,13 @@ export class DraftStoreService {
         return createEmptyStore();
       }
 
+      // Only a parse failure means the file is corrupt. Any other read error
+      // (EACCES, EIO, EMFILE...) says nothing about the contents, so returning an
+      // empty store would let the next save() overwrite every existing draft.
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+
       // GAP-09: JSON parse failure means the file is corrupted. Back it up so the
       // user can attempt manual recovery, then recreate an empty store.
       const corruptPath = `${this.draftPath}.corrupt`;

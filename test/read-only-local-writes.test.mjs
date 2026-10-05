@@ -99,3 +99,14 @@ for (const [tool, args] of [...readOnlyLocalWriteCases, ...zeroGateCases]) {
     });
   });
 }
+
+// Not in the shared table: past the gate this tool resolves the thread through
+// IMAP, so the "passes the gate" half of that table would block on a real connection.
+test("create_thread_reply_draft rejects with a read-only error when PROTONMAIL_READ_ONLY is set", async () => {
+  await withServer(true, async ({ call }) => {
+    await assert.rejects(
+      call("create_thread_reply_draft", { threadId: "thread-1", body: "thanks", syncToRemote: false }),
+      /read-only mode/i,
+    );
+  });
+});

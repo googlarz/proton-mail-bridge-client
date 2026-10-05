@@ -8226,6 +8226,8 @@ export function createServer(
 
         case "create_thread_reply_draft":
         {
+          // Local draft write — same gap as create_draft.
+          ensureMailboxWriteAllowed(config.runtime);
           // A threadId is only ever valid within the single account it was produced
           // by — same "<slug>::" resolution as get_thread_by_id/move_thread. This was
           // previously always reading via the PRIMARY account's localIndexService/

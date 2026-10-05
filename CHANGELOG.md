@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.48] — 2026-10-05
+
+### Fixed
+- **A drafts file that could not be read was treated as empty, so the next write could erase every draft.** Only a file that is missing (empty store) or holds invalid JSON (backed up to `drafts.json.corrupt`, then empty store) is handled that way now. Any other read error (permissions, I/O) is raised and the file is left untouched.
+- **`create_thread_reply_draft` ignored `PROTONMAIL_READ_ONLY`.** It was missed when the other local draft tools got the gate in 2.1.39; it now refuses in read-only mode like `create_draft`, `create_reply_draft` and `create_forward_draft`.
+
 ## [2.1.47] — 2026-10-05
 
 ### Fixed

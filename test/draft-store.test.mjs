@@ -256,3 +256,40 @@ test("withDraftSyncLock runs syncs of the same draft one at a time and lets diff
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("an unreadable drafts.json is an error, not an empty store the next write can overwrite", async () => {
+  // A directory at the draft path makes readFile fail with EISDIR (portable
+  // stand-in for EACCES/EIO): not ENOENT and not a parse error, so the store
+  // must refuse to load instead of pretending there are no drafts.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-drafts-unreadable-"));
+  try {
+    const store = new DraftStoreService(createConfig(dataDir));
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(dataDir, "drafts.json"));
+    await assert.rejects(store.listDrafts());
+    await assert.rejects(store.createDraft({ subject: "s", body: "b", to: ["a@example.com"] }));
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("corrupt drafts.json is still backed up to .corrupt and replaced by an empty store", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-drafts-corrupt-"));
+  try {
+    await writeFile(join(dataDir, "drafts.json"), "{not json", "utf8");
+    const store = new DraftStoreService(createConfig(dataDir));
+    assert.deepEqual(await store.listDrafts(), []);
+    assert.equal(await readFile(join(dataDir, "drafts.json.corrupt"), "utf8"), "{not json");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("missing drafts.json is an empty store", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-drafts-missing-"));
+  try {
+    assert.deepEqual(await new DraftStoreService(createConfig(dataDir)).listDrafts(), []);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
