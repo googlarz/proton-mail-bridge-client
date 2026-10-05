@@ -507,6 +507,77 @@ export function nextDay(date: Date): Date {
   return new Date(date.getTime() + 24 * 60 * 60 * 1000);
 }
 
+// ---- Non-ASCII search criteria --------------------------------------------------------------
+// Proton Bridge's IMAP SEARCH never matches a non-ASCII value (verified live: "Pelcová", "für",
+// "książki", "Prägung" all return nothing, on any imapflow version, even for mail that plainly
+// contains them). So a criterion with such characters is answered in two steps: narrow the IMAP
+// query to the longest ASCII run of the value, which is always a substring of any true match and so
+// returns a superset, then verify each candidate locally, ignoring accents and case.
+
+const FOLD_EXTRA: Record<string, string> = { ß: "ss", æ: "ae", œ: "oe", ø: "o", ł: "l", đ: "d", ð: "d", þ: "th", ı: "i" };
+
+export function hasNonAscii(value: string | undefined): boolean {
+  return value !== undefined && /[^\x00-\x7f]/.test(value);
+}
+
+// Lowercase, strip combining accents, and spell out the letters Unicode does not decompose.
+export function foldSearchText(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[ßæœøłđðþı]/g, (letter) => FOLD_EXTRA[letter] ?? letter);
+}
+
+// Longest run of ASCII letters/digits in the value ("Pelcová" -> "Pelcov"), or "" when there is
+// nothing usable (fewer than 2 characters would match far too much to be worth sending).
+export function asciiNarrowing(value: string): string {
+  const runs = value.match(/[A-Za-z0-9]+/g) ?? [];
+  const longest = runs.reduce((best, run) => (run.length > best.length ? run : best), "");
+  return longest.length >= 2 ? longest : "";
+}
+
+export type NonAsciiCriteria = Partial<Record<"query" | "from" | "to" | "cc" | "bcc" | "subject", string>>;
+
+const NON_ASCII_FIELDS = ["query", "from", "to", "cc", "bcc", "subject"] as const;
+
+// Splits the input into what Bridge can evaluate (non-ASCII values replaced by their ASCII
+// narrowing, or removed) and the criteria that must be verified locally. `criteria` is undefined
+// when nothing needs it, so the common ASCII-only search is untouched.
+export function splitNonAsciiCriteria(input: SearchEmailsInput): { imapInput: SearchEmailsInput; criteria?: NonAsciiCriteria } {
+  const imapInput: SearchEmailsInput = { ...input };
+  const criteria: NonAsciiCriteria = {};
+  for (const field of NON_ASCII_FIELDS) {
+    const value = input[field];
+    if (!hasNonAscii(value)) continue;
+    criteria[field] = value;
+    const narrowed = asciiNarrowing(value as string);
+    if (narrowed) imapInput[field] = narrowed;
+    else delete imapInput[field];
+  }
+  return Object.keys(criteria).length > 0 ? { imapInput, criteria } : { imapInput };
+}
+
+function addressText(entries: Array<{ name?: string; address?: string }> | undefined): string {
+  return (entries ?? []).map((entry) => `${entry.name ?? ""} ${entry.address ?? ""}`).join(" ");
+}
+
+// Local, accent- and case-insensitive check of the criteria Bridge could not evaluate. `bodyText`
+// is only needed for a non-ASCII free-text `query`.
+export function matchesNonAsciiCriteria(email: EmailSummary, criteria: NonAsciiCriteria, bodyText?: string): boolean {
+  const has = (haystack: string, needle: string): boolean => foldSearchText(haystack).includes(foldSearchText(needle));
+  if (criteria.from && !has(addressText(email.from), criteria.from)) return false;
+  if (criteria.to && !has(addressText(email.to), criteria.to)) return false;
+  if (criteria.cc && !has(addressText(email.cc), criteria.cc)) return false;
+  if (criteria.bcc && !has(addressText((email as { bcc?: Array<{ name?: string; address?: string }> }).bcc), criteria.bcc)) return false;
+  if (criteria.subject && !has(email.subject ?? "", criteria.subject)) return false;
+  if (criteria.query) {
+    const everything = [email.subject, addressText(email.from), addressText(email.to), addressText(email.cc), email.preview, bodyText].filter(Boolean).join(" ");
+    if (!has(everything, criteria.query)) return false;
+  }
+  return true;
+}
+
 export function matchesLocalSearchFilters(
   email: EmailSummary,
   filters: SearchEmailsInput,

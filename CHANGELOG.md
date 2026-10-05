@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.47] — 2026-10-05
+
+### Fixed
+- **`search_emails` found nothing for values with non-ASCII letters** (`from: "Pelcová"`, `subject: "książki"`, `query: "Prägung"`, "für", "Rücksendung"...). This is Proton Bridge, not this server or `imapflow`: Bridge's IMAP SEARCH never matches a non-ASCII value (checked against a real Bridge on `imapflow` 2.1.2 and 2.2.5 alike, for mail that plainly contains the text; an ASCII word from the same name or subject works). Such a criterion is now narrowed to the longest ASCII run of the value, which is always a substring of any true match, and every candidate is then verified locally ignoring accents and case (`ł`, `ß`, `ø`... included). A free-text `query` is verified against the message body too. Verified live: the five queries that returned 0 now return their messages.
+  - The local check covers the newest 500 candidates; if more were cut, `hasMore` is true (it is not an exhaustive scan).
+  - ASCII-only searches are untouched. `count_messages` and the bulk operations' `match` still use Bridge's own matching, so they do not see non-ASCII values (a bulk action must never act on a looser set than the one asked for).
+
+### Changed
+- **Dependencies:** `imapflow` 2.1.2 → 2.2.5 (2.2.2 fixes a flag update that reduces to nothing clearing every flag; 2.2.3 changes how non-ASCII search values are sent) and `mailparser` 3.9.32 → 3.9.33. These replace Dependabot's #25, which pinned `imapflow` at 2.2.1. Live searches behave identically on both `imapflow` versions.
+
+### Added
+- `test/non-ascii-search.test.mjs` (8 tests, incl. `searchEmails` over a fake Bridge that, like the real one, cannot match non-ASCII).
+
 ## [2.1.46] — 2026-10-04
 
 ### Changed

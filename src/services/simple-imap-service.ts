@@ -30,6 +30,8 @@ import {
   mapParsedAddresses,
   labelMatchesFolder,
   matchesLocalSearchFilters,
+  matchesNonAsciiCriteria,
+  splitNonAsciiCriteria,
   nextDay,
   normalizeLimit,
   parseDateInput,
@@ -104,6 +106,8 @@ const MAX_ATTACHMENT_TEXT_BYTES = 512_000;
 // caller's result `limit` (see the comment above that loop) — this is the floor on
 // each network batch so a small limit (e.g. 1) can't degrade into one `fetch` call
 // per candidate.
+// Newest candidates examined when a non-ASCII criterion has to be verified locally.
+const NON_ASCII_SCAN_CAP = 500;
 export const SEARCH_FILTER_BATCH_SIZE = 50;
 // A healthy IMAP IDLE blocks until a mailbox change or the requested timeout.
 // If client.idle() returns faster than this with no events, IDLE never actually
@@ -1480,7 +1484,9 @@ export class SimpleIMAPService {
     // answered by searching just those folders — every message in them has the label.
     const labelFolders = await this.resolveLabelFolders(input);
     const folders = labelFolders ?? (await this.resolveSearchFolders(input));
-    const searchQuery = this.buildSearchQuery(input);
+    // Bridge cannot match non-ASCII values: send a narrowed ASCII query and verify locally.
+    const { imapInput, criteria: nonAsciiCriteria } = splitNonAsciiCriteria(input);
+    const searchQuery = this.buildSearchQuery(imapInput);
     const collected: EmailSummary[] = [];
     let totalMatched = 0;
     let anyCandidatesUnexamined = false;
@@ -1490,6 +1496,7 @@ export class SimpleIMAPService {
     // (buildSearchQuery above) can't express any of them server-side, so they can
     // only be evaluated after a candidate's full data is fetched.
     const hasLocalOnlyFilters =
+      nonAsciiCriteria !== undefined ||
       typeof input.hasAttachment === "boolean" ||
       Boolean(input.threadId) ||
       // Already guaranteed by the folder scope when it resolved to the label's folder(s);
@@ -1509,7 +1516,9 @@ export class SimpleIMAPService {
           return { results: [], moreRemain: false };
         }
 
-        const fetchQuery = input.includeSnippet ? FETCH_DETAIL_QUERY : FETCH_SUMMARY_QUERY;
+        // A non-ASCII free-text query is verified against the body, so it needs the source too.
+        const needsBody = Boolean(nonAsciiCriteria?.query);
+        const fetchQuery = input.includeSnippet || needsBody ? FETCH_DETAIL_QUERY : FETCH_SUMMARY_QUERY;
         const uidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
 
         if (!hasLocalOnlyFilters) {
@@ -1579,6 +1588,13 @@ export class SimpleIMAPService {
           }
         }
         let orderedUids = pickNewestUids(dated, dated.length);
+        // The narrowed query can be broad (a short ASCII run, or none at all); bound the work to the
+        // newest candidates rather than reading a whole folder. Reported as hasMore, not as exhaustive.
+        let nonAsciiScanTruncated = false;
+        if (nonAsciiCriteria && orderedUids.length > NON_ASCII_SCAN_CAP) {
+          orderedUids = orderedUids.slice(0, NON_ASCII_SCAN_CAP);
+          nonAsciiScanTruncated = true;
+        }
         if (hasAttachmentByUid) {
           orderedUids = orderedUids.filter(
             (uid) => hasAttachmentByUid.get(uid) === input.hasAttachment,
@@ -1591,22 +1607,23 @@ export class SimpleIMAPService {
           const batch = orderedUids.slice(offset, offset + batchSize);
           for await (const message of client.fetch(batch, fetchQuery, { uid: true })) {
             const summary = this.toSummary(folder, message, uidValidity);
-            const enriched =
-              input.includeSnippet && message.source
-                ? await this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), false)
-                : summary;
+            const parsed = (input.includeSnippet || needsBody) && message.source ? await this.parseSource(message.source) : undefined;
+            const enriched = input.includeSnippet && parsed ? await this.enrichSummaryFromParsed(summary, parsed, false) : summary;
             this.messageCache.set(enriched.id, enriched);
             this.capMessageCache();
-            if (matchesLocalSearchFilters(enriched, input)) {
+            if (
+              matchesLocalSearchFilters(enriched, input) &&
+              (!nonAsciiCriteria || matchesNonAsciiCriteria(enriched, nonAsciiCriteria, parsed?.text))
+            ) {
               results.push(enriched);
             }
           }
           if (results.length >= limit) {
-            moreRemain = offset + batchSize < orderedUids.length;
+            moreRemain = offset + batchSize < orderedUids.length || nonAsciiScanTruncated;
             break;
           }
         }
-        return { results, moreRemain };
+        return { results, moreRemain: moreRemain || nonAsciiScanTruncated };
       });
 
       collected.push(...emails);
