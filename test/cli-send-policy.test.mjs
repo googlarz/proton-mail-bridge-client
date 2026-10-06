@@ -26,15 +26,20 @@ test("CLI reply/forward delegate to the MCP handlers instead of calling SMTP dir
 // delete_label. Structural check, same style as the reply/forward test
 // above: no server is spun up here, this pins that the right gate is wired
 // into the right command.
-test("CLI move/delete/delete-folder call ensureEmailActionAllowed, not just ensureMailboxWriteAllowed", async () => {
+test("CLI move/delete go through the MCP handlers (policy enforced there); delete-folder keeps its own gate", async () => {
   const source = await readFile(new URL("../dist/cli.js", import.meta.url), "utf8");
   const body = (start, end) => source.slice(source.indexOf(start), source.indexOf(end));
 
+  // move/delete used to call the primary IMAP service plus an in-CLI policy check; they now
+  // call move_email/delete_email, which apply ensureEmailActionAllowed/ensureDestructiveConfirmed
+  // and account routing themselves (exercised end to end in cli-account-routing.test.mjs).
   const moveBody = body("async function runMove", "async function runArchive");
-  assert.match(moveBody, /ensureEmailActionAllowed\(config\.runtime, "move"\)/);
+  assert.match(moveBody, /"move_email"/);
+  assert.doesNotMatch(moveBody, /imapService/);
 
-  const deleteBody = body("async function runDelete", "async function runSend");
-  assert.match(deleteBody, /ensureEmailActionAllowed\(config\.runtime, "delete"\)/);
+  const deleteBody = body("async function runDelete(", "async function runSend");
+  assert.match(deleteBody, /"delete_email"/);
+  assert.doesNotMatch(deleteBody, /imapService/);
 
   const deleteFolderBody = source.slice(source.indexOf("async function runDeleteFolder"));
   assert.match(deleteFolderBody, /ensureEmailActionAllowed\(config\.runtime, "delete"\)/);
