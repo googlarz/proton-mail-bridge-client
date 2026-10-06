@@ -2169,13 +2169,40 @@ export function buildSecurityInfo(detail: EmailDetail): Record<string, unknown> 
   };
 }
 
-export function extractUnsubscribeInfo(detail: EmailDetail): { mailto?: string; url?: string } {
+// "unsub@list.example?subject=Remove%20me&body=..." as mailparser hands over a List-Unsubscribe mailto: one
+// address plus the subject and body the sender asked for. Anything with more than one recipient, or an
+// address part that is not an address, is refused; the requested text is cut to a sane length and stripped of
+// line breaks, because it ends up in a header and a body of a mail this server sends.
+export function parseUnsubscribeMailto(value: string): { address: string; subject?: string; body?: string } | undefined {
+  const cleaned = value.trim().replace(/^mailto:/i, "");
+  const questionMark = cleaned.indexOf("?");
+  const addressPart = questionMark === -1 ? cleaned : cleaned.slice(0, questionMark);
+  let address: string;
+  try {
+    address = decodeURIComponent(addressPart).trim();
+  } catch {
+    return undefined;
+  }
+  if (!address || /[\s,;<>]/.test(address) || !isValidEmail(address)) return undefined;
+  const params = new URLSearchParams(questionMark === -1 ? "" : cleaned.slice(questionMark + 1));
+  const text = (key: string, max: number, keepNewlines: boolean): string | undefined => {
+    const raw = params.get(key);
+    if (!raw) return undefined;
+    const clean = (keepNewlines ? raw.replace(/\r/g, "") : raw.replace(/[\r\n]+/g, " ")).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
+    return clean ? clean.slice(0, max) : undefined;
+  };
+  return { address, subject: text("subject", 200, false), body: text("body", 2000, true) };
+}
+
+export function extractUnsubscribeInfo(detail: EmailDetail): { mailto?: string; mailtoSubject?: string; mailtoBody?: string; url?: string } {
   const list = detail.headers?.list as Record<string, unknown> | undefined;
   const unsubscribe = list?.unsubscribe as Record<string, unknown> | undefined;
-  const mail = typeof unsubscribe?.mail === "string" ? unsubscribe.mail : undefined;
+  const mail = typeof unsubscribe?.mail === "string" ? parseUnsubscribeMailto(unsubscribe.mail) : undefined;
   const url = typeof unsubscribe?.url === "string" ? unsubscribe.url : undefined;
   return {
-    mailto: mail && isValidEmail(mail) ? mail : undefined,
+    mailto: mail?.address,
+    ...(mail?.subject ? { mailtoSubject: mail.subject } : {}),
+    ...(mail?.body ? { mailtoBody: mail.body } : {}),
     url,
   };
 }
@@ -4565,6 +4592,8 @@ export function createServer(
             emailId: prefixedIdFor(bundle, detail.id),
             hasUnsubscribeHeader: Boolean(info.mailto || info.url),
             mailto: info.mailto,
+            ...(info.mailtoSubject ? { mailtoSubject: info.mailtoSubject } : {}),
+            ...(info.mailtoBody ? { mailtoBody: info.mailtoBody } : {}),
             url: info.url,
             note: info.url
               ? "This server never auto-fetches unsubscribe URLs — open the url yourself, or use unsubscribe_sender if mailto is also set."
@@ -4596,8 +4625,8 @@ export function createServer(
           const result = await withAudit(auditService, name, args, () =>
             bundle.smtpService.sendEmail({
               to: [info.mailto as string],
-              subject: "unsubscribe",
-              body: "unsubscribe",
+              subject: info.mailtoSubject ?? "unsubscribe",
+              body: info.mailtoBody ?? "unsubscribe",
               isHtml: false,
             }),
           );
@@ -6656,6 +6685,7 @@ export function createServer(
               destination: requireString(args, "destination"),
               acrossFolders: normalizeBoolean(args.acrossFolders, false),
               dryRun: normalizeBoolean(args.dryRun, false),
+              maxBatchSize: getBulkMaxBatchSize(args),
             })
           );
           return createTextResult(result);
@@ -6676,6 +6706,7 @@ export function createServer(
               permanent: permanentThread,
               acrossFolders: normalizeBoolean(args.acrossFolders, false),
               dryRun: normalizeBoolean(args.dryRun, false),
+              maxBatchSize: getBulkMaxBatchSize(args),
             })
           );
           return createTextResult(result);
@@ -6697,6 +6728,7 @@ export function createServer(
               flagsToRemove,
               acrossFolders: normalizeBoolean(args.acrossFolders, false),
               dryRun: normalizeBoolean(args.dryRun, false),
+              maxBatchSize: getBulkMaxBatchSize(args),
             })
           );
           return createTextResult(result);
@@ -8611,6 +8643,10 @@ export function createServer(
           // those bytes as UTF-8 either mangles them or throws outright.
           // rawBase64 preserves the message byte-for-byte regardless of
           // its original encoding.
+          // Bounded before the bytes are decoded: base64 is about a third larger than what it encodes.
+          if ((rawBase64 ?? rawText ?? "").length > MAX_IMPORT_MESSAGE_BYTES * (rawBase64 ? 4 / 3 : 1)) {
+            throw new McpError(ErrorCode.InvalidParams, `The message is larger than the ${Math.round(MAX_IMPORT_MESSAGE_BYTES / 1024 / 1024)} MB import limit.`);
+          }
           const raw = rawBase64
             ? Buffer.from(rawBase64, "base64")
             : Buffer.from(rawText as string, "utf8");
@@ -8745,6 +8781,8 @@ export function createServer(
 // Stops every account's timers, then closes connections and indexes, waiting at most `timeoutMs` for the
 // closing to finish. A Bridge that never answers LOGOUT must not hold the process up (imapflow's own socket
 // timeout is minutes, and a pending shutdown ignores further signals).
+const MAX_IMPORT_MESSAGE_BYTES = 50 * 1024 * 1024;
+
 export async function stopAllAccounts(
   bundles: Array<Pick<AccountBundle, "backgroundSyncService" | "deliveryQueueService" | "snoozeService" | "imapService" | "smtpService" | "localIndexService">>,
   timeoutMs = 3_000,

@@ -384,6 +384,33 @@ export function normalizeBulkMatch(match: BulkMatchCriteria, folder: string): Se
   return input;
 }
 
+// A thread operation looks up every message whose Message-ID or References contains this value, and then
+// moves, deletes or flags them. IMAP HEADER search is a substring match (RFC 3501), so a value like "@" or
+// "ab" matches far more than one conversation. A real Message-ID is "<local@domain>" (the brackets may have
+// been dropped by the caller): no whitespace, no angle brackets inside, an "@" with something on both sides.
+export function validateThreadMessageId(value: string): string {
+  const trimmed = (value ?? "").trim();
+  const inner = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1) : trimmed;
+  if (inner.length < 3 || inner.length > 500 || /[\s<>]/.test(inner)) {
+    throw new InvalidArgumentError("messageId must be a Message-ID such as <abc123@mail.example>.");
+  }
+  const at = inner.lastIndexOf("@");
+  if (at < 1 || at === inner.length - 1) {
+    throw new InvalidArgumentError("messageId must be a Message-ID such as <abc123@mail.example>.");
+  }
+  return trimmed.startsWith("<") ? trimmed : `<${trimmed}>`;
+}
+
+function describeThreadFailure(folder: string, uid: number, error: unknown): string {
+  return `${folder} uid ${uid}: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+function assertThreadBatchSize(count: number, max: number | undefined): void {
+  if (max !== undefined && count > max) {
+    throw new Error(`The thread has ${count} messages, which exceeds the limit of ${max} (maxBatchSize). Nothing was changed; raise maxBatchSize to act on all of them.`);
+  }
+}
+
 export function pickNewestUids(dated: { uid: number; date: number }[], limit: number): number[] {
   return [...dated]
     .sort((a, b) => b.date - a.date)
@@ -3165,6 +3192,7 @@ export class SimpleIMAPService {
     acrossFolders = true,
     folders?: string[],
   ): Promise<Array<{ folder: string; uid: number; emailId: string; uidValidity?: string }>> {
+    messageId = validateThreadMessageId(messageId);
     const results: Array<{ folder: string; uid: number; emailId: string; uidValidity?: string }> = [];
 
     // acrossFolders was previously accepted and documented ("Also search
@@ -3229,15 +3257,18 @@ export class SimpleIMAPService {
     destination: string;
     acrossFolders?: boolean;
     dryRun?: boolean;
-  }): Promise<{ messageId: string; destination: string; moved: number; notMoved: number; dryRun: boolean }> {
+    maxBatchSize?: number;
+  }): Promise<{ messageId: string; destination: string; moved: number; notMoved: number; dryRun: boolean; errors?: string[] }> {
     const matches = await this.resolveThreadUids(input.messageId, input.acrossFolders ?? false);
 
     if (input.dryRun) {
       return { messageId: input.messageId, destination: input.destination, moved: matches.length, notMoved: 0, dryRun: true };
     }
+    assertThreadBatchSize(matches.length, input.maxBatchSize);
 
     let moved = 0;
     let notMoved = 0;
+    const errors: string[] = [];
 
     for (const { folder, uid, emailId, uidValidity } of matches) {
       try {
@@ -3258,8 +3289,9 @@ export class SimpleIMAPService {
         );
         this.messageCache.delete(emailId);
         moved++;
-      } catch {
+      } catch (error) {
         notMoved++;
+        errors.push(describeThreadFailure(folder, uid, error));
       }
     }
 
@@ -3270,7 +3302,7 @@ export class SimpleIMAPService {
       this.folderCache = undefined;
     }
     this.lastSyncAt = new Date().toISOString();
-    return { messageId: input.messageId, destination: input.destination, moved, notMoved, dryRun: false };
+    return { messageId: input.messageId, destination: input.destination, moved, notMoved, dryRun: false, ...(errors.length > 0 ? { errors: errors.slice(0, 10) } : {}) };
   }
 
   async deleteThread(input: {
@@ -3278,12 +3310,14 @@ export class SimpleIMAPService {
     permanent?: boolean;
     acrossFolders?: boolean;
     dryRun?: boolean;
-  }): Promise<{ messageId: string; deleted: number; dryRun: boolean }> {
+    maxBatchSize?: number;
+  }): Promise<{ messageId: string; deleted: number; notDeleted: number; dryRun: boolean; errors?: string[] }> {
     const matches = await this.resolveThreadUids(input.messageId, input.acrossFolders ?? false);
 
     if (input.dryRun) {
-      return { messageId: input.messageId, deleted: matches.length, dryRun: true };
+      return { messageId: input.messageId, deleted: matches.length, notDeleted: 0, dryRun: true };
     }
+    assertThreadBatchSize(matches.length, input.maxBatchSize);
 
     // No .catch() here — a Trash-resolution failure must propagate as a
     // hard error rather than silently falling into the permanent-delete
@@ -3296,6 +3330,7 @@ export class SimpleIMAPService {
       : await this.resolveSpecialFolder("\\Trash", ["Trash", "INBOX.Trash"]);
 
     let deleted = 0;
+    const deleteErrors: string[] = [];
 
     for (const { folder, uid, emailId, uidValidity } of matches) {
       try {
@@ -3317,7 +3352,9 @@ export class SimpleIMAPService {
         );
         this.messageCache.delete(emailId);
         deleted++;
-      } catch { /* best-effort */ }
+      } catch (error) {
+        deleteErrors.push(describeThreadFailure(folder, uid, error));
+      }
     }
 
     if (deleted > 0) {
@@ -3327,7 +3364,7 @@ export class SimpleIMAPService {
       this.folderCache = undefined;
     }
     this.lastSyncAt = new Date().toISOString();
-    return { messageId: input.messageId, deleted, dryRun: false };
+    return { messageId: input.messageId, deleted, notDeleted: deleteErrors.length, dryRun: false, ...(deleteErrors.length > 0 ? { errors: deleteErrors.slice(0, 10) } : {}) };
   }
 
   async flagThread(input: {
@@ -3336,16 +3373,19 @@ export class SimpleIMAPService {
     flagsToRemove?: string[];
     acrossFolders?: boolean;
     dryRun?: boolean;
-  }): Promise<{ messageId: string; affected: number; notApplied: string[]; dryRun: boolean }> {
+    maxBatchSize?: number;
+  }): Promise<{ messageId: string; affected: number; notAffected: number; notApplied: string[]; dryRun: boolean; errors?: string[] }> {
     const matches = await this.resolveThreadUids(input.messageId, input.acrossFolders ?? false);
 
     if (input.dryRun) {
-      return { messageId: input.messageId, affected: matches.length, notApplied: [], dryRun: true };
+      return { messageId: input.messageId, affected: matches.length, notAffected: 0, notApplied: [], dryRun: true };
     }
+    assertThreadBatchSize(matches.length, input.maxBatchSize);
 
     const flagsToAdd = input.flagsToAdd ?? [];
     const flagsToRemove = input.flagsToRemove ?? [];
     let affected = 0;
+    const flagErrors: string[] = [];
     const allNotApplied: string[] = [];
 
     for (const { folder, uid, uidValidity } of matches) {
@@ -3373,7 +3413,9 @@ export class SimpleIMAPService {
           `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms flagging uid ${uid} for thread ${input.messageId}`,
         );
         affected++;
-      } catch { /* best-effort */ }
+      } catch (error) {
+        flagErrors.push(describeThreadFailure(folder, uid, error));
+      }
     }
 
     if (affected > 0 && [...flagsToAdd, ...flagsToRemove].some((flag) => flag.toLowerCase() === "\\seen")) {
@@ -3382,7 +3424,7 @@ export class SimpleIMAPService {
       // invalidation on the single-email path.
       this.folderCache = undefined;
     }
-    return { messageId: input.messageId, affected, notApplied: [...new Set(allNotApplied)], dryRun: false };
+    return { messageId: input.messageId, affected, notAffected: flagErrors.length, notApplied: [...new Set(allNotApplied)], dryRun: false, ...(flagErrors.length > 0 ? { errors: flagErrors.slice(0, 10) } : {}) };
   }
 
   async syncEmails(input: SyncEmailsInput = {}): Promise<{
@@ -4762,11 +4804,19 @@ export class SimpleIMAPService {
     // there's nothing to dedup against — fall through to a normal import,
     // same as before this fix (not a regression).
     let messageId: string | undefined;
+    let sentAt: Date | undefined;
     try {
-      messageId = (await this.parseSource(input.raw)).messageId;
+      const parsed = await this.parseSource(input.raw);
+      messageId = parsed.messageId;
+      sentAt = parsed.date instanceof Date && !Number.isNaN(parsed.date.getTime()) ? parsed.date : undefined;
     } catch {
       // Best-effort — an unparseable message still gets imported below.
     }
+    // The server's own INTERNALDATE decides where the message sorts. Without one, every import was stamped
+    // with the time of the import, so migrated mail from years ago sat at the top as if it had just arrived.
+    // The Date header is the best record of when it really came; a missing, unreadable or future one is not.
+    const now = Date.now();
+    const internalDate = input.internalDate ?? (sentAt && sentAt.getTime() <= now + 24 * 60 * 60 * 1000 ? sentAt : new Date(now));
 
     if (messageId) {
       let existingFolderUidValidity: string | undefined;
@@ -4778,7 +4828,9 @@ export class SimpleIMAPService {
         }),
         BULK_ITEM_TIMEOUT_MS,
         `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms checking for an existing import of ${messageId} in ${folder}`,
-      ).catch(() => undefined);
+      );
+      // No .catch(): a failed check used to be treated as "not there" and the import went ahead, so a retry of
+      // an import whose check had failed could silently create a duplicate. The error is raised instead.
 
       if (existingUid !== undefined) {
         const existingEmailId = createEmailId(folder, existingUid, existingFolderUidValidity);
@@ -4787,7 +4839,7 @@ export class SimpleIMAPService {
     }
 
     const client = await this.ensureConnected();
-    const appended = await client.append(folder, input.raw, input.flags ?? [], input.internalDate ?? new Date());
+    const appended = await client.append(folder, input.raw, input.flags ?? [], internalDate);
     if (!appended) {
       throw new Error(`Server did not append the imported message into ${folder}`);
     }
