@@ -11,7 +11,7 @@ All notable changes to this project are documented here.
 ## [2.2.0] — 2026-10-06
 
 ### Changed
-- **Breaking: Node.js 24 or later is required** (was 20). `engines.node` and the `.mcpb` manifest say `>=24.0.0`, CI runs on Node 24 (Ubuntu, macOS, Windows), the Dockerfile uses `node:24-slim`, and the `.mcpb` bundles and the npm release are built on Node 24. The bundles contain `better-sqlite3`'s native binary, which is built per Node version, so a bundle from a different Node cannot be loaded. If you run this from npm or Docker, upgrade Node first; on Node 20/22 stay on 2.1.49.
+- **Breaking: Node.js 24 or later is required** (was 20). `engines.node` and the `.mcpb` manifest say `>=24.0.0`, CI runs on Node 24 (Ubuntu, macOS, Windows), the Dockerfile uses `node:24-slim`, and the `.mcpb` bundles and the npm release are built on Node 24. If you run this from npm or Docker, upgrade Node first; on Node 20/22 stay on 2.1.49.
 - **Dependencies:** `better-sqlite3` 12.11.1 → 13.0.3 (needs Node 22+, which the new floor guarantees; it also drops several transitive packages) and `@types/node` 22 → 24, so the type definitions match the oldest supported Node. Dependabot keeps ignoring `@types/node` majors until `engines.node` is raised again.
 - A test now fails if the Node floor differs between `package.json`, the `.mcpb` manifest, the Dockerfile, the CI matrix and the bundle workflow.
 

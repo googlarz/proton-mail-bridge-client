@@ -61,7 +61,7 @@ test("the Node floor is the same in package.json, the .mcpb manifest, the Docker
   const major = /(\d+)/.exec(floor)[1];
   assert.match(await read("Dockerfile"), new RegExp(`^FROM node:${major}-`, "m"));
   assert.match(await read(".github/workflows/ci.yml"), new RegExp(`node-version: \\[${major}\\]`));
-  // The .mcpb bundles native better-sqlite3 binaries, which are built per Node ABI: build on the floor.
+  // Build the bundles on the floor version, so they are produced by the Node they declare to need.
   assert.match(await read(".github/workflows/mcpb-release.yml"), new RegExp(`node-version: '${major}'`));
 });
 
