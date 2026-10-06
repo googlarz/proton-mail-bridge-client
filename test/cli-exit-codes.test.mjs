@@ -39,6 +39,7 @@ test("health commands exit 1 when Bridge is unreachable, with their JSON unchang
     for (const args of [["tool", "get_connection_status"], ["get-connection-status"], ["run-doctor"]]) {
       const result = runCli([...args, "--json"], dir);
       assert.equal(result.code, 1, args.join(" "));
+      assert.ok(result.stdout, `${args.join(" ")} printed nothing; stderr: ${result.stderr}`);
       assert.equal(JSON.parse(result.stdout).structuredContent.imap.ok, false);
     }
 

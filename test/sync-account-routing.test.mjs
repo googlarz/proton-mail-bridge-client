@@ -76,6 +76,6 @@ test("run_background_sync with account reports that account's index, not the pri
   await withServer(async ({ client, secondaryDir, secondarySlug }) => {
     const result = await client.callTool({ name: "run_background_sync", arguments: { account: secondarySlug } });
     const text = result.content.find((p) => p.type === "text").text;
-    assert.ok(text.includes(secondaryDir), text.slice(0, 300));
+    assert.ok(text.includes(JSON.stringify(secondaryDir).slice(1, -1)), text.slice(0, 300));
   });
 });

@@ -160,11 +160,14 @@ async function acquire(lockPath: string): Promise<string> {
       return token;
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;
-      if (code !== "EEXIST") {
+      // Windows refuses to open a lock file that another process has just deleted (delete pending) with
+      // EPERM/EACCES/EBUSY instead of letting the create succeed; that is contention, not a real failure.
+      const contendedOnWindows = process.platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY");
+      if (code !== "EEXIST" && !contendedOnWindows) {
         throw error;
       }
 
-      if (await isStale(lockPath)) {
+      if (!contendedOnWindows && (await isStale(lockPath))) {
         await stealStale(lockPath);
         continue;
       }
