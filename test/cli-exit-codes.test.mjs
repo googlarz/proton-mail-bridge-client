@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -6,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toolResultExitCode } from "../dist/cli.js";
 
-const CLI = new URL("../dist/cli.js", import.meta.url).pathname;
+const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 
 function runCli(args, dir) {
   const result = spawnSync(process.execPath, [CLI, ...args], {

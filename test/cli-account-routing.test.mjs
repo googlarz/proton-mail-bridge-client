@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -7,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { slugifyAccountAddress } from "../dist/utils/helpers.js";
 
-const CLI = new URL("../dist/cli.js", import.meta.url).pathname;
+const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 
 // A listener that only counts connections: whichever IMAP port the CLI dials tells us
 // which account the command was routed to, without needing an IMAP implementation.

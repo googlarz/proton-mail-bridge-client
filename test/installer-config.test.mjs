@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
@@ -163,6 +164,6 @@ test("installClaudeDesktopConfig returns warnings for a version-pinned nvm node"
 test("verifyRuntime rejects a version mismatch", async () => {
   const dir = await tmp();
   await writeFile(join(dir, "package.json"), '{"version":"1.0.0"}');
-  await symlink(new URL("../node_modules", import.meta.url).pathname, join(dir, "node_modules"));
+  await symlink(fileURLToPath(new URL("../node_modules", import.meta.url)), join(dir, "node_modules"));
   await assert.rejects(verifyRuntime(dir, process.execPath, "2.0.0"), /is 1\.0\.0, expected 2\.0\.0/);
 });

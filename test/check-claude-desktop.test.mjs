@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -68,7 +69,7 @@ async function healthFixture({ command, distSource = "export const x = 1;\n", ve
   await writeFile(join(runtimeDir, "dist", "lib.js"), "export const y = 1;\n");
   await writeFile(join(runtimeDir, "package.json"), JSON.stringify({ version, type: "module" }));
   // Read-only link to the repo's modules: lets the real better-sqlite3 load without copying 26 MB.
-  await symlink(new URL("../node_modules", import.meta.url).pathname, join(runtimeDir, "node_modules"));
+  await symlink(fileURLToPath(new URL("../node_modules", import.meta.url)), join(runtimeDir, "node_modules"));
   const configPath = join(dir, "claude.json");
   await writeFile(
     configPath,
@@ -112,7 +113,7 @@ test("check reports a missing config or registration as a failure", async () => 
 
 test("the CLI exits non-zero when a check fails", async () => {
   const { configPath } = await healthFixture({ command: "/nonexistent/node" });
-  const script = new URL("../dist/scripts/check-claude-desktop.js", import.meta.url).pathname;
+  const script = fileURLToPath(new URL("../dist/scripts/check-claude-desktop.js", import.meta.url));
   await assert.rejects(promisify(execFile)(process.execPath, [script, "--config-path", configPath]), (error) => {
     assert.equal(error.code, 1);
     assert.match(error.stdout, /does not run/);

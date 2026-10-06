@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -6,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareClaudeDesktopRuntime } from "../dist/scripts/install-claude-desktop.js";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const SQLITE = join(REPO, "node_modules", "better-sqlite3");
 
 // Never runs npm: "installing" copies the repo's better-sqlite3 (minus its C sources) into the
