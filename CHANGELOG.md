@@ -9,6 +9,9 @@ All notable changes to this project are documented here.
 - **Calendar invite summaries showed the timezone rule's start** (`Starts 19700329T020000`) instead of the event's, because a `VTIMEZONE` block comes before the `VEVENT` in Proton and Google invites. Only the first event's own properties are read now, so a nested alarm no longer overrides the summary either.
 - **`get_emails` pages were ordered by Date header, not UID**, which scrambled pages and `beforeUid` cursors in folders whose dates do not follow UID order (imports, Trash). Descending order now mirrors ascending: by UID. The multi-account merge still interleaves accounts by date.
 
+### Changed
+- **Dependencies:** `proxy-addr` 2.0.7 → 2.0.8 (lockfile only), a transitive dependency of the MCP SDK's HTTP stack with a critical advisory (IP spoofing through IPv4-mapped IPv6 trust subnets). This server speaks stdio and does not use it, but the CI audit gate rightly blocks on it.
+
 ## [2.1.48] — 2026-10-05
 
 ### Fixed
