@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [2.3.1] — 2026-10-06
+
+### Changed
+- **Indexed searches no longer pay for a full status before every call.** The check that decides whether to refresh the index before `search_indexed_emails` (and `get_threads`, the inbox digest and the other index-backed tools) read the full index status, which builds every thread and label from up to 5,000 messages: about 170 ms on a 57,000-message index, every time. It now reads only what it needs (is the index empty, is it older than 60 minutes) in about 0.1 ms, with the same definition of "stale". Measured against a real Bridge: the median `search_indexed_emails` call went from 249 ms to 122 ms across three accounts. `get_index_status` and `run_doctor` still report the full status.
+
 ## [2.3.0] — 2026-10-06
 
 ### Fixed

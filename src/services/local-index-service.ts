@@ -100,6 +100,14 @@ const DB_SCHEMA_VERSION = 3;
 // next open rebuild the index from the messages table, once.
 const FTS_KEY_VERSION = "2";
 const STALE_THRESHOLD_MINUTES = 60;
+
+function indexAgeMinutes(updatedAt: string | undefined): number | undefined {
+  return updatedAt ? Math.max(0, Math.round((Date.now() - new Date(updatedAt).getTime()) / 60_000)) : undefined;
+}
+
+function isIndexStale(ageMinutes: number | undefined): boolean {
+  return typeof ageMinutes === "number" ? ageMinutes > STALE_THRESHOLD_MINUTES : true;
+}
 const DEFAULT_SNAPSHOT_LIMIT = 5000;
 // Results older than this carry `stale:true` plus a warning. Deliberately much lower than
 // STALE_THRESHOLD_MINUTES (which gates a full auto-refresh): the background sync runs every
@@ -710,6 +718,16 @@ export class LocalIndexService {
     // the original rejection via the returned/awaited `run` promise.
     this.snapshotQueue = run.catch(() => undefined);
     return run;
+  }
+
+  // Just what the refresh-before-search check needs: whether the index has any messages and whether it
+  // is older than the stale threshold. getStatus() also builds every thread and label from up to 5000
+  // messages (about 170 ms on a 57,000-message index), which this check ran before every search.
+  async getFreshness(): Promise<{ storedMessageCount: number; isStale: boolean }> {
+    const db = await this.ensureDb();
+    const { updatedAt } = this.loadFoldersAndMetadata(db);
+    const storedMessageCount = Number((db.prepare(`SELECT COUNT(*) AS count FROM messages`).get() as { count: number }).count);
+    return { storedMessageCount, isStale: isIndexStale(indexAgeMinutes(updatedAt)) };
   }
 
   async getStatus(): Promise<LocalIndexStatus> {
@@ -2928,9 +2946,7 @@ export class LocalIndexService {
     const labelCount = new Set(
       mailboxMessages.flatMap((message) => message.normalizedLabels.map((label) => label.toLowerCase())),
     ).size;
-    const ageMinutes = snapshot.updatedAt
-      ? Math.max(0, Math.round((Date.now() - new Date(snapshot.updatedAt).getTime()) / 60_000))
-      : undefined;
+    const ageMinutes = indexAgeMinutes(snapshot.updatedAt);
 
     return {
       path: this.dbPath,
@@ -2938,7 +2954,7 @@ export class LocalIndexService {
       updatedAt: snapshot.updatedAt,
       ageMinutes,
       staleThresholdMinutes: STALE_THRESHOLD_MINUTES,
-      isStale: typeof ageMinutes === "number" ? ageMinutes > STALE_THRESHOLD_MINUTES : true,
+      isStale: isIndexStale(ageMinutes),
       lastSyncAt: snapshot.updatedAt,
       indexFreshnessMinutes: ageMinutes,
       // Selectable folders the index has never synced: mail arriving there is invisible to

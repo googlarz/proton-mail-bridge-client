@@ -2783,3 +2783,34 @@ test("close() releases the db, is safe to call twice, and the index reopens on n
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("getFreshness agrees with getStatus on message count and staleness, without building threads", async () => {
+  // The refresh-before-search check only needs these two facts; getStatus() also builds every
+  // thread and label (about 170 ms on a 57,000-message index) and ran before every search.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-freshness-test-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+  try {
+    const empty = await service.getFreshness();
+    assert.deepEqual(empty, { storedMessageCount: 0, isStale: true });
+
+    await service.recordSnapshot({
+      syncedAt: new Date().toISOString(),
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+      folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "recent" }],
+      emails: [{
+        id: "INBOX::1", folder: "INBOX", uid: 1, seq: 1, messageId: "<f@example.com>", subject: "Fresh",
+        from: [{ address: "a@example.com" }], to: [{ address: "owner@example.com" }], cc: [], bcc: [], replyTo: [],
+        date: "2026-03-25T09:00:00.000Z", internalDate: "2026-03-25T09:00:00.000Z", isRead: true, isStarred: false,
+        flags: [], preview: "hi", hasAttachments: false, attachments: [], labels: [],
+      }],
+    });
+    const fresh = await service.getFreshness();
+    const status = await service.getStatus();
+    assert.equal(fresh.storedMessageCount, status.storedMessageCount);
+    assert.equal(fresh.isStale, status.isStale);
+    assert.equal(fresh.isStale, false);
+  } finally {
+    await service.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

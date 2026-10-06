@@ -3125,7 +3125,7 @@ async function maybeRefreshLocalIndex(
     limitPerFolder?: number;
   } = {},
 ) {
-  const status = await localIndexService.getStatus();
+  const status = await localIndexService.getFreshness();
   if (!input.force && status.storedMessageCount > 0 && !status.isStale) {
     // Not stale by age, but age alone cannot see mail that arrived since the last sync
     // (background sync/IDLE may be off, failing, or not covering this account). Compare the

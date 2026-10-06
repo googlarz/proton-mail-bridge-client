@@ -29,7 +29,7 @@ async function withServer(fn) {
   };
   const { server, imapService, localIndexService } = createServer(config, { startBackgroundSync: false });
   imapService.getFolderStats = async () => { throw new Error("no bridge"); };
-  localIndexService.getStatus = async () => ({ storedMessageCount: 1, isStale: false });
+  localIndexService.getFreshness = async () => ({ storedMessageCount: 1, isStale: false });
   localIndexService.getSyncCheckpointMap = async () => ({ INBOX: { folder: "INBOX", uidNext: 2, total: 1 } });
   localIndexService.getInboxDigest = async ({ limit }) => ({ counts: {}, indexUpdatedAt: "2026-09-30T00:00:00Z", topThreads: TOP.slice(0, limit), staleAwaitingYou: STALE.slice(0, limit) });
   const client = new Client({ name: "t", version: "0" });
