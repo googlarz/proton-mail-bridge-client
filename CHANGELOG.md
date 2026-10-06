@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [2.1.49] — 2026-10-06
+
+### Fixed
+- **`count_messages` ignored `hasAttachment`, `senderDomain`, `label` and `threadId`** and returned the unfiltered folder total (live: 29028 instead of 3287 with `hasAttachment`). Those filters are now applied the way `search_emails` applies them; without them the cheap SEARCH count is unchanged. Bulk `match` is unaffected and stays exact.
+- **Calendar invite summaries showed the timezone rule's start** (`Starts 19700329T020000`) instead of the event's, because a `VTIMEZONE` block comes before the `VEVENT` in Proton and Google invites. Only the first event's own properties are read now, so a nested alarm no longer overrides the summary either.
+- **`get_emails` pages were ordered by Date header, not UID**, which scrambled pages and `beforeUid` cursors in folders whose dates do not follow UID order (imports, Trash). Descending order now mirrors ascending: by UID. The multi-account merge still interleaves accounts by date.
+
 ## [2.1.48] — 2026-10-05
 
 ### Fixed
