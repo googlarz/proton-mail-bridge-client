@@ -1936,6 +1936,15 @@ function createTextResult(
 // (services, sockets, clients), never into an account bundle, stop on cycles, and cap depth.
 const AUDIT_MAX_DEPTH = 8;
 
+// The audit log records what was done, not the content of the mail or any secret. Message text can arrive under
+// many names (body, markdownBody, htmlBody, a draft's notes, the find/replace of body edits, a raw .eml...), so
+// every one of them is redacted by key; credential-like keys are caught by pattern.
+const AUDIT_REDACTED_KEYS = new Set([
+  "body", "html", "text", "htmlBody", "textBody", "markdownBody", "customMessage", "notes", "bodyEdits",
+  "raw", "rawBase64", "base64", "content", "find", "replace", "signature",
+]);
+const AUDIT_SECRET_KEY = /pass(word|wd|phrase)?$|secret|token|api[-_]?key|authoriz|credential|cookie|private[-_]?key/i;
+
 function sanitizeAuditValue(value: unknown, depth = 0, seen: WeakSet<object> = new WeakSet()): unknown {
   if (value === undefined || value === null) {
     return value;
@@ -1969,14 +1978,7 @@ function sanitizeAuditValue(value: unknown, depth = 0, seen: WeakSet<object> = n
 
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, entryValue]) => {
-        if (
-          key === "body" ||
-          key === "html" ||
-          key === "text" ||
-          key === "base64" ||
-          key === "customMessage" ||
-          /password|secret|token/i.test(key)
-        ) {
+        if (AUDIT_REDACTED_KEYS.has(key) || AUDIT_SECRET_KEY.test(key)) {
           return [key, "[redacted]"];
         }
 
@@ -2014,19 +2016,21 @@ export async function withAudit<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   const startedAt = Date.now();
+  // Writing the audit entry is bookkeeping about an operation that has already happened. If it fails (disk
+  // full, a locked file), the failure is logged and swallowed: raising it turned a successful move or send
+  // into a tool error, so a client would retry it, and on the error path it would hide the real error.
+  const record = async (entry: Parameters<AuditService["record"]>[0]) => {
+    try {
+      await auditService.record(entry);
+    } catch (auditError) {
+      logger.error("Could not write the audit entry", "MCPServer", { tool, error: auditError });
+    }
+  };
+  let result: T;
   try {
-    const result = await operation();
-    await auditService.record({
-      timestamp: new Date().toISOString(),
-      tool,
-      status: "success",
-      durationMs: Date.now() - startedAt,
-      input: sanitizeAuditValue(input),
-      result: sanitizeAuditValue(result),
-    });
-    return result;
+    result = await operation();
   } catch (error) {
-    await auditService.record({
+    await record({
       timestamp: new Date().toISOString(),
       tool,
       status: "error",
@@ -2036,6 +2040,15 @@ export async function withAudit<T>(
     });
     throw error;
   }
+  await record({
+    timestamp: new Date().toISOString(),
+    tool,
+    status: "success",
+    durationMs: Date.now() - startedAt,
+    input: sanitizeAuditValue(input),
+    result: sanitizeAuditValue(result),
+  });
+  return result;
 }
 
 // Validates update_draft's `bodyEdits` argument into BodyEdit[] (shape only; whether each

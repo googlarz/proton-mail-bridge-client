@@ -111,10 +111,15 @@ export class AuditService {
     return run;
   }
 
+  // Removes the secrets that commonly end up in an error message: key=value and key: value pairs for
+  // password-like names, bearer/basic credentials, an IMAP LOGIN line, and user:password@ in a URL. A bare
+  // "Name: address@host" is not a credential and is left alone.
   private scrubError(error: string): string {
     return String(error)
-      .replace(/\b(password=)\S+/gi, "$1REDACTED")
-      .replace(/:[^:@/\s]+@/g, ":REDACTED@");
+      .replace(/\b(pass(?:word|wd|phrase)?|pwd|secret|token|api[-_]?key|access[-_]?token)\s*[=:]\s*("[^"]*"|'[^']*'|\S+)/gi, "$1=REDACTED")
+      .replace(/\b(authorization\s*:\s*(?:bearer|basic)\s+)\S+/gi, "$1REDACTED")
+      .replace(/\b(LOGIN\s+\S+\s+)("[^"]*"|\S+)/gi, "$1REDACTED")
+      .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^:/@\s]+):[^@\s]+@/gi, "$1:REDACTED@");
   }
 
   private async readEntries(path: string, maxLines = MAX_AUDIT_LINES): Promise<AuditEntry[]> {
