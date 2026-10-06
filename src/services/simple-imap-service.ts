@@ -1416,19 +1416,21 @@ export class SimpleIMAPService {
       throw new Error("Folder path is required.");
     }
 
-    const reservedRoots = new Set([
-      "INBOX",
-      "Drafts",
-      "Sent",
-      "Trash",
-      "Spam",
-      "Archive",
-      "All Mail",
-      "Folders",
-      "Labels",
+    // System folders, by name (any capitalisation, with or without surrounding slashes) and by the special-use
+    // the server itself reports. Compared on the normalised name: "inbox", "INBOX/" and "/Trash" are the same
+    // folders as "INBOX" and "Trash".
+    const reservedNames = new Set([
+      "inbox", "drafts", "sent", "sent mail", "trash", "deleted messages", "spam", "junk", "archive",
+      "all mail", "starred", "folders", "labels",
     ]);
-    if (reservedRoots.has(trimmed)) {
+    const normalized = trimmed.replace(/^\/+|\/+$/g, "").trim().toLowerCase();
+    if (reservedNames.has(normalized)) {
       throw new Error(`Refusing to delete reserved system folder ${trimmed}.`);
+    }
+    const known = await this.getFolders().catch(() => [] as Array<{ path: string; specialUse?: string }>);
+    const target = known.find((entry) => entry.path.replace(/^\/+|\/+$/g, "").toLowerCase() === normalized);
+    if (target?.specialUse) {
+      throw new Error(`Refusing to delete system folder ${trimmed} (it is the server's ${target.specialUse} folder).`);
     }
 
     const response = await this.mutateFolderWithReconnectCheck<{ path: string }>(

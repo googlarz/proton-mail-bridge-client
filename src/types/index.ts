@@ -353,6 +353,8 @@ export interface BatchActionResult {
   succeeded: number;
   failed: number;
   results: BatchActionEntry[];
+  // Ids that were never tried because continueOnError was false and an earlier id failed.
+  notAttempted?: string[];
 }
 
 export interface AttachmentContentResult {

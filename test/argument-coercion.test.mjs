@@ -119,3 +119,27 @@ test("bulk_delete and bulk_move with an empty or misspelled match are InvalidPar
     assert.equal(searched, 0, "the mailbox must not even be searched");
   });
 });
+
+test("batch_email_action with continueOnError:false names the ids it never tried", async () => {
+  await withServer(async (client, imapService) => {
+    const ids = [createEmailId("INBOX", 1, "114504891"), createEmailId("INBOX", 2, "114504891"), createEmailId("INBOX", 3, "114504891")];
+    const tried = [];
+    imapService.markEmailRead = async (emailId) => { tried.push(emailId); throw new Error("boom"); };
+    const result = await client.callTool({ name: "batch_email_action", arguments: { emailIds: ids, action: "mark_read", continueOnError: false } });
+    const body = JSON.parse(result.content[0].text);
+    assert.equal(tried.length, 1, "it stopped at the first failure");
+    assert.equal(body.failed, 1);
+    assert.deepEqual(body.notAttempted, ids.slice(1), "the caller is told which ids were never tried");
+  });
+});
+
+test("batch_email_action with the default continueOnError tries everything and reports no unattempted ids", async () => {
+  await withServer(async (client, imapService) => {
+    const ids = [createEmailId("INBOX", 1, "114504891"), createEmailId("INBOX", 2, "114504891")];
+    imapService.markEmailRead = async (emailId) => { throw new Error("boom"); };
+    const result = await client.callTool({ name: "batch_email_action", arguments: { emailIds: ids, action: "mark_read" } });
+    const body = JSON.parse(result.content[0].text);
+    assert.equal(body.failed, 2);
+    assert.equal(body.notAttempted, undefined);
+  });
+});
