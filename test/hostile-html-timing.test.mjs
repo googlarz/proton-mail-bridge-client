@@ -6,7 +6,8 @@ import { stripUnshippableImages } from "../dist/index.js";
 // Incoming HTML is untrusted. These patterns used to take seconds to minutes on 100 KB-1 MB (the work
 // grew with the square of the input) and block the whole server while the message was read. The limits
 // are generous on purpose: the point is "not quadratic", not a benchmark.
-const LIMIT_MS = 1500;
+// The quadratic versions of these take many seconds to minutes at these sizes; the margin is for loaded CI runners.
+const LIMIT_MS = 5000;
 
 function timed(fn) {
   const start = performance.now();
