@@ -844,8 +844,32 @@ export function classifyAttachment(input: {
 export function summarizeCalendarText(value: string): string | undefined {
   const normalized = value.replace(/\r/g, "");
   const fields = new Map<string, string>();
+  const lines = normalized.split("\n");
 
-  for (const line of normalized.split("\n")) {
+  // Only read the first VEVENT's own properties when one exists: a VTIMEZONE ahead of it
+  // carries its own DTSTART (e.g. 19700329T020000 for a DST rule), and a nested VALARM
+  // carries its own SUMMARY/DESCRIPTION.
+  const hasEvent = lines.some((line) => line.trim().toUpperCase() === "BEGIN:VEVENT");
+  const componentStack: string[] = [];
+  let seenEvent = false;
+
+  for (const line of lines) {
+    const marker = /^(BEGIN|END):(\S+)\s*$/i.exec(line.trim());
+    if (marker) {
+      const component = marker[2].toUpperCase();
+      if (marker[1].toUpperCase() === "BEGIN") {
+        componentStack.push(component);
+      } else {
+        if (component === "VEVENT" && componentStack[componentStack.length - 1] === "VEVENT") {
+          seenEvent = true;
+        }
+        componentStack.pop();
+      }
+      continue;
+    }
+    if (hasEvent && (seenEvent || componentStack[componentStack.length - 1] !== "VEVENT")) {
+      continue;
+    }
     const separator = line.indexOf(":");
     if (separator <= 0) {
       continue;
