@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [2.2.3] — 2026-10-06
+
+### Fixed
+- **`count_messages` found nothing for values with non-ASCII letters** (`from: "Pelcová"`, `subject: "książki"`, `query: "Prägung"`), the same Proton Bridge limitation `search_emails` already worked around in 2.1.47. It now narrows the value to its longest ASCII run, asks Bridge for that, and verifies every candidate locally ignoring accents and case, so it agrees with `search_emails`. A free-text `query` is checked against the body too. If more than 500 candidates came back, only the newest 500 are checked and the result says `approximate: true` (summed over accounts when counting across several). Checked live: the counts match `search_emails` for the same values. Counts without non-ASCII values are unchanged.
+- The bulk operations' `match` deliberately still uses Bridge's exact matching: a bulk action must never act on a looser set than the one that was asked for.
+
 ## [2.2.2] — 2026-10-06
 
 ### Changed

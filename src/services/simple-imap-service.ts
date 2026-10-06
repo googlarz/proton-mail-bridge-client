@@ -2300,9 +2300,13 @@ export class SimpleIMAPService {
   async countMessages(input: SearchEmailsInput = {}): Promise<{
     folder: string;
     count: number;
+    approximate?: true;
   }> {
     const folder = input.folder ?? "INBOX";
-    const query = this.buildSearchQuery(input);
+    // Bridge cannot match non-ASCII values: send a narrowed ASCII query and verify locally,
+    // exactly as searchEmails does, so the two agree.
+    const { imapInput, criteria: nonAsciiCriteria } = splitNonAsciiCriteria(input);
+    const query = this.buildSearchQuery(imapInput);
 
     // Same local-only filters as searchEmails: IMAP SEARCH can't express them, so without
     // this they were silently dropped and the unfiltered SEARCH count was returned.
@@ -2314,18 +2318,31 @@ export class SimpleIMAPService {
       Boolean(input.senderDomain) ||
       Boolean(input.mailboxRole);
 
+    let approximate = false;
     const count = await this.withMailbox(folder, true, async (client) => {
       const searchResult = await client.search(query, { uid: true });
-      const uids = Array.isArray(searchResult) ? searchResult : [];
-      if (!hasLocalOnlyFilters || uids.length === 0) {
+      let uids = Array.isArray(searchResult) ? searchResult : [];
+      if ((!hasLocalOnlyFilters && !nonAsciiCriteria) || uids.length === 0) {
         return uids.length;
       }
+      // The narrowed query can be broad; check only the newest candidates and say so.
+      if (nonAsciiCriteria && uids.length > NON_ASCII_SCAN_CAP) {
+        uids = [...uids].sort((a, b) => b - a).slice(0, NON_ASCII_SCAN_CAP);
+        approximate = true;
+      }
+      // A non-ASCII free-text query is verified against the body, so it needs the source too.
+      const fetchQuery = nonAsciiCriteria?.query ? FETCH_DETAIL_QUERY : FETCH_SUMMARY_QUERY;
       const uidValidity = (client.mailbox || undefined)?.uidValidity?.toString();
       let matched = 0;
       for (let offset = 0; offset < uids.length; offset += SEARCH_FILTER_BATCH_SIZE) {
         const batch = uids.slice(offset, offset + SEARCH_FILTER_BATCH_SIZE);
-        for await (const message of client.fetch(batch, FETCH_SUMMARY_QUERY, { uid: true })) {
-          if (matchesLocalSearchFilters(this.toSummary(folder, message, uidValidity), input)) {
+        for await (const message of client.fetch(batch, fetchQuery, { uid: true })) {
+          const summary = this.toSummary(folder, message, uidValidity);
+          const parsed = nonAsciiCriteria?.query && message.source ? await this.parseSource(message.source) : undefined;
+          if (
+            matchesLocalSearchFilters(summary, input) &&
+            (!nonAsciiCriteria || matchesNonAsciiCriteria(summary, nonAsciiCriteria, parsed?.text))
+          ) {
             matched += 1;
           }
         }
@@ -2333,7 +2350,7 @@ export class SimpleIMAPService {
       return matched;
     });
 
-    return { folder, count };
+    return approximate ? { folder, count, approximate: true } : { folder, count };
   }
 
   async getFolderStats(folder?: string): Promise<{

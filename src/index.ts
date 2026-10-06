@@ -664,7 +664,7 @@ const TOOLS = [
   },
   {
     name: "search_emails",
-    description: "Search emails via live IMAP filters, across ALL configured accounts by default (accounts are queried one at a time; pass `account` = address or slug to search only one; non-primary ids are prefixed '<slug>::'), with optional local post-processing for attachments and labels. Use when you need real-time results or must find messages received after the last sync. Prefer search_indexed_emails when the local index is current — it is significantly faster and works even when Bridge IMAP is unavailable. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail. Without `folder` it searches every real folder but not the All Mail / Labels/* / Starred views (they only duplicate mail already in a real folder and made an all-folders search ~3x slower); pass `folder` (e.g. 'Labels/x' or 'All Mail') or `label`/`mailboxRole` to search those. Values with non-ASCII letters (accents, ł, ä, ß...) are matched ignoring accents and case: Proton Bridge's own IMAP search cannot match them, so they are narrowed server-side and verified locally over the newest 500 candidates (hasMore:true if the candidates were cut). count_messages does not do this and still counts only ASCII matches.",
+    description: "Search emails via live IMAP filters, across ALL configured accounts by default (accounts are queried one at a time; pass `account` = address or slug to search only one; non-primary ids are prefixed '<slug>::'), with optional local post-processing for attachments and labels. Use when you need real-time results or must find messages received after the last sync. Prefer search_indexed_emails when the local index is current — it is significantly faster and works even when Bridge IMAP is unavailable. Each email's attachments are metadata only (id/filename/contentType/size/disposition) — use list_attachments or get_email_by_id for full attachment detail. Without `folder` it searches every real folder but not the All Mail / Labels/* / Starred views (they only duplicate mail already in a real folder and made an all-folders search ~3x slower); pass `folder` (e.g. 'Labels/x' or 'All Mail') or `label`/`mailboxRole` to search those. Values with non-ASCII letters (accents, ł, ä, ß...) are matched ignoring accents and case: Proton Bridge's own IMAP search cannot match them, so they are narrowed server-side and verified locally over the newest 500 candidates (hasMore:true if the candidates were cut). count_messages does the same and marks its count approximate when the candidates were cut. The bulk operations' `match` still uses Bridge's exact matching, so it does not see non-ASCII values.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -986,7 +986,7 @@ const TOOLS = [
   },
   {
     name: "count_messages",
-    description: "Count messages matching live IMAP search criteria without fetching message data. Use to preview how many results a search would return before running it. Prefer folder_stats for a simple unread/total count on one folder without filters.",
+    description: "Count messages matching search criteria. Plain IMAP criteria are answered by the server without fetching messages; non-ASCII values (accented letters, ł, ß) and local-only filters (hasAttachment, senderDomain, label, threadId) are checked locally, and the result carries approximate: true when only the newest 500 candidates could be checked. Use to preview how many results a search would return before running it. Prefer folder_stats for a simple unread/total count on one folder without filters.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -6187,6 +6187,7 @@ export function createServer(
           return createTextResult({
             folder: countInput.folder ?? "INBOX",
             count: perAccount.reduce((sum, entry) => sum + entry.count, 0),
+            ...(perAccount.some((entry) => entry.approximate) ? { approximate: true } : {}),
             byAccount: perAccount,
           });
         }
