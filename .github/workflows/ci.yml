@@ -15,15 +15,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node-version: [20, 22, 24]
+        node-version: [24]
         include:
           # The darwin .mcpb bundle ships to users, so test on macOS too.
           - os: macos-latest
-            node-version: 22
+            node-version: 24
           # ...and the win32 bundle: Windows refuses to delete open files, which
           # is how the missing LocalIndexService.close() was found.
           - os: windows-latest
-            node-version: 22
+            node-version: 24
 
     steps:
       - name: Check out repository

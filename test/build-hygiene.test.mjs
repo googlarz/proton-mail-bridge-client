@@ -46,13 +46,23 @@ test("Dependabot keeps both the npm dependencies and the pinned actions current"
   assert.match(config, /package-ecosystem:\s*npm/);
 });
 
-test("Dependabot does not offer major bumps that would break the supported Node range", async () => {
-  // better-sqlite3 13 needs Node >=22 and crashes on 20; @types/node 26 would let code use
-  // APIs Node 20 lacks. Both must stay ignored for major updates until `engines.node` is raised.
+test("Dependabot does not offer an @types/node major that would outrun the supported Node range", async () => {
+  // @types/node should describe the OLDEST supported Node (engines.node), not the newest, or code
+  // can call APIs the minimum lacks and still compile. Keep its majors ignored until engines is raised.
   const config = await read(".github/dependabot.yml");
-  for (const name of ["better-sqlite3", "@types/node"]) {
-    assert.match(config, new RegExp(`dependency-name:\\s*"${name}"\\s*\\n\\s*update-types:\\s*\\["version-update:semver-major"\\]`), `${name} majors must be ignored`);
-  }
+  assert.match(config, /dependency-name:\s*"@types\/node"\s*\n\s*update-types:\s*\["version-update:semver-major"\]/);
+});
+
+test("the Node floor is the same in package.json, the .mcpb manifest, the Dockerfile and the CI matrix", async () => {
+  const pkg = JSON.parse(await read("package.json"));
+  const manifest = JSON.parse(await read("mcpb/manifest.json"));
+  const floor = pkg.engines.node;
+  assert.equal(manifest.compatibility.runtimes.node, floor);
+  const major = /(\d+)/.exec(floor)[1];
+  assert.match(await read("Dockerfile"), new RegExp(`^FROM node:${major}-`, "m"));
+  assert.match(await read(".github/workflows/ci.yml"), new RegExp(`node-version: \\[${major}\\]`));
+  // The .mcpb bundles native better-sqlite3 binaries, which are built per Node ABI: build on the floor.
+  assert.match(await read(".github/workflows/mcpb-release.yml"), new RegExp(`node-version: '${major}'`));
 });
 
 test("the allowScripts pin names the better-sqlite3 version that is actually installed", async () => {
