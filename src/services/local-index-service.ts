@@ -22,6 +22,7 @@ import {
   dedupeEmails,
   extractDomain,
   extractMessageIdList,
+  foldSearchText,
   lowerCaseAddress,
   nextDay,
   normalizeMailboxLabel,
@@ -218,10 +219,10 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   }
 
   if (normalizedFilters.label) {
-    const labelNeedle = normalizedFilters.label.toLowerCase();
-    const folderMatch = normalizeMailboxLabel(email.folder)?.toLowerCase() === labelNeedle;
+    const labelNeedle = foldSearchText(normalizedFilters.label);
+    const folderMatch = foldSearchText(normalizeMailboxLabel(email.folder) ?? "") === labelNeedle;
     const labelMatch = email.labels.some(
-      (label) => normalizeMailboxLabel(label)?.toLowerCase() === labelNeedle,
+      (label) => foldSearchText(normalizeMailboxLabel(label) ?? "") === labelNeedle,
     );
     if (!folderMatch && !labelMatch) {
       return false;
@@ -259,9 +260,9 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   }
 
   if (normalizedFilters.attachmentName) {
-    const attachmentNeedle = normalizedFilters.attachmentName.toLowerCase();
+    const attachmentNeedle = foldSearchText(normalizedFilters.attachmentName);
     const match = email.attachments.some((attachment) =>
-      (attachment.filename || "").toLowerCase().includes(attachmentNeedle),
+      foldSearchText(attachment.filename || "").includes(attachmentNeedle),
     );
     if (!match) {
       return false;
@@ -285,9 +286,8 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
     ...email.from.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
     ...email.to.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
     ...email.cc.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
-  ]
-    .join("\n")
-    .toLowerCase();
+  ].join("\n");
+  const foldedHaystacks = foldSearchText(haystacks);
 
   // searchFtsIds() ANDs every whitespace-separated query token as its own quoted FTS5 term
   // (so "invoice payment" matches a preview like "payment for the invoice is overdue"), but
@@ -295,23 +295,23 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   // rejecting anything FTS already matched whose words were merely out of order or separated
   // by other words. Match FTS's own AND-of-terms semantics instead of a single-phrase substring.
   if (normalizedFilters.query) {
-    const terms = normalizedFilters.query.toLowerCase().split(/\s+/).filter(Boolean);
-    if (terms.length > 0 && !terms.every((term) => haystacks.includes(term))) {
+    const terms = foldSearchText(normalizedFilters.query).split(/\s+/).filter(Boolean);
+    if (terms.length > 0 && !terms.every((term) => foldedHaystacks.includes(term))) {
       return false;
     }
   }
 
   if (
     normalizedFilters.subject &&
-    !email.subject.toLowerCase().includes(normalizedFilters.subject.toLowerCase())
+    !foldSearchText(email.subject).includes(foldSearchText(normalizedFilters.subject))
   ) {
     return false;
   }
 
   if (normalizedFilters.from) {
-    const fromNeedle = normalizedFilters.from.toLowerCase();
+    const fromNeedle = foldSearchText(normalizedFilters.from);
     const match = email.from.some((value) =>
-      `${value.name ?? ""} ${value.address ?? ""}`.toLowerCase().includes(fromNeedle),
+      foldSearchText(`${value.name ?? ""} ${value.address ?? ""}`).includes(fromNeedle),
     );
     if (!match) {
       return false;
@@ -319,10 +319,10 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   }
 
   if (normalizedFilters.to) {
-    const toNeedle = normalizedFilters.to.toLowerCase();
+    const toNeedle = foldSearchText(normalizedFilters.to);
     const recipients = [...email.to, ...email.cc, ...email.bcc];
     const match = recipients.some((value) =>
-      `${value.name ?? ""} ${value.address ?? ""}`.toLowerCase().includes(toNeedle),
+      foldSearchText(`${value.name ?? ""} ${value.address ?? ""}`).includes(toNeedle),
     );
     if (!match) {
       return false;
@@ -1036,22 +1036,22 @@ export class LocalIndexService {
     // get plain ThreadSummary shapes, not the full per-message detail.
     const threads = (this.buildThreads(snapshot, true) as ThreadDetail[]).filter((thread) => {
       if (input.label) {
-        const labelNeedle = input.label.toLowerCase();
-        if (!thread.normalizedLabels.some((label) => label.toLowerCase() === labelNeedle)) {
+        const labelNeedle = foldSearchText(input.label);
+        if (!thread.normalizedLabels.some((label) => foldSearchText(label) === labelNeedle)) {
           return false;
         }
       }
 
       if (input.query) {
-        const queryNeedle = input.query.toLowerCase();
-        const threadLevelHaystack = [
-          ...thread.participants.map((participant) => `${participant.name ?? ""} ${participant.address ?? ""}`),
-          ...thread.normalizedLabels,
-        ]
-          .join("\n")
-          .toLowerCase();
+        const queryNeedle = foldSearchText(input.query);
+        const threadLevelHaystack = foldSearchText(
+          [
+            ...thread.participants.map((participant) => `${participant.name ?? ""} ${participant.address ?? ""}`),
+            ...thread.normalizedLabels,
+          ].join("\n"),
+        );
         const matchesAnyMessage = thread.messages.some((message) =>
-          message.subject.toLowerCase().includes(queryNeedle),
+          foldSearchText(message.subject).includes(queryNeedle),
         );
         if (!matchesAnyMessage && !threadLevelHaystack.includes(queryNeedle)) {
           return false;
@@ -1169,14 +1169,14 @@ export class LocalIndexService {
         conditions.push(`is_read = 0`);
       }
       if (input.label) {
-        const labelNeedle = escapeLike(input.label.toLowerCase());
-        conditions.push(`(LOWER(folder) LIKE ? ESCAPE '\\' OR LOWER(labels_json) LIKE ? ESCAPE '\\')`);
+        const labelNeedle = escapeLike(foldSearchText(input.label));
+        conditions.push(`(FOLD(folder) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`);
         params.push(`%${labelNeedle}%`, `%${labelNeedle}%`);
       }
       if (input.query) {
-        const needle = `%${escapeLike(input.query.toLowerCase())}%`;
+        const needle = `%${escapeLike(foldSearchText(input.query))}%`;
         conditions.push(
-          `(LOWER(subject) LIKE ? ESCAPE '\\' OR LOWER(preview) LIKE ? ESCAPE '\\' OR LOWER(from_json) LIKE ? ESCAPE '\\' OR LOWER(labels_json) LIKE ? ESCAPE '\\')`,
+          `(FOLD(subject) LIKE ? ESCAPE '\\' OR FOLD(preview) LIKE ? ESCAPE '\\' OR FOLD(from_json) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`,
         );
         params.push(needle, needle, needle, needle);
       }
@@ -1221,22 +1221,22 @@ export class LocalIndexService {
         }
 
         if (input.label) {
-          const labelNeedle = input.label.toLowerCase();
-          if (!thread.normalizedLabels.some((label) => label.toLowerCase() === labelNeedle)) {
+          const labelNeedle = foldSearchText(input.label);
+          if (!thread.normalizedLabels.some((label) => foldSearchText(label) === labelNeedle)) {
             return false;
           }
         }
 
         if (input.query) {
-          const haystack = [
-            thread.subject,
-            thread.latestPreview || "",
-            ...thread.latestFrom.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
-            ...thread.normalizedLabels,
-          ]
-            .join("\n")
-            .toLowerCase();
-          if (!haystack.includes(input.query.toLowerCase())) {
+          const haystack = foldSearchText(
+            [
+              thread.subject,
+              thread.latestPreview || "",
+              ...thread.latestFrom.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
+              ...thread.normalizedLabels,
+            ].join("\n"),
+          );
+          if (!haystack.includes(foldSearchText(input.query))) {
             return false;
           }
         }
@@ -1489,7 +1489,7 @@ export class LocalIndexService {
     // match regardless of its text, so has_attachments = 1 narrows this further.
     const keywordConditions = keywords.map(
       () =>
-        `(LOWER(attachments_json) LIKE ? ESCAPE '\\' OR LOWER(subject) LIKE ? ESCAPE '\\' OR LOWER(preview) LIKE ? ESCAPE '\\' OR LOWER(attachment_text) LIKE ? ESCAPE '\\')`,
+        `(FOLD(attachments_json) LIKE ? ESCAPE '\\' OR FOLD(subject) LIKE ? ESCAPE '\\' OR FOLD(preview) LIKE ? ESCAPE '\\' OR FOLD(attachment_text) LIKE ? ESCAPE '\\')`,
     );
     const keywordParams: unknown[] = [];
     for (const keyword of keywords) {
@@ -1574,7 +1574,7 @@ export class LocalIndexService {
     const db = await this.ensureDb();
     const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
     const syncCheckpoints = this.loadCheckpointsSync(db);
-    const personNeedle = input.person?.toLowerCase();
+    const personNeedle = input.person ? foldSearchText(input.person) : undefined;
     const domainNeedle = input.domain?.toLowerCase();
     const limit = input.limit ?? 10;
 
@@ -1582,12 +1582,12 @@ export class LocalIndexService {
     const params: unknown[] = [];
     if (personNeedle) {
       const needle = `%${escapeLike(personNeedle)}%`;
-      conditions.push(`(LOWER(from_json) LIKE ? ESCAPE '\\' OR LOWER(to_json) LIKE ? ESCAPE '\\' OR LOWER(cc_json) LIKE ? ESCAPE '\\')`);
+      conditions.push(`(FOLD(from_json) LIKE ? ESCAPE '\\' OR FOLD(to_json) LIKE ? ESCAPE '\\' OR FOLD(cc_json) LIKE ? ESCAPE '\\')`);
       params.push(needle, needle, needle);
     }
     if (domainNeedle) {
       const needle = `%@${escapeLike(domainNeedle)}%`;
-      conditions.push(`(LOWER(from_json) LIKE ? ESCAPE '\\' OR LOWER(to_json) LIKE ? ESCAPE '\\' OR LOWER(cc_json) LIKE ? ESCAPE '\\')`);
+      conditions.push(`(FOLD(from_json) LIKE ? ESCAPE '\\' OR FOLD(to_json) LIKE ? ESCAPE '\\' OR FOLD(cc_json) LIKE ? ESCAPE '\\')`);
       params.push(needle, needle, needle);
     }
 
@@ -1615,7 +1615,7 @@ export class LocalIndexService {
     const threads = (this.buildThreads(snapshot, true) as ThreadDetail[])
       .filter((thread) =>
         thread.participants.some((participant) => {
-          const participantText = `${participant.name ?? ""} ${participant.address ?? ""}`.toLowerCase();
+          const participantText = foldSearchText(`${participant.name ?? ""} ${participant.address ?? ""}`);
           const participantDomain = extractDomain(participant.address || "");
           if (personNeedle && participantText.includes(personNeedle)) {
             return true;
@@ -1703,6 +1703,9 @@ export class LocalIndexService {
     const db = this.db ?? new Database(this.dbPath);
     if (isFirstOpen) {
       this.chmodDbFiles();
+      // SQLite's LOWER() only folds ASCII and LIKE does not ignore accents, so "łódź" could not find
+      // "Łódź" and "pelcova" could not find "Pelcová". Compare folded text on both sides instead.
+      db.function("FOLD", { deterministic: true }, (value) => (value == null ? null : foldSearchText(String(value))));
     }
     // auto_vacuum only takes effect on a brand-new/empty database (page_count 0) —
     // setting the pragma alone does NOT retroactively enable incremental vacuuming
@@ -2415,12 +2418,12 @@ export class LocalIndexService {
       params.push(filters.hasAttachment ? 1 : 0);
     }
     if (filters.subject) {
-      conditions.push(`LOWER(subject) LIKE ? ESCAPE '\\'`);
-      params.push(`%${escapeLike(filters.subject.toLowerCase())}%`);
+      conditions.push(`FOLD(subject) LIKE ? ESCAPE '\\'`);
+      params.push(`%${escapeLike(foldSearchText(filters.subject))}%`);
     }
     if (filters.senderDomain) {
-      conditions.push(`LOWER(from_json) LIKE ? ESCAPE '\\'`);
-      params.push(`%${escapeLike(filters.senderDomain.toLowerCase())}%`);
+      conditions.push(`FOLD(from_json) LIKE ? ESCAPE '\\'`);
+      params.push(`%${escapeLike(foldSearchText(filters.senderDomain))}%`);
     }
     // from/to/messageId were accepted by search_indexed_emails but never
     // narrowed the SQL candidate scan — only applied afterward by
@@ -2430,12 +2433,12 @@ export class LocalIndexService {
     // genuine match older than the window instead of finding it. Mirror the
     // existing senderDomain LIKE pattern (a safe superset pre-filter).
     if (filters.from) {
-      conditions.push(`LOWER(from_json) LIKE ? ESCAPE '\\'`);
-      params.push(`%${escapeLike(filters.from.toLowerCase())}%`);
+      conditions.push(`FOLD(from_json) LIKE ? ESCAPE '\\'`);
+      params.push(`%${escapeLike(foldSearchText(filters.from))}%`);
     }
     if (filters.to) {
-      conditions.push(`(LOWER(to_json) LIKE ? ESCAPE '\\' OR LOWER(cc_json) LIKE ? ESCAPE '\\' OR LOWER(bcc_json) LIKE ? ESCAPE '\\')`);
-      const toNeedle = `%${escapeLike(filters.to.toLowerCase())}%`;
+      conditions.push(`(FOLD(to_json) LIKE ? ESCAPE '\\' OR FOLD(cc_json) LIKE ? ESCAPE '\\' OR FOLD(bcc_json) LIKE ? ESCAPE '\\')`);
+      const toNeedle = `%${escapeLike(foldSearchText(filters.to))}%`;
       params.push(toNeedle, toNeedle, toNeedle);
     }
     if (filters.messageId) {
@@ -2621,8 +2624,8 @@ export class LocalIndexService {
       messageParams.push(options.folder);
     }
     if (options.label) {
-      const labelNeedle = escapeLike(options.label.toLowerCase());
-      messageConditions.push(`(LOWER(folder) LIKE ? ESCAPE '\\' OR LOWER(labels_json) LIKE ? ESCAPE '\\')`);
+      const labelNeedle = escapeLike(foldSearchText(options.label));
+      messageConditions.push(`(FOLD(folder) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`);
       messageParams.push(`%${labelNeedle}%`, `%${labelNeedle}%`);
     }
     if (typeof options.isRead === "boolean") {
@@ -2671,14 +2674,14 @@ export class LocalIndexService {
       params.push(input.folder);
     }
     if (input.label) {
-      const labelNeedle = escapeLike(input.label.toLowerCase());
-      conditions.push(`(LOWER(folder) LIKE ? ESCAPE '\\' OR LOWER(labels_json) LIKE ? ESCAPE '\\')`);
+      const labelNeedle = escapeLike(foldSearchText(input.label));
+      conditions.push(`(FOLD(folder) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`);
       params.push(`%${labelNeedle}%`, `%${labelNeedle}%`);
     }
     if (input.query) {
-      const needle = `%${escapeLike(input.query.toLowerCase())}%`;
+      const needle = `%${escapeLike(foldSearchText(input.query))}%`;
       conditions.push(
-        `(LOWER(subject) LIKE ? ESCAPE '\\' OR LOWER(from_json) LIKE ? ESCAPE '\\' OR LOWER(to_json) LIKE ? ESCAPE '\\' OR LOWER(cc_json) LIKE ? ESCAPE '\\' OR LOWER(bcc_json) LIKE ? ESCAPE '\\' OR LOWER(labels_json) LIKE ? ESCAPE '\\')`,
+        `(FOLD(subject) LIKE ? ESCAPE '\\' OR FOLD(from_json) LIKE ? ESCAPE '\\' OR FOLD(to_json) LIKE ? ESCAPE '\\' OR FOLD(cc_json) LIKE ? ESCAPE '\\' OR FOLD(bcc_json) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`,
       );
       params.push(needle, needle, needle, needle, needle, needle);
     }

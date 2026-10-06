@@ -6048,7 +6048,9 @@ export function createServer(
             let liveFailedAccounts: Array<{ account: string; error: string }> = [];
             if (accountManager.all().length === 1) {
               result = await imapService.searchEmails(liveSearchInput);
-              liveHasMore = result.emails.length === effectiveLimit;
+              // The service also knows when it cut its candidates short (e.g. the non-ASCII scan checks
+              // only the newest 500), which a full page alone does not show.
+              liveHasMore = result.hasMore || result.emails.length === effectiveLimit;
             } else {
               // Merge strategy (mirrors search_indexed_emails): each account has its own
               // single IMAP connection, so search the selected accounts strictly one after
@@ -6086,7 +6088,7 @@ export function createServer(
                 hasMore: false,
                 emails: merged,
               };
-              liveHasMore = merged.length === effectiveLimit;
+              liveHasMore = merged.length === effectiveLimit || perAccountLive.some(({ result: r }) => r.hasMore);
             }
             return createTextResult(
               {

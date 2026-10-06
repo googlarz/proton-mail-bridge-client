@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [2.2.4] — 2026-10-06
+
+### Fixed
+- **The local index could not find names with accents or Polish capitals.** `search_indexed_emails` (`from`, `to`, `subject`, `label`, `attachmentName` and the `from:`/`subject:` shortcuts in `query`), `get_threads`, `find_document_threads` and `prepare_meeting_context` compared text with SQLite's `LOWER()`, which only folds ASCII and does not ignore accents. So `pelcova` did not find `Pelcová`, and `łódź` did not even find `Łódź` (`LOWER` leaves `Ł` alone). Both sides are now folded with the same function `search_emails` uses (accents, case, and `ł`, `ß`, `ø`, `æ`...). Checked on a copy of a real index: `pelcova`, `PELCOVA` and `Pelcová` return the same messages, as do `książki`/`ksiazki` and `Rücksendung`/`rucksendung`. The cost is a few tens of milliseconds more per filter on 57,000 messages (up to about 0.25 s for a keyword search over attachment text).
+- **`search_emails` said `hasMore: false` when it had cut its candidates short.** The tool replaced the search's own answer with "a full page came back", so a non-ASCII search that checked only the newest 500 candidates and found nothing looked complete. It now also reports `hasMore: true` when the search itself says more may exist (any account, when searching several).
+
+### Known limitation
+- A free-text `query` in `search_indexed_emails` goes through SQLite's full-text index, which folds accents (`ż`, `ó`, `ć`...) but not letters such as `ł`, `ß`, `ø`, `æ`. `ksiazki` finds `książki`, but `lodzi` does not find `Łodzi` there. Use `subject`, `from` or `to` for those, which fold everything.
+
 ## [2.2.3] — 2026-10-06
 
 ### Fixed

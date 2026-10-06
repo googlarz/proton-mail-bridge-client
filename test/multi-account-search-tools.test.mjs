@@ -135,3 +135,54 @@ test("search_emails throws when the account was named explicitly, or when every 
     await assert.rejects(call("search_emails", { folder: "Sent" }), /boom/);
   });
 });
+
+// Found while checking count_messages against search_emails: the tool handler replaced the
+// service's own hasMore with "returned == limit", so a search whose candidates were cut (the
+// non-ASCII scan checks only the newest 500) still said hasMore:false with 0 results.
+test("search_emails keeps an account's own hasMore when fewer than limit results came back", async () => {
+  await withServer(async ({ call, primaryBundle }) => {
+    primaryBundle.imapService.searchEmails = async (input) => ({
+      folders: ["Sent"], limit: input.limit, total: 0, totalMatched: 0, hasMore: true, emails: [],
+    });
+    const result = await call("search_emails", { folder: "Sent", limit: 10 });
+    assert.equal(result.emails.length, 1); // only the second account returned something
+    assert.equal(result.hasMore, true);
+  });
+});
+
+test("search_emails reports hasMore:false when no account has more and fewer than limit came back", async () => {
+  await withServer(async ({ call }) => {
+    const result = await call("search_emails", { folder: "Sent", limit: 10 });
+    assert.equal(result.hasMore, false);
+  });
+});
+
+test("search_emails on a single-account server keeps the service's own hasMore", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "search-tools-single-"));
+  const only = account(dir, "only@example.com", "only-example-com");
+  const config = {
+    smtp: only.smtp, imap: only.imap, dataDir: dir, debug: false, cacheEnabled: true, analyticsEnabled: true,
+    autoSync: false, syncInterval: 5,
+    runtime: {
+      readOnly: false, allowSend: true, allowRemoteDraftSync: true, allowedActions: [], startupSync: false,
+      autoSyncFolder: "INBOX", autoSyncFull: false, autoSyncLimitPerFolder: 25, idleWatchEnabled: false, idleMaxSeconds: 30,
+      confirmDestructive: false, allowEmptyFolder: false, restrictOutboundToSelf: false, allowFileDownloadDir: undefined,
+      maxInlineBytes: 40960, opDelayMs: 0, sendDelaySeconds: 0,
+    },
+    accounts: [only],
+  };
+  const { server, imapService } = createServer(config, { startBackgroundSync: false });
+  imapService.searchEmails = async (input) => ({ folders: ["INBOX"], limit: input.limit, total: 0, totalMatched: 0, hasMore: true, emails: [] });
+  const client = new Client({ name: "test", version: "0" });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(st), client.connect(ct)]);
+  try {
+    const result = JSON.parse((await client.callTool({ name: "search_emails", arguments: { limit: 10 } })).content[0].text);
+    assert.equal(result.hasMore, true);
+  } finally {
+    await client.close();
+    await server.close();
+    await closeTrackedIndexes();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
