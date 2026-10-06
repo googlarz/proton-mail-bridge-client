@@ -33,13 +33,21 @@ const STALE_LOCK_MS = 30_000;
 // fresh lock (live PID) and backs off.
 const STEAL_GUARD_STALE_MS = 5_000;
 
+// Windows refuses to open a file another process has just deleted (delete pending) with EPERM/EACCES/EBUSY
+// instead of letting the exclusive create succeed; that is contention, not a real failure.
+function isWindowsContention(code: string | undefined): boolean {
+  return process.platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY");
+}
+
 async function stealStale(lockPath: string): Promise<void> {
   const guard = `${lockPath}.steal`;
   let handle;
   try {
     handle = await open(guard, "wx");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (isWindowsContention(code)) return; // the guard is being removed right now; look again
+    if (code !== "EEXIST") throw error;
     // Someone else is stealing right now. A guard left behind by a process that died mid-steal is removed
     // once it is old; either way this waiter just loops and looks again.
     const info = await stat(guard).catch(() => undefined);
@@ -160,9 +168,7 @@ async function acquire(lockPath: string): Promise<string> {
       return token;
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;
-      // Windows refuses to open a lock file that another process has just deleted (delete pending) with
-      // EPERM/EACCES/EBUSY instead of letting the create succeed; that is contention, not a real failure.
-      const contendedOnWindows = process.platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "EBUSY");
+      const contendedOnWindows = isWindowsContention(code);
       if (code !== "EEXIST" && !contendedOnWindows) {
         throw error;
       }
