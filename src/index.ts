@@ -2408,25 +2408,30 @@ function replyReferences(detail: EmailDetail): string[] | undefined {
   return unique.length > 0 ? unique : undefined;
 }
 
-function buildReplyText(detail: EmailDetail, body: string): string {
+// Drops blank lines around the body but keeps the first line's own indentation (code, lists).
+function trimBodyEdges(body: string): string {
+  return body.replace(/^(?:[ \t]*\r?\n)+/, "").trimEnd();
+}
+
+export function buildReplyText(detail: EmailDetail, body: string): string {
   const originalText = detail.text || detail.preview || "";
   const fromText = formatAddressList(detail.from);
   const dateText = formatQuoteDate(detail.date || detail.internalDate || "an unknown date");
 
   return [
-    body.trim(),
+    trimBodyEdges(body),
     "",
     `On ${dateText}, ${fromText || "the sender"} wrote:`,
     quotePlainText(originalText),
   ].join("\n");
 }
 
-function buildForwardText(detail: EmailDetail, body?: string): string {
+export function buildForwardText(detail: EmailDetail, body?: string): string {
   const originalText = detail.text || detail.preview || "";
 
   return [
-    body?.trim() || "",
-    body?.trim() ? "" : "",
+    body?.trim() ? trimBodyEdges(body) : "",
+    "",
     "---------- Forwarded message ---------",
     `From: ${formatAddressList(detail.from)}`,
     `Date: ${detail.date || detail.internalDate || ""}`,
