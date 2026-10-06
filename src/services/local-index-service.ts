@@ -1443,6 +1443,10 @@ export class LocalIndexService {
         attachmentThreads: allActionable.filter((thread) => thread.latestHasAttachments).length,
         staleAwaitingYou: staleAwaitingYou.length,
       },
+      // counts/topThreads come from the newest DEFAULT_SNAPSHOT_LIMIT messages only.
+      ...(recentMessages.length >= DEFAULT_SNAPSHOT_LIMIT
+        ? { countsCapped: true, countsNote: `counts and topThreads cover only the newest ${DEFAULT_SNAPSHOT_LIMIT} indexed messages.` }
+        : {}),
       ...this.indexFreshnessFields(updatedAt),
       topThreads: allActionable.slice(0, input.limit ?? 10).map((thread) => shapeThreadForList(thread)),
       staleAwaitingYou: staleAwaitingYou.slice(0, input.limit ?? 10).map((thread) => shapeThreadForList(thread)),

@@ -2194,7 +2194,7 @@ export class SimpleIMAPService {
         }
       }),
       BULK_ITEM_TIMEOUT_MS,
-      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms moving email ${emailId} to ${targetFolder}`,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms moving email ${emailId} to ${targetFolder}. The outcome is unknown: the server may have completed the move, so check both folders before retrying.`,
     );
 
     const cached = this.messageCache.get(emailId);
@@ -2760,7 +2760,7 @@ export class SimpleIMAPService {
             hasUidPlus = client.capabilities.has("UIDPLUS");
           }),
           BULK_BATCH_TIMEOUT_MS,
-          `Timed out after ${BULK_BATCH_TIMEOUT_MS}ms moving uid set ${uidSet}`,
+          `Timed out after ${BULK_BATCH_TIMEOUT_MS}ms moving uid set ${uidSet} The outcome is unknown: the server may have completed the move, so check the folders before retrying.`,
         );
         for (const uid of uids) {
           const emailId = createEmailId(folder, uid, sourceUidValidity);
@@ -3286,7 +3286,7 @@ export class SimpleIMAPService {
             if (result === false) throw new Error(`Server did not move uid ${uid}`);
           }),
           BULK_ITEM_TIMEOUT_MS,
-          `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms moving uid ${uid} for thread ${input.messageId}`,
+          `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms moving uid ${uid} for thread ${input.messageId} The outcome is unknown: the server may have completed the move, so check the folders before retrying.`,
         );
         this.messageCache.delete(emailId);
         moved++;

@@ -8059,6 +8059,7 @@ export function createServer(
               const slug = slugForBundle(bundle);
               return {
                 counts: (result.counts ?? {}) as Record<string, number>,
+                countsCapped: result.countsCapped === true,
                 indexUpdatedAt: result.indexUpdatedAt as string | undefined,
                 topThreads: tagAccountIds(slug, (result.topThreads ?? []) as ActionableThreadSummary[]),
                 staleAwaitingYou: tagAccountIds(slug, (result.staleAwaitingYou ?? []) as ActionableThreadSummary[]),
@@ -8084,6 +8085,9 @@ export function createServer(
             generatedAt: new Date().toISOString(),
             indexUpdatedAt: perAccount.map((entry) => entry.indexUpdatedAt).filter(Boolean).sort().reverse()[0],
             counts,
+            ...(perAccount.some((entry) => entry.countsCapped)
+              ? { countsCapped: true, countsNote: "counts and topThreads cover only the newest 5000 indexed messages per account." }
+              : {}),
             topThreads,
             staleAwaitingYou,
             // Each section pages independently with the same offset/limit: pass nextOffset back as
