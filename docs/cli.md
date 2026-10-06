@@ -6,7 +6,44 @@ Full command reference for the `proton-mail-bridge-client` CLI. See the [main RE
 proton-mail-bridge-client <command> [options]
 ```
 
-All commands support `--json` for machine-readable output.
+All commands support `--json` for machine-readable output, and `--help` (or `-h`) anywhere on the
+command line to print that command's usage without running it or connecting to Bridge:
+
+```bash
+proton-mail-bridge-client clear-index --help
+proton-mail-bridge-client help bulk-delete
+proton-mail-bridge-client version
+```
+
+## Argument syntax
+
+- `--flag value` and `--flag=value` are equivalent. The `=` form splits at the first `=`, so
+  `--body=a=b` passes `a=b`.
+- A value that starts with `--` must use the `=` form (`--body="--- signature"`) or come after a
+  bare `--`. Otherwise it is read as the next flag.
+- A bare `--` ends option parsing: everything after it is a plain argument, even if it looks like
+  a flag (`search -- --odd-term`).
+- An empty value is a value: `--subject=` and `--subject ""` pass an empty string.
+- Each flag may be given once; repeating a value flag is an error.
+- Unknown flags are an error (exit code 2) that names the flag and lists the valid ones, rather
+  than being ignored. Run `<command> --help` to see them.
+- Numeric flags (`--limit`, `--offset`, `--days`, `--timeout`, `--max`, `--undo-window`,
+  `--age-hours`) take digits only; `5x`, `1.5` and `-1` are rejected.
+- Bodies and notes are passed exactly as given. A piped body loses only its final newline.
+
+## Exit codes
+
+- `0`: success.
+- `1`: the command failed, including a failed `doctor`, `connection-status`, `run-doctor` or
+  `get-connection-status` check (Bridge unreachable or login rejected), and `batch` or
+  `bulk-*` runs where at least one item failed. The JSON output is the same as on success, so
+  scripts can parse it and still branch on the exit code.
+- `2`: usage error: unknown or repeated flag, malformed number, or a `bulk-delete` / `bulk-move`
+  without a filter.
+
+```bash
+proton-mail-bridge-client doctor && proton-mail-bridge-client sync
+```
 
 ## Read
 
@@ -16,7 +53,16 @@ proton-mail-bridge-client read INBOX::25642
 proton-mail-bridge-client search "invoice" --limit 10
 proton-mail-bridge-client search --live --from openai.com
 proton-mail-bridge-client attachments INBOX::25642
+proton-mail-bridge-client thread <threadId>
+proton-mail-bridge-client folder-stats INBOX
+proton-mail-bridge-client labels
+proton-mail-bridge-client index-status
 ```
+
+`read`, `attachments`, `search --live` and the single-message actions below call the same tool
+handlers the MCP server uses, so an id prefixed with an account slug (`<slug>::INBOX::25642`,
+see `list-accounts`) is routed to that account, and `PROTONMAIL_ALLOWED_ACTIONS` and
+`PROTONMAIL_CONFIRM_DESTRUCTIVE` apply exactly as they do for Claude.
 
 ## Triage
 
@@ -67,6 +113,20 @@ proton-mail-bridge-client batch archive INBOX::100,INBOX::101,INBOX::102
 proton-mail-bridge-client thread-action <threadId> archive
 ```
 
+### Bulk actions by filter
+
+`bulk-delete` and `bulk-move` act on every message in a folder that matches the filters
+`--from`, `--subject`, `--since` and `--before`. At least one filter is required (exit code 2
+otherwise, since an empty filter would match the whole folder). Preview with `--dry-run` first.
+`bulk-delete` moves to Trash unless `--permanent` is given (which needs `--confirmed` when
+`PROTONMAIL_CONFIRM_DESTRUCTIVE` is on); `--max` caps the batch size. Exits 1 if any message failed.
+
+```bash
+proton-mail-bridge-client bulk-delete --from newsletter@example.com --before 2025-01-01 --dry-run
+proton-mail-bridge-client bulk-delete --from=newsletter@example.com --before=2025-01-01
+proton-mail-bridge-client bulk-move Folders/Receipts --subject receipt --folder INBOX --dry-run
+```
+
 ## Folders & labels
 
 ```bash
@@ -74,7 +134,12 @@ proton-mail-bridge-client folders
 proton-mail-bridge-client create-folder Folders/Receipts
 proton-mail-bridge-client rename-folder Folders/Receipts Folders/Bills
 proton-mail-bridge-client delete-folder Folders/Bills
+proton-mail-bridge-client empty-folder Trash --confirmed
 ```
+
+`empty-folder` permanently deletes every message in the folder and only runs when
+`PROTONMAIL_ALLOW_EMPTY_FOLDER=true` and `--confirmed` is given; without `--confirmed` it returns
+a preview.
 
 ## Drafts
 
@@ -85,6 +150,7 @@ proton-mail-bridge-client draft-read <id>
 proton-mail-bridge-client draft-update <id> --subject "Updated subject"
 proton-mail-bridge-client draft-reply INBOX::25642 --body "Will do."
 proton-mail-bridge-client draft-forward INBOX::25642 --to carol@example.com
+proton-mail-bridge-client draft-thread-reply <threadId> --body "Thanks, all."
 proton-mail-bridge-client draft-sync <id>
 proton-mail-bridge-client draft-send <id>
 proton-mail-bridge-client draft-delete <id>
@@ -102,6 +168,10 @@ proton-mail-bridge-client watch --timeout 30
 proton-mail-bridge-client test-email you@example.com
 proton-mail-bridge-client doctor
 proton-mail-bridge-client status
+proton-mail-bridge-client connection-status
+proton-mail-bridge-client runtime-status
+proton-mail-bridge-client get-logs --limit 50 --level error
+proton-mail-bridge-client clear-cache
 proton-mail-bridge-client sync --folder INBOX --limit 150
 
 # --full also detects and prunes messages no longer in this folder (moved,
@@ -130,21 +200,139 @@ Each event is also written as a JSON line to stdout:
 
 Uses IMAP IDLE — no polling between events. Reconnects automatically on transient errors.
 
+## Claude Desktop
+
+```bash
+proton-mail-bridge-client claude setup      # interactive setup wizard
+proton-mail-bridge-client claude install    # install or update the Claude Desktop runtime
+proton-mail-bridge-client claude update     # alias for install
+proton-mail-bridge-client claude check      # integration status (alias: claude doctor)
+proton-mail-bridge-client setup-claude-desktop   # the wizard, runnable from any install
+```
+
 ## 1:1 tool commands
 
-Every MCP tool has a dedicated CLI subcommand — either one of the friendlier
+Every MCP tool has a dedicated CLI subcommand: either one of the friendlier
 named commands above, or, for tools without a hand-tuned command, a command
 matching the tool name (e.g. `snooze-email`, `create-template`,
 `get-attachment-text`). Required fields are positional; anything else
-(optional flags, arrays, nested objects) goes through `--args`, same as
-`tool` below. Run `proton-mail-bridge-client help` for the full list.
+(optional flags, arrays, nested objects) goes through `--args '{...}'` or
+`--args-file <path>`, same as `tool` below. Run
+`proton-mail-bridge-client help <command>` for one command's usage, or
+`proton-mail-bridge-client help` for the full list.
+
+### Sending and queued sends
+
+```bash
+proton-mail-bridge-client reply-to-email INBOX::123 "Sounds good, thanks!"
+proton-mail-bridge-client reply-all-email INBOX::123 "Thanks, all."
+proton-mail-bridge-client forward-email INBOX::123 carol@example.com
+proton-mail-bridge-client schedule-draft <draftId> 2026-01-15T09:00:00.000Z
+proton-mail-bridge-client list-scheduled-sends
+proton-mail-bridge-client cancel-send <id>
+proton-mail-bridge-client list-drafts
+proton-mail-bridge-client unsubscribe-info INBOX::123
+proton-mail-bridge-client unsubscribe-sender INBOX::123 --args '{"confirmed":true}'
+```
+
+### Reading and searching (tool forms)
+
+```bash
+proton-mail-bridge-client get-email-by-id INBOX::123
+proton-mail-bridge-client get-emails-by-ids INBOX::1,INBOX::2
+proton-mail-bridge-client search-emails --args '{"from":"stripe.com","limit":5}'
+proton-mail-bridge-client search-indexed-emails --args '{"query":"invoice"}'
+proton-mail-bridge-client count-messages --args '{"folder":"INBOX","from":"stripe.com"}'
+proton-mail-bridge-client top-senders --args '{"folder":"INBOX","limit":10}'
+proton-mail-bridge-client get-folders
+proton-mail-bridge-client sync-folders
+proton-mail-bridge-client get-labels
+proton-mail-bridge-client get-threads
+proton-mail-bridge-client get-inbox-digest
+proton-mail-bridge-client get-follow-up-candidates
+```
+
+### Actions on one message (tool forms)
+
+```bash
+proton-mail-bridge-client mark-email-read INBOX::123
+proton-mail-bridge-client star-email INBOX::123
+proton-mail-bridge-client move-email INBOX::123 Folders/Archive
+proton-mail-bridge-client archive-email INBOX::123
+proton-mail-bridge-client trash-email INBOX::123
+proton-mail-bridge-client restore-email Trash::123
+proton-mail-bridge-client delete-email INBOX::123 --args '{"confirmed":true}'
+proton-mail-bridge-client update-message-labels INBOX::123 --args '{"labelsToAdd":["Receipts"]}'
+proton-mail-bridge-client update-message-flags INBOX::123 --args '{"flagsToAdd":["\\Flagged"]}'
+```
+
+### Snooze
 
 ```bash
 proton-mail-bridge-client snooze-email INBOX::123 2026-01-15T09:00:00.000Z
-proton-mail-bridge-client create-template welcome "Welcome, {{firstName}}!" "Hi {{firstName}}, thanks for joining."
-proton-mail-bridge-client render-template <id> --args '{"variables":{"firstName":"Alex"}}'
-proton-mail-bridge-client reply-to-email INBOX::123 "Sounds good, thanks!"
+proton-mail-bridge-client list-snoozed
+proton-mail-bridge-client cancel-snooze <id>
 ```
+
+### Templates
+
+```bash
+proton-mail-bridge-client create-template welcome "Welcome, {{firstName}}!" "Hi {{firstName}}, thanks for joining."
+proton-mail-bridge-client list-templates
+proton-mail-bridge-client get-template <id>
+proton-mail-bridge-client render-template <id> --args '{"variables":{"firstName":"Alex"}}'
+proton-mail-bridge-client delete-template <id>
+```
+
+### Many messages and threads
+
+`bulk-update-flags` and `bulk-update-labels` take their ids or match filter through `--args`; both
+exit 1 if any message failed.
+
+```bash
+proton-mail-bridge-client bulk-update-flags --args '{"emailIds":["INBOX::1","INBOX::2"],"flagsToAdd":["\\Seen"]}'
+proton-mail-bridge-client bulk-update-labels --args '{"emailIds":["INBOX::1"],"labelsToAdd":["Receipts"]}'
+proton-mail-bridge-client move-thread <messageId> Folders/Archive
+proton-mail-bridge-client delete-thread <messageId>
+proton-mail-bridge-client flag-thread <messageId> --args '{"flagsToAdd":["\\Seen"]}'
+```
+
+### Labels
+
+```bash
+proton-mail-bridge-client create-label Receipts
+proton-mail-bridge-client rename-label Receipts Bills
+proton-mail-bridge-client delete-label Bills
+```
+
+### Attachments, import and export
+
+```bash
+proton-mail-bridge-client list-attachments INBOX::123
+proton-mail-bridge-client get-attachment-content INBOX::123 <attachmentId>
+proton-mail-bridge-client get-attachment-text INBOX::123 <attachmentId>
+proton-mail-bridge-client save-attachment INBOX::123 <attachmentId> --args '{"outputPath":"/tmp/out"}'
+proton-mail-bridge-client save-attachments INBOX::123 --args '{"outputPath":"/tmp/out"}'
+proton-mail-bridge-client export-email INBOX::123
+proton-mail-bridge-client import-email --file message.eml
+```
+
+### Status, accounts and maintenance (tool forms)
+
+```bash
+proton-mail-bridge-client list-accounts --checkConnections
+proton-mail-bridge-client get-connection-status
+proton-mail-bridge-client get-runtime-status
+proton-mail-bridge-client run-doctor
+proton-mail-bridge-client run-background-sync
+proton-mail-bridge-client sync-emails
+proton-mail-bridge-client get-index-status
+proton-mail-bridge-client get-audit-logs
+proton-mail-bridge-client clear-index
+```
+
+`clear-index` deletes the local SQLite index (it is rebuilt by the next sync); it never touches
+mail on the server.
 
 ## MCP tool passthrough
 

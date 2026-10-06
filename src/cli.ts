@@ -43,31 +43,62 @@ export interface ParsedCliArgs {
 // every message instead of the one intended. Listing them here makes such a flag always
 // boolean regardless of what follows it, so the next token is correctly left as a positional.
 const BOOLEAN_FLAGS = new Set([
-  "all", "confirmed", "dry-run", "full", "html", "json", "live", "no-attachment-text",
-  "permanent", "read", "reply-all", "sent", "starred", "sync", "unread", "unread-only",
-  "unstar", "unstarred", "wait",
+  "all", "checkConnections", "confirmed", "dry-run", "full", "help", "html", "json", "live",
+  "no-attachment-text", "permanent", "read", "reply-all", "sent", "starred", "sync", "unread",
+  "unread-only", "unstar", "unstarred", "version", "wait",
 ]);
 
+// A command-line mistake (unknown flag, malformed number, repeated flag, missing filter):
+// reported on stderr and exits 2, as opposed to a runtime failure, which exits 1.
+export class CliUsageError extends Error {}
+
+// Option syntax: `--flag value`, `--flag=value` (split at the FIRST `=`, so the value may
+// contain more), and `--` ends option parsing (everything after it is positional). A bare
+// `--flag` followed by another `--token` is a boolean flag; a value that itself starts with
+// `--` therefore has to use the `=` form or come after `--`. An empty string is a value.
 export function parseCliArgs(argv: string[]): ParsedCliArgs {
   const positionals: string[] = [];
   const flags: CliFlags = {};
+  let optionsEnded = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
+    if (optionsEnded) {
+      positionals.push(token);
+      continue;
+    }
+    if (token === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (token === "-h" || token === "-v") {
+      flags[token === "-h" ? "help" : "version"] = true;
+      continue;
+    }
     if (!token.startsWith("--")) {
       positionals.push(token);
       continue;
     }
 
-    const key = token.slice(2);
-    const next = argv[index + 1];
-    if (BOOLEAN_FLAGS.has(key) || !next || next.startsWith("--")) {
-      flags[key] = true;
-      continue;
+    const equals = token.indexOf("=");
+    const key = equals === -1 ? token.slice(2) : token.slice(2, equals);
+    let value: string | boolean;
+    if (equals !== -1) {
+      value = token.slice(equals + 1);
+    } else {
+      const next = argv[index + 1];
+      if (BOOLEAN_FLAGS.has(key) || next === undefined || next.startsWith("--")) {
+        value = true;
+      } else {
+        value = next;
+        index += 1;
+      }
     }
 
-    flags[key] = next;
-    index += 1;
+    if (Object.hasOwn(flags, key) && !BOOLEAN_FLAGS.has(key)) {
+      throw new CliUsageError(`--${key} was given more than once; pass it a single time.`);
+    }
+    flags[key] = value;
   }
 
   const command = positionals[0] || "help";
@@ -174,6 +205,12 @@ function printHelp(): void {
       "Global flags:",
       "  --version, -v          Print version and exit",
       "  --json                 Print machine-readable JSON",
+      "  --help, -h             Show help for a command (never runs it): proton-mail-bridge send --help",
+      "  --flag=value           Same as --flag value; required when the value starts with --",
+      "  --                     End of options: everything after it is a plain argument",
+      "",
+      "Exit codes: 0 success, 1 failure (including a failed doctor/connection check or a failed",
+      "  item in batch/bulk runs), 2 usage error (unknown flag, bad number, missing bulk filter).",
       "",
       "Search flags:",
       "  --folder <name>        Limit to one folder",
@@ -207,6 +244,136 @@ function printHelp(): void {
   );
 }
 
+// Every hand-written command: usage line, one-line description and the flags it reads.
+// `--json`, `--help` and `--version` are accepted by every command and are not repeated
+// here. A flag that is not listed for its command is a usage error (exit 2), so this table
+// is also what `<command> --help` prints. Table-driven 1:1 tool commands
+// (TOOL_ONLY_COMMANDS below) get their spec derived from their own entry.
+interface CommandSpec {
+  usage: string;
+  description: string;
+  flags: string[];
+}
+
+const BODY_FLAGS = ["body"];
+const SEARCH_FLAGS = ["folder", "limit", "live", "sync", "label", "from", "to", "subject", "domain", "dateFrom", "dateTo", "read", "unread", "starred", "unstarred"];
+const DRAFT_COPY_FLAGS = ["cc", "bcc", "notes"];
+const BULK_FILTER_FLAGS = ["from", "subject", "since", "before"];
+
+export const COMMAND_SPECS: Record<string, CommandSpec> = {
+  help: { usage: "help [command]", description: "Show the command list, or the help for one command", flags: [] },
+  version: { usage: "version", description: "Print the version and exit", flags: [] },
+  "setup-claude-desktop": { usage: "setup-claude-desktop", description: "Run the Claude Desktop setup wizard (works from any install)", flags: [] },
+  claude: { usage: "claude <setup|install|check|update|doctor>", description: "Claude Desktop integration: setup wizard, install or update the runtime, check status (update is an alias for install, doctor for check)", flags: [] },
+  status: { usage: "status", description: "Show local config, index, runtime, and Claude Desktop status", flags: [] },
+  doctor: { usage: "doctor", description: "Verify IMAP, SMTP, and Claude Desktop wiring (exits 1 when the check fails)", flags: [] },
+  "connection-status": { usage: "connection-status", description: "Show live IMAP/SMTP connectivity state (exits 1 when either is unreachable)", flags: [] },
+  "runtime-status": { usage: "runtime-status", description: "Show runtime policy and background sync state", flags: [] },
+  sync: { usage: "sync [--folder <name>] [--limit <n>] [--full]", description: "Refresh the local index from Proton Bridge", flags: ["folder", "limit", "full", "no-attachment-text"] },
+  "index-status": { usage: "index-status", description: "Show local index health and freshness", flags: [] },
+  folders: { usage: "folders", description: "List available folders from Proton Bridge", flags: [] },
+  "create-folder": { usage: "create-folder <path>", description: "Create a mailbox folder (e.g. Folders/Receipts)", flags: ["path"] },
+  "rename-folder": { usage: "rename-folder <path> <newPath>", description: "Rename a folder (or use --to <newPath>)", flags: ["path", "to", "new-path"] },
+  "delete-folder": { usage: "delete-folder <path> [--confirmed]", description: "Delete an empty folder", flags: ["path", "confirmed"] },
+  "empty-folder": { usage: "empty-folder <folder> [--confirmed]", description: "Permanently empty a folder (--confirmed to execute)", flags: ["folder", "confirmed"] },
+  labels: { usage: "labels [--limit <n>]", description: "List normalized labels from the local index", flags: ["limit"] },
+  threads: { usage: "threads [query] [--label <name>] [--limit <n>] [--sync]", description: "List normalized threads from the local index", flags: ["sync", "folder", "limit", "label"] },
+  digest: { usage: "digest [--limit <n>] [--age-hours <n>] [--sync]", description: "Show inbox digest and top actionable threads", flags: ["sync", "limit", "age-hours"] },
+  followups: { usage: "followups [--pending you|them|any] [--limit <n>] [--age-hours <n>] [--sync]", description: "Show follow-up candidates from the local index", flags: ["sync", "pending", "limit", "age-hours"] },
+  emails: { usage: "emails [--folder <name>] [--limit <n>] [--offset <n>]", description: "List emails from a folder", flags: ["folder", "limit", "offset"] },
+  attachments: { usage: "attachments <emailId>", description: "List attachments for one message", flags: [] },
+  search: { usage: "search [query] [--live] [--sync] [filters]", description: "Search indexed mail (default) or live mail with --live", flags: SEARCH_FLAGS },
+  read: { usage: "read <emailId>", description: "Read one email by composite email id", flags: [] },
+  move: { usage: "move <emailId> <folder>", description: "Move an email to another folder (target folder as second argument or --folder)", flags: ["folder"] },
+  archive: { usage: "archive <emailId>", description: "Archive an email", flags: [] },
+  trash: { usage: "trash <emailId>", description: "Move an email to Trash", flags: [] },
+  restore: { usage: "restore <emailId> [--folder <name>]", description: "Restore an email from Trash to Inbox (or --folder)", flags: ["folder"] },
+  "mark-read": { usage: "mark-read <emailId> [--unread]", description: "Mark read (--unread to flip)", flags: ["unread"] },
+  star: { usage: "star <emailId> [--unstar]", description: "Star an email (--unstar to flip)", flags: ["unstar"] },
+  delete: { usage: "delete <emailId> [--confirmed]", description: "Permanently delete an email", flags: ["confirmed"] },
+  batch: { usage: "batch <action> <emailId...> [--ids <a,b,c>] [--folder <name>] [--dry-run]", description: "Apply an action (mark_read|mark_unread|star|unstar|archive|trash|restore) to multiple emails; exits 1 if any item failed", flags: ["action", "ids", "folder", "dry-run"] },
+  "bulk-delete": { usage: "bulk-delete (--from <v> | --subject <v> | --since <date> | --before <date>)... [--folder <name>] [--dry-run] [--permanent] [--max <n>] [--confirmed]", description: "Delete emails matching the filters (moves to Trash unless --permanent). At least one filter is required; use --dry-run first", flags: [...BULK_FILTER_FLAGS, "folder", "dry-run", "permanent", "max", "confirmed"] },
+  "bulk-move": { usage: "bulk-move <folder> (--from <v> | --subject <v> | --since <date> | --before <date>)... [--folder <name>] [--dry-run] [--max <n>]", description: "Move emails matching the filters to a folder. At least one filter is required; use --dry-run first", flags: [...BULK_FILTER_FLAGS, "target-folder", "folder", "dry-run", "max"] },
+  send: { usage: "send --to <addr> --subject <text> (--body <text> | stdin) [--cc <a>] [--bcc <a>] [--html] [--dry-run] [--confirmed] [--undo-window <s>] [--wait]", description: "Send an email", flags: ["to", "cc", "bcc", "subject", ...BODY_FLAGS, "html", "dry-run", "confirmed", "undo-window", "wait"] },
+  reply: { usage: "reply <emailId> (--body <text> | stdin) [--reply-all] [--confirmed] [--undo-window <s>]", description: "Reply to an email", flags: [...BODY_FLAGS, "reply-all", "all", "confirmed", "undo-window"] },
+  forward: { usage: "forward <emailId> --to <addr> [--body <text> | stdin] [--confirmed] [--undo-window <s>]", description: "Forward an email", flags: ["to", ...BODY_FLAGS, "confirmed", "undo-window"] },
+  "test-email": { usage: "test-email <addr> [--message <text>] [--confirmed]", description: "Send a test email to verify SMTP (--confirmed if required)", flags: ["to", "message", "confirmed"] },
+  thread: { usage: "thread <threadId>", description: "Fetch a full thread by id", flags: ["id"] },
+  "thread-brief": { usage: "thread-brief <threadId>", description: "Summarise a thread (latest in/out, next action)", flags: ["id"] },
+  "thread-action": { usage: "thread-action <threadId> <action> [--folder <name>] [--unread-only] [--dry-run]", description: "Apply an action to all messages in a thread", flags: ["id", "action", "folder", "unread-only", "dry-run"] },
+  actionable: { usage: "actionable [--limit <n>]", description: "List actionable threads", flags: ["limit"] },
+  "document-threads": { usage: "document-threads [query] [--category <name>] [--limit <n>] [--sync]", description: "Find threads with important attachments", flags: ["category", "limit", "sync"] },
+  "meeting-context": { usage: "meeting-context <person> [--domain <d>] [--limit <n>] [--sync]", description: "Prep context for a meeting", flags: ["person", "domain", "limit", "sync"] },
+  stats: { usage: "stats", description: "Mailbox counts and analytics sample", flags: [] },
+  analytics: { usage: "analytics", description: "Detailed mailbox analytics (top senders, busy hours)", flags: [] },
+  "folder-stats": { usage: "folder-stats [folder]", description: "Live message stats for a folder", flags: ["folder"] },
+  contacts: { usage: "contacts [--limit <n>]", description: "Contacts ranked by interaction volume", flags: ["limit"] },
+  "volume-trends": { usage: "volume-trends [--days <n>]", description: "Daily message counts (default 30 days)", flags: ["days"] },
+  watch: { usage: "watch [--folder <name>] [--timeout <s>]", description: "Wait for mailbox changes via IMAP IDLE", flags: ["folder", "timeout"] },
+  "clear-cache": { usage: "clear-cache", description: "Clear in-memory MCP server caches", flags: [] },
+  "get-logs": { usage: "get-logs [--limit <n>] [--offset <n>] [--level <level>]", description: "Return recent in-memory MCP server logs", flags: ["limit", "level", "offset"] },
+  notify: { usage: "notify [--folder <name>] [--timeout <s>]", description: "Daemon: watch a folder and send a system notification on new mail", flags: ["folder", "timeout"] },
+  drafts: { usage: "drafts [--sent]", description: "List local drafts", flags: ["sent"] },
+  "remote-drafts": { usage: "remote-drafts [--limit <n>] [--offset <n>]", description: "List drafts in the Proton Drafts mailbox", flags: ["limit", "offset"] },
+  "draft-create": { usage: "draft-create --subject <text> [--to <addr>] (--body <text> | stdin) [--cc <a>] [--bcc <a>]", description: "Create a draft", flags: ["to", "cc", "bcc", "subject", ...BODY_FLAGS] },
+  "draft-read": { usage: "draft-read <id>", description: "Read a saved draft", flags: ["id"] },
+  "draft-update": { usage: "draft-update <id> [--subject <text>] [--body <text> | stdin] [--to <a>] [--cc <a>] [--bcc <a>] [--notes <text>]", description: "Update a draft", flags: ["id", "to", "cc", "bcc", "subject", ...BODY_FLAGS, "notes"] },
+  "draft-reply": { usage: "draft-reply <emailId> (--body <text> | stdin) [--reply-all]", description: "Create a reply draft", flags: ["id", ...BODY_FLAGS, "reply-all", "all", ...DRAFT_COPY_FLAGS] },
+  "draft-forward": { usage: "draft-forward <emailId> --to <addr> [--body <text> | stdin]", description: "Create a forward draft", flags: ["id", "to", ...BODY_FLAGS, ...DRAFT_COPY_FLAGS] },
+  "draft-sync": { usage: "draft-sync <id>", description: "Sync a local draft to the Proton Drafts mailbox", flags: ["id"] },
+  "draft-send": { usage: "draft-send <id> [--args '{...}']", description: "Send a saved draft (dryRun etc. via --args)", flags: ["id", "args", "args-file"] },
+  "draft-delete": { usage: "draft-delete <id>", description: "Delete a saved draft", flags: ["id"] },
+  "draft-thread-reply": { usage: "draft-thread-reply <threadId> (--body <text> | stdin) [--reply-all]", description: "Create a reply draft for a thread", flags: ["id", ...BODY_FLAGS, "reply-all", "all", ...DRAFT_COPY_FLAGS] },
+  tools: { usage: "tools", description: "List every MCP tool exposed by the server", flags: [] },
+  tool: { usage: "tool <name> [--args '{...}' | --args-file <path>]", description: "Call any MCP tool with JSON arguments", flags: ["args", "args-file"] },
+};
+
+const GLOBAL_FLAGS = ["json", "help", "version", "v"];
+
+function specForCommand(command: string): CommandSpec | undefined {
+  const spec = COMMAND_SPECS[command];
+  if (spec) return spec;
+  const entry = TOOL_ONLY_COMMANDS.find((candidate) => candidate.command === command);
+  if (!entry) return undefined;
+  const positionals = entry.positionals.map((field) => ` <${field}>`).join("");
+  const fileFlag = entry.fileField || entry.fileFieldBase64 ? ["file"] : [];
+  return {
+    usage: `${entry.command}${positionals}${fileFlag.length ? " --file <path>" : ""} [--args '{...}' | --args-file <path>]`,
+    description: `${entry.help} (MCP tool ${entry.tool})`,
+    flags: ["args", "args-file", ...fileFlag, ...(entry.boolFlags ?? [])],
+  };
+}
+
+export function commandHelpText(command: string): string | undefined {
+  const spec = specForCommand(command);
+  if (!spec) return undefined;
+  const flags = [...new Set([...spec.flags, ...GLOBAL_FLAGS.filter((flag) => flag !== "v")])];
+  return [
+    `Usage: proton-mail-bridge ${spec.usage}`,
+    "",
+    spec.description,
+    "",
+    `Options: ${flags.map((flag) => `--${flag}`).join(" ")}`,
+    "",
+    "A value that starts with -- must be written --flag=value (or placed after a bare --).",
+    "",
+  ].join("\n");
+}
+
+// Rejects any flag the command does not read, instead of silently dropping it (a mistyped
+// filter on a bulk command would otherwise widen what the command matches).
+function assertKnownFlags(parsed: ParsedCliArgs): void {
+  const spec = specForCommand(parsed.command);
+  if (!spec) return;
+  const allowed = new Set([...GLOBAL_FLAGS, ...spec.flags]);
+  const unknown = Object.keys(parsed.flags).filter((flag) => !allowed.has(flag));
+  if (unknown.length === 0) return;
+  const valid = [...allowed].filter((flag) => flag !== "v").map((flag) => `--${flag}`).join(", ");
+  throw new CliUsageError(
+    `Unknown flag ${unknown.map((flag) => `--${flag}`).join(", ")} for ${parsed.command}. Valid flags: ${valid}. Run "${parsed.command} --help" for usage.`,
+  );
+}
+
 function isTruthyFlag(value: string | boolean | undefined): boolean {
   if (value === true) {
     return true;
@@ -222,31 +389,48 @@ function getStringFlag(flags: CliFlags, key: string): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function getNumberFlag(flags: CliFlags, key: string, fallback: number): number {
+// Strict: digits only ("5x", "1.5", "-1" and "" are rejected rather than read as 5, 1, ...).
+function parseIntegerFlag(flags: CliFlags, key: string, minimum: number, requirement: string): number | undefined {
   const value = flags[key];
-  if (typeof value !== "string" || !value.trim()) {
-    return fallback;
+  if (value === undefined) {
+    return undefined;
   }
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(`--${key} must be a positive integer.`);
+  if (typeof value !== "string") {
+    throw new CliUsageError(`--${key} requires a value (${requirement}).`);
+  }
+  const trimmed = value.trim();
+  const parsed = /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+    throw new CliUsageError(`--${key} must be ${requirement}, got "${value}".`);
   }
   return parsed;
+}
+
+function getNumberFlag(flags: CliFlags, key: string, fallback: number): number {
+  return parseIntegerFlag(flags, key, 1, "a positive integer") ?? fallback;
 }
 
 // Same as getNumberFlag but for flags like --offset where 0 is the
 // documented default and a legitimate explicit value ("start from the
 // beginning"), not an error — only negative/non-integer values are invalid.
 function getOffsetFlag(flags: CliFlags, key: string, fallback: number): number {
+  return parseIntegerFlag(flags, key, 0, "a non-negative integer") ?? fallback;
+}
+
+// Free text (bodies, notes): returned exactly as given, so leading indentation survives.
+// A blank value counts as absent, like getStringFlag.
+function getTextFlag(flags: CliFlags, key: string): string | undefined {
   const value = flags[key];
-  if (typeof value !== "string" || !value.trim()) {
-    return fallback;
-  }
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(`--${key} must be a non-negative integer.`);
-  }
-  return parsed;
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+// A piped body: one trailing newline is the shell's, everything else is the author's. An
+// all-whitespace stdin counts as no body.
+async function readStdinBody(): Promise<string | undefined> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  const text = Buffer.concat(chunks).toString("utf8");
+  return text.trim() ? text.replace(/\r?\n$/, "") : undefined;
 }
 
 function json(value: unknown): string {
@@ -334,6 +518,29 @@ function printToolCallResult(result: Record<string, unknown>, wantJson: boolean)
   process.stdout.write(`${rendered}\n`);
 }
 
+// Tools whose result reports per-item failures: the call still returns a full JSON result,
+// but a run where any item failed must not look like success to a script.
+const ITEM_RESULT_TOOLS = new Set([
+  "batch_email_action", "bulk_delete", "bulk_move", "bulk_update_flags", "bulk_update_labels", "apply_thread_action",
+]);
+
+// 1 for an error result, a failed item in a batch/bulk run, or a failed health check
+// (get_connection_status / run_doctor report smtp.ok / imap.ok); 0 otherwise. The printed
+// JSON is never altered by this.
+export function toolResultExitCode(toolName: string, result: Record<string, unknown>): number {
+  if (result.isError === true) return 1;
+  const data = result.structuredContent;
+  if (!data || typeof data !== "object") return 0;
+  const record = data as Record<string, unknown>;
+  if (ITEM_RESULT_TOOLS.has(toolName) && typeof record.failed === "number" && record.failed > 0) return 1;
+  if (toolName === "get_connection_status" || toolName === "run_doctor") {
+    for (const side of [record.smtp, record.imap]) {
+      if (side && typeof side === "object" && (side as Record<string, unknown>).ok === false) return 1;
+    }
+  }
+  return 0;
+}
+
 async function withMcpClient<T>(run: (client: Client) => Promise<T>): Promise<T> {
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -353,6 +560,13 @@ async function withMcpClient<T>(run: (client: Client) => Promise<T>): Promise<T>
       capabilities: {},
     },
   );
+
+  const callTool = client.callTool.bind(client);
+  client.callTool = (async (params: Parameters<typeof callTool>[0], ...rest: unknown[]) => {
+    const result = await (callTool as (...args: unknown[]) => Promise<Record<string, unknown>>)(params, ...rest);
+    if (toolResultExitCode(params.name, result) !== 0) process.exitCode = 1;
+    return result;
+  }) as typeof client.callTool;
 
   try {
     await client.connect(transport);
@@ -558,6 +772,7 @@ async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
     };
 
     process.stdout.write(wantJson ? json(result) : `${result.ok ? "Doctor OK" : "Doctor failed"}\n${json(result)}`);
+    if (!result.ok) process.exitCode = 1;
   });
 }
 
@@ -593,6 +808,7 @@ async function runConnectionStatus(parsed: ParsedCliArgs): Promise<void> {
     };
 
     process.stdout.write(wantJson ? json(result) : `${JSON.stringify(result, null, 2)}\n`);
+    if (!(imapOk && smtpOk)) process.exitCode = 1;
   });
 }
 
@@ -744,23 +960,52 @@ async function runDrafts(parsed: ParsedCliArgs): Promise<void> {
   });
 }
 
+// The single-message shortcuts below go through the same MCP tool handlers as every other
+// client, so `<slug>::<id>` account routing, the uidValidity check, runtime policy
+// (PROTONMAIL_ALLOWED_ACTIONS, CONFIRM_DESTRUCTIVE) and auditing all apply exactly as they
+// do there. They used to call the primary account's IMAP service directly, bypassing all of it.
+function structuredResult(result: Record<string, unknown>): Record<string, unknown> {
+  if (result.structuredContent && typeof result.structuredContent === "object") {
+    return result.structuredContent as Record<string, unknown>;
+  }
+  const content = Array.isArray(result.content) ? (result.content as Array<{ type?: string; text?: string }>) : [];
+  const text = content.find((entry) => entry.type === "text")?.text;
+  try {
+    const parsed = text ? (JSON.parse(text) as unknown) : undefined;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function runToolShortcut(
+  parsed: ParsedCliArgs,
+  toolName: string,
+  args: Record<string, unknown>,
+  render: (data: Record<string, unknown>) => string,
+): Promise<void> {
+  const wantJson = isTruthyFlag(parsed.flags.json);
+  await withMcpClient(async (client) => {
+    const result = (await client.callTool({ name: toolName, arguments: args })) as Record<string, unknown>;
+    if (result.isError === true) {
+      printToolCallResult(result, wantJson);
+      return;
+    }
+    const data = structuredResult(result);
+    process.stdout.write(wantJson ? json(data) : render(data));
+  });
+}
+
 async function runAttachments(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) {
     throw new Error("attachments requires an emailId, for example: proton-mail-bridge attachments INBOX::123");
   }
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ imapService }) => {
-    const result = await imapService.listAttachments(emailId);
-    if (wantJson) {
-      process.stdout.write(json(result));
-      return;
-    }
-    process.stdout.write(
-      result.attachments.length === 0
-        ? "No attachments.\n"
-        : result.attachments.map((attachment, index) => `${index + 1}. ${attachment.filename || attachment.id || "(unnamed)"} | ${attachment.contentType || "unknown"} | ${attachment.kind || "other"}`).join("\n") + "\n",
-    );
+  await runToolShortcut(parsed, "list_attachments", { emailId }, (data) => {
+    const attachments = Array.isArray(data.attachments) ? (data.attachments as Array<Record<string, unknown>>) : [];
+    return attachments.length === 0
+      ? "No attachments.\n"
+      : attachments.map((attachment, index) => `${index + 1}. ${attachment.filename || attachment.id || "(unnamed)"} | ${attachment.contentType || "unknown"} | ${attachment.kind || "other"}`).join("\n") + "\n";
   });
 }
 
@@ -770,23 +1015,24 @@ async function runSearch(parsed: ParsedCliArgs): Promise<void> {
   const syncBefore = isTruthyFlag(parsed.flags.sync);
   const filters = buildSearchFilters(parsed);
 
-  await withServices(async (context) => {
-    if (!live) {
-      const status = await context.localIndexService.getStatus();
-      if (syncBefore || !status.updatedAt) {
-        await syncIndex(context, {
-          folder: filters.folder,
-          limitPerFolder: Math.max(filters.limit ?? 25, 100),
-          includeAttachmentText: true,
-        });
-      }
-      const result = await context.localIndexService.search(filters);
-      process.stdout.write(wantJson ? json(result) : tableEmails(result.emails));
+  await withMcpClient(async (client) => {
+    // An empty index is refreshed by search_indexed_emails itself; --sync forces a refresh first.
+    if (!live && syncBefore) {
+      await client.callTool({
+        name: "sync_emails",
+        arguments: { folder: filters.folder, limitPerFolder: Math.max(filters.limit ?? 25, 100) },
+      });
+    }
+    const result = (await client.callTool({
+      name: live ? "search_emails" : "search_indexed_emails",
+      arguments: { ...filters },
+    })) as Record<string, unknown>;
+    if (result.isError === true) {
+      printToolCallResult(result, wantJson);
       return;
     }
-
-    const result = await context.imapService.searchEmails(filters);
-    process.stdout.write(wantJson ? json(result) : tableEmails(result.emails));
+    const data = structuredResult(result);
+    process.stdout.write(wantJson ? json(data) : tableEmails(Array.isArray(data.emails) ? (data.emails as EmailSummary[]) : []));
   });
 }
 
@@ -796,23 +1042,17 @@ async function runRead(parsed: ParsedCliArgs): Promise<void> {
     throw new Error("read requires an emailId, for example: proton-mail-bridge read INBOX::123");
   }
 
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ imapService }) => {
-    const detail = await imapService.getEmailById(emailId);
-    if (wantJson) {
-      process.stdout.write(json(detail));
-      return;
-    }
-
+  await runToolShortcut(parsed, "get_email_by_id", { emailId }, (detail) => {
+    const from = Array.isArray(detail.from) ? (detail.from as Array<Record<string, unknown>>) : [];
     const lines = [
       `ID: ${detail.id}`,
       `Subject: ${detail.subject}`,
-      `From: ${detail.from.map((entry) => entry.address || entry.name || "").filter(Boolean).join(", ")}`,
+      `From: ${from.map((entry) => entry.address || entry.name || "").filter(Boolean).join(", ")}`,
       `Date: ${detail.date || detail.internalDate || ""}`,
       "",
       detail.text || detail.preview || "(no text body available)",
     ];
-    process.stdout.write(`${lines.join("\n")}\n`);
+    return `${lines.join("\n")}\n`;
   });
 }
 
@@ -823,110 +1063,55 @@ async function runMove(parsed: ParsedCliArgs): Promise<void> {
   const targetFolder = parsed.positionals[1] || getStringFlag(parsed.flags, "folder");
   if (!emailId) throw new Error("move requires an emailId");
   if (!targetFolder) throw new Error("move requires a target folder as a second argument or --folder");
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService, auditService }) => {
-    // Same bypass as archive/trash/restore/mark-read/star's fix above — this
-    // called ensureMailboxWriteAllowed only, so PROTONMAIL_ALLOWED_ACTIONS
-    // excluding "move" had no effect on this shortcut.
-    ensureEmailActionAllowed(config.runtime, "move");
-    // Found live: every write command in this file called the service
-    // directly, so none of them ever produced an audit.log entry — unlike
-    // the identical action through an MCP tool call, which withAudit always
-    // records. Confirmed live: a real CLI `star` left audit.log's line
-    // count unchanged. Mirrored across every write command below.
-    const result = await withAudit(auditService, "move_email", { emailId, targetFolder }, () =>
-      imapService.moveEmail(emailId, targetFolder),
-    );
-    process.stdout.write(wantJson ? json(result) : `Moved ${emailId} → ${result.targetFolder}\n`);
-  });
+  await runToolShortcut(parsed, "move_email", { emailId, targetFolder }, (result) => `Moved ${emailId} → ${result.targetFolder}\n`);
 }
 
 async function runArchive(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("archive requires an emailId");
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService, auditService }) => {
-    // Found live: this called the service directly, bypassing the MCP
-    // tool layer's ensureEmailActionAllowed entirely — with
-    // PROTONMAIL_ALLOWED_ACTIONS restricting which actions are permitted,
-    // `tool trash_email` correctly refused a disallowed action, but the
-    // matching CLI shortcuts (archive/trash/restore/mark-read/star) all
-    // performed it anyway. Same fix mirrored across all five below.
-    ensureEmailActionAllowed(config.runtime, "archive");
-    const result = await withAudit(auditService, "archive_email", { emailId }, () => imapService.archiveEmail(emailId));
-    process.stdout.write(wantJson ? json(result) : `Archived ${emailId} → ${result.targetFolder}\n`);
-  });
+  await runToolShortcut(parsed, "archive_email", { emailId }, (result) => `Archived ${emailId} → ${result.targetFolder}\n`);
 }
 
 async function runTrash(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("trash requires an emailId");
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService, auditService }) => {
-    ensureEmailActionAllowed(config.runtime, "trash");
-    const result = await withAudit(auditService, "trash_email", { emailId }, () => imapService.trashEmail(emailId));
-    process.stdout.write(wantJson ? json(result) : `Trashed ${emailId} → ${result.targetFolder}\n`);
-  });
+  await runToolShortcut(parsed, "trash_email", { emailId }, (result) => `Trashed ${emailId} → ${result.targetFolder}\n`);
 }
 
 async function runRestore(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("restore requires an emailId");
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService, auditService }) => {
-    ensureEmailActionAllowed(config.runtime, "restore");
-    const targetFolder = getStringFlag(parsed.flags, "folder");
-    const result = await withAudit(auditService, "restore_email", { emailId, targetFolder }, () =>
-      imapService.restoreEmail(emailId, targetFolder),
-    );
-    process.stdout.write(wantJson ? json(result) : `Restored ${emailId} → ${result.targetFolder}\n`);
-  });
+  await runToolShortcut(
+    parsed,
+    "restore_email",
+    { emailId, targetFolder: getStringFlag(parsed.flags, "folder") },
+    (result) => `Restored ${emailId} → ${result.targetFolder}\n`,
+  );
 }
 
 async function runMarkRead(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("mark-read requires an emailId");
   const isRead = !isTruthyFlag(parsed.flags.unread);
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService, auditService }) => {
-    ensureEmailActionAllowed(config.runtime, isRead ? "mark_read" : "mark_unread");
-    const result = await withAudit(auditService, "mark_email_read", { emailId, isRead }, () =>
-      imapService.markEmailRead(emailId, isRead),
-    );
-    process.stdout.write(wantJson ? json(result) : `Marked ${emailId} as ${result.isRead ? "read" : "unread"}\n`);
-  });
+  await runToolShortcut(parsed, "mark_email_read", { emailId, isRead }, (result) => `Marked ${emailId} as ${result.isRead ? "read" : "unread"}\n`);
 }
 
 async function runStar(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("star requires an emailId");
   const isStarred = !isTruthyFlag(parsed.flags.unstar);
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService, auditService }) => {
-    ensureEmailActionAllowed(config.runtime, isStarred ? "star" : "unstar");
-    const result = await withAudit(auditService, "star_email", { emailId, isStarred }, () =>
-      imapService.starEmail(emailId, isStarred),
-    );
-    process.stdout.write(wantJson ? json(result) : `${result.isStarred ? "Starred" : "Unstarred"} ${emailId}\n`);
-  });
+  await runToolShortcut(parsed, "star_email", { emailId, isStarred }, (result) => `${result.isStarred ? "Starred" : "Unstarred"} ${emailId}\n`);
 }
 
 async function runDelete(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0];
   if (!emailId) throw new Error("delete requires an emailId");
-  const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, imapService, auditService }) => {
-    // Same PROTONMAIL_ALLOWED_ACTIONS bypass as runMove's fix above.
-    ensureEmailActionAllowed(config.runtime, "delete");
-    // Found live: this called the service directly, bypassing the MCP
-    // tool layer's ensureDestructiveConfirmed entirely — with
-    // PROTONMAIL_CONFIRM_DESTRUCTIVE=true, `tool delete_email` correctly
-    // refused without confirmed:true, but this shortcut permanently
-    // deleted the message anyway, no confirmation asked or possible.
-    ensureDestructiveConfirmed(config.runtime, isTruthyFlag(parsed.flags.confirmed), `Permanently delete ${emailId} (cannot be recovered)`);
-    const result = await withAudit(auditService, "delete_email", { emailId }, () => imapService.deleteEmail(emailId));
-    process.stdout.write(wantJson ? json(result) : `Deleted ${emailId}\n`);
-  });
+  await runToolShortcut(
+    parsed,
+    "delete_email",
+    { emailId, confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined },
+    () => `Deleted ${emailId}\n`,
+  );
 }
 
 async function runSend(parsed: ParsedCliArgs): Promise<void> {
@@ -937,12 +1122,7 @@ async function runSend(parsed: ParsedCliArgs): Promise<void> {
   if (!to) throw new Error("send requires --to");
   if (!subject) throw new Error("send requires --subject");
 
-  let body = getStringFlag(parsed.flags, "body");
-  if (!body) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    body = Buffer.concat(chunks).toString("utf8").trim();
-  }
+  const body = getTextFlag(parsed.flags, "body") ?? (await readStdinBody());
   if (!body) throw new Error("send requires --body or body piped via stdin");
 
   const wantJson = isTruthyFlag(parsed.flags.json);
@@ -1013,11 +1193,9 @@ async function runSend(parsed: ParsedCliArgs): Promise<void> {
 // when the server has a default undo window configured), but getNumberFlag rejects <= 0
 // for the flags where only a positive count makes sense (limit, offset, ...).
 function parseUndoWindowFlag(parsed: ParsedCliArgs): number | undefined {
-  const undoWindowFlag = getStringFlag(parsed.flags, "undo-window");
-  if (undoWindowFlag === undefined) return undefined;
-  const requested = Number.parseInt(undoWindowFlag, 10);
-  if (!Number.isInteger(requested) || requested < 0 || requested > 300) {
-    throw new Error("--undo-window must be an integer between 0 and 300.");
+  const requested = parseIntegerFlag(parsed.flags, "undo-window", 0, "an integer between 0 and 300");
+  if (requested !== undefined && requested > 300) {
+    throw new CliUsageError(`--undo-window must be an integer between 0 and 300, got "${String(parsed.flags["undo-window"])}".`);
   }
   return requested;
 }
@@ -1039,12 +1217,7 @@ async function runReply(parsed: ParsedCliArgs): Promise<void> {
   if (!emailId) throw new Error("reply requires an emailId");
   const replyAll = isTruthyFlag(parsed.flags["reply-all"]) || isTruthyFlag(parsed.flags.all);
 
-  let body = getStringFlag(parsed.flags, "body");
-  if (!body) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    body = Buffer.concat(chunks).toString("utf8").trim();
-  }
+  const body = getTextFlag(parsed.flags, "body") ?? (await readStdinBody());
   if (!body) throw new Error("reply requires --body or body piped via stdin");
 
   const wantJson = isTruthyFlag(parsed.flags.json);
@@ -1068,13 +1241,7 @@ async function runForward(parsed: ParsedCliArgs): Promise<void> {
   const to = parseEmails(getStringFlag(parsed.flags, "to") || "");
   if (to.length === 0) throw new Error("forward requires --to");
 
-  let body = getStringFlag(parsed.flags, "body");
-  if (!body) {
-    const stdinChunks: Buffer[] = [];
-    for await (const chunk of process.stdin) stdinChunks.push(Buffer.from(chunk));
-    const stdinText = Buffer.concat(stdinChunks).toString("utf8").trim();
-    if (stdinText) body = stdinText;
-  }
+  const body = getTextFlag(parsed.flags, "body") ?? (await readStdinBody());
 
   const wantJson = isTruthyFlag(parsed.flags.json);
   // Same reasoning as runReply: use the shared MCP handler so send policy applies.
@@ -1141,11 +1308,22 @@ async function runEmptyFolder(parsed: ParsedCliArgs): Promise<void> {
   });
 }
 
+// The server resolves an empty `match` to the whole folder, so a bulk command with no filter
+// would act on up to every message in it. Refuse here, before anything connects.
+function requireBulkFilter(command: string, filters: Array<string | undefined>): void {
+  if (filters.every((filter) => !filter)) {
+    throw new CliUsageError(
+      `${command} requires at least one of --from, --subject, --since, --before (without a filter it would match the whole folder). Use --dry-run to preview what a filter matches.`,
+    );
+  }
+}
+
 async function runBulkDelete(parsed: ParsedCliArgs): Promise<void> {
   const from = getStringFlag(parsed.flags, "from");
   const subject = getStringFlag(parsed.flags, "subject");
   const since = getStringFlag(parsed.flags, "since");
   const before = getStringFlag(parsed.flags, "before");
+  requireBulkFilter("bulk-delete", [from, subject, since, before]);
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
     const result = await client.callTool({
@@ -1175,6 +1353,7 @@ async function runBulkMove(parsed: ParsedCliArgs): Promise<void> {
   const subject = getStringFlag(parsed.flags, "subject");
   const since = getStringFlag(parsed.flags, "since");
   const before = getStringFlag(parsed.flags, "before");
+  requireBulkFilter("bulk-move", [from, subject, since, before]);
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
     const result = await client.callTool({
@@ -1499,7 +1678,7 @@ async function runTestEmail(parsed: ParsedCliArgs): Promise<void> {
       name: "send_test_email",
       arguments: {
         to,
-        customMessage: getStringFlag(parsed.flags, "message"),
+        customMessage: getTextFlag(parsed.flags, "message"),
         confirmed: isTruthyFlag(parsed.flags.confirmed) || undefined,
       },
     });
@@ -1511,12 +1690,7 @@ async function runDraftCreate(parsed: ParsedCliArgs): Promise<void> {
   const to = getStringFlag(parsed.flags, "to") || "";
   const subject = getStringFlag(parsed.flags, "subject");
   if (!subject) throw new Error("draft-create requires --subject");
-  let body = getStringFlag(parsed.flags, "body");
-  if (!body) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    body = Buffer.concat(chunks).toString("utf8").trim();
-  }
+  const body = getTextFlag(parsed.flags, "body") ?? (await readStdinBody());
   if (!body) throw new Error("draft-create requires --body or body piped via stdin");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
@@ -1541,13 +1715,7 @@ async function runDraftRead(parsed: ParsedCliArgs): Promise<void> {
 async function runDraftUpdate(parsed: ParsedCliArgs): Promise<void> {
   const draftId = parsed.positionals[0] || getStringFlag(parsed.flags, "id");
   if (!draftId) throw new Error("draft-update requires a draft id");
-  let body = getStringFlag(parsed.flags, "body");
-  if (!body) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    const text = Buffer.concat(chunks).toString("utf8").trim();
-    if (text) body = text;
-  }
+  const body = getTextFlag(parsed.flags, "body") ?? (await readStdinBody());
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
     const result = await client.callTool({
@@ -1559,7 +1727,7 @@ async function runDraftUpdate(parsed: ParsedCliArgs): Promise<void> {
         bcc: getStringFlag(parsed.flags, "bcc"),
         subject: getStringFlag(parsed.flags, "subject"),
         body: body || undefined,
-        notes: getStringFlag(parsed.flags, "notes"),
+        notes: getTextFlag(parsed.flags, "notes"),
       },
     });
     printToolCallResult(result as Record<string, unknown>, wantJson);
@@ -1569,13 +1737,7 @@ async function runDraftUpdate(parsed: ParsedCliArgs): Promise<void> {
 async function runDraftReply(parsed: ParsedCliArgs): Promise<void> {
   const emailId = parsed.positionals[0] || getStringFlag(parsed.flags, "id");
   if (!emailId) throw new Error("draft-reply requires an emailId");
-  let body = getStringFlag(parsed.flags, "body");
-  if (!body) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    const text = Buffer.concat(chunks).toString("utf8").trim();
-    if (text) body = text;
-  }
+  const body = getTextFlag(parsed.flags, "body") ?? (await readStdinBody());
   if (!body) throw new Error("draft-reply requires --body or body piped via stdin");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
@@ -1587,7 +1749,7 @@ async function runDraftReply(parsed: ParsedCliArgs): Promise<void> {
         replyAll: isTruthyFlag(parsed.flags["reply-all"]) || isTruthyFlag(parsed.flags.all) || undefined,
         cc: getStringFlag(parsed.flags, "cc"),
         bcc: getStringFlag(parsed.flags, "bcc"),
-        notes: getStringFlag(parsed.flags, "notes"),
+        notes: getTextFlag(parsed.flags, "notes"),
       },
     });
     printToolCallResult(result as Record<string, unknown>, wantJson);
@@ -1599,18 +1761,12 @@ async function runDraftForward(parsed: ParsedCliArgs): Promise<void> {
   const to = getStringFlag(parsed.flags, "to");
   if (!emailId) throw new Error("draft-forward requires an emailId");
   if (!to) throw new Error("draft-forward requires --to");
-  let body = getStringFlag(parsed.flags, "body");
-  if (!body) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    const text = Buffer.concat(chunks).toString("utf8").trim();
-    if (text) body = text;
-  }
+  const body = getTextFlag(parsed.flags, "body") ?? (await readStdinBody());
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
     const result = await client.callTool({
       name: "create_forward_draft",
-      arguments: { emailId, to, body: body || undefined, cc: getStringFlag(parsed.flags, "cc"), bcc: getStringFlag(parsed.flags, "bcc"), notes: getStringFlag(parsed.flags, "notes") },
+      arguments: { emailId, to, body: body || undefined, cc: getStringFlag(parsed.flags, "cc"), bcc: getStringFlag(parsed.flags, "bcc"), notes: getTextFlag(parsed.flags, "notes") },
     });
     printToolCallResult(result as Record<string, unknown>, wantJson);
   });
@@ -1640,13 +1796,7 @@ async function runRemoteDrafts(parsed: ParsedCliArgs): Promise<void> {
 async function runDraftThreadReply(parsed: ParsedCliArgs): Promise<void> {
   const threadId = parsed.positionals[0] || getStringFlag(parsed.flags, "id");
   if (!threadId) throw new Error("draft-thread-reply requires a threadId");
-  let body = getStringFlag(parsed.flags, "body");
-  if (!body) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-    const text = Buffer.concat(chunks).toString("utf8").trim();
-    if (text) body = text;
-  }
+  const body = getTextFlag(parsed.flags, "body") ?? (await readStdinBody());
   if (!body) throw new Error("draft-thread-reply requires --body or body piped via stdin");
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
@@ -1658,7 +1808,7 @@ async function runDraftThreadReply(parsed: ParsedCliArgs): Promise<void> {
         replyAll: isTruthyFlag(parsed.flags["reply-all"]) || isTruthyFlag(parsed.flags.all) || undefined,
         cc: getStringFlag(parsed.flags, "cc"),
         bcc: getStringFlag(parsed.flags, "bcc"),
-        notes: getStringFlag(parsed.flags, "notes"),
+        notes: getTextFlag(parsed.flags, "notes"),
       },
     });
     printToolCallResult(result as Record<string, unknown>, wantJson);
@@ -1750,6 +1900,8 @@ interface ToolOnlyCommand {
   // a legacy 8-bit charset (ISO-8859-1, Windows-1252, ...) outside of its
   // MIME-encoded parts; decoding those bytes as UTF-8 corrupts or throws.
   fileFieldBase64?: string;
+  // Boolean flags forwarded to the tool under their own name (e.g. --checkConnections).
+  boolFlags?: string[];
 }
 
 export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
@@ -1795,7 +1947,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "rename-label", tool: "rename_label", positionals: ["name", "newName"], help: "Rename a Proton label" },
   { command: "delete-label", tool: "delete_label", positionals: ["name"], help: "Delete a Proton label" },
   { command: "get-connection-status", tool: "get_connection_status", positionals: [], help: "(tool form; see also `connection-status`)" },
-  { command: "list-accounts", tool: "list_accounts", positionals: [], help: "List the configured Proton addresses with each one's connection status and index freshness (multi-account setups; pass --checkConnections to verify live)" },
+  { command: "list-accounts", tool: "list_accounts", positionals: [], boolFlags: ["checkConnections"], help: "List the configured Proton addresses with each one's connection status and index freshness (multi-account setups; pass --checkConnections to verify live)" },
   { command: "get-runtime-status", tool: "get_runtime_status", positionals: [], help: "(tool form; see also `runtime-status`)" },
   { command: "run-doctor", tool: "run_doctor", positionals: [], help: "Full production health check (tool form; see also `doctor`)" },
   { command: "run-background-sync", tool: "run_background_sync", positionals: [], help: "Trigger the configured background sync cycle now" },
@@ -1839,6 +1991,10 @@ async function runToolOnlyCommand(entry: ToolOnlyCommand, parsed: ParsedCliArgs)
     }
   }
 
+  for (const flag of entry.boolFlags ?? []) {
+    if (isTruthyFlag(parsed.flags[flag])) args[flag] = true;
+  }
+
   Object.assign(args, (await parseToolArgs(parsed)) ?? {});
 
   const requiredFileField = entry.fileFieldBase64 ?? entry.fileField;
@@ -1874,6 +2030,18 @@ async function runClaude(parsed: ParsedCliArgs): Promise<void> {
   }
 }
 
+function printCommandHelp(command: string | undefined): void {
+  if (!command) {
+    printHelp();
+    return;
+  }
+  const text = commandHelpText(command);
+  if (!text) {
+    throw new Error(`Unknown command: ${command}`);
+  }
+  process.stdout.write(text);
+}
+
 export async function main(): Promise<void> {
   const parsed = parseCliArgs(process.argv.slice(2));
 
@@ -1883,11 +2051,17 @@ export async function main(): Promise<void> {
     return;
   }
 
+  // --help / -h anywhere prints help and returns: nothing below runs, nothing connects.
+  if (parsed.flags["help"]) {
+    printCommandHelp(parsed.command === "help" ? parsed.positionals[0] : parsed.command);
+    return;
+  }
+
+  assertKnownFlags(parsed);
+
   switch (parsed.command) {
     case "help":
-    case "--help":
-    case "-h":
-      printHelp();
+      printCommandHelp(parsed.positionals[0]);
       return;
     case "-v":
     case "version":
@@ -2096,8 +2270,16 @@ export async function main(): Promise<void> {
 const isDirectExecution = isMainModule(import.meta.url);
 
 if (isDirectExecution) {
+  // `proton-mail-bridge ... | head` closes the pipe early: that is the reader's choice, not an
+  // error, so leave quietly. Anything else on stdout is still fatal.
+  process.stdout.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE") {
+      process.exit(0);
+    }
+    throw error;
+  });
   main().catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(1);
+    process.exit(error instanceof CliUsageError ? 2 : 1);
   });
 }
