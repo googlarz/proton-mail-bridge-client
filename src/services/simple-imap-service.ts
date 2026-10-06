@@ -1451,10 +1451,13 @@ export class SimpleIMAPService {
         }
       }
 
+      // The page window is chosen by sequence number/UID in both directions, so the page
+      // must be ordered by UID too. Sorting "desc" by Date header scrambled pages (and
+      // beforeUid cursors) in folders whose dates don't track UID order, e.g. imports or Trash.
       const sorted =
         input.sortByUid === "asc"
           ? emails.sort((a, b) => a.uid - b.uid)
-          : sortEmailsByNewest(emails);
+          : emails.sort((a, b) => b.uid - a.uid);
 
       return {
         folder,
