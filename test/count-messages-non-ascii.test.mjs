@@ -23,6 +23,7 @@ const MESSAGES = [
   { uid: 3, name: "Ann", addr: "ann@example.com", subject: "Nowe książki w ofercie", body: "lista" },
   { uid: 4, name: "Bob", addr: "bob@example.com", subject: "Ksiazki stare", body: "Rücksendung bestätigt" },
   { uid: 5, name: "Eve", addr: "eve@example.com", subject: "Hello", body: "nothing" },
+  { uid: 6, name: "Herr Mueller", addr: "mueller@firma.de", subject: "Angebot", body: "Guten Tag" },
 ];
 
 function rfc822(m) {
@@ -105,4 +106,18 @@ test("an ASCII-only count still comes straight from SEARCH, with no fetch", asyn
   assert.equal(result.count, 1);
   assert.equal(sent.fetched, 0);
   assert.equal(result.approximate, undefined);
+});
+
+test("a query with an umlaut also matches the spelled-out form, in both count_messages and search_emails", async () => {
+  const { service } = createService();
+  assert.equal((await service.countMessages({ folder: "INBOX", from: "Müller" })).count, 1);
+  const searched = await service.searchEmails({ folder: "INBOX", limit: 50, from: "Müller" });
+  assert.deepEqual(searched.emails.map((e) => e.uid), [6]);
+});
+
+test("a plain ASCII query is sent to Bridge exactly as typed (no widening to umlaut spellings)", async () => {
+  const { service, sent } = createService();
+  await service.countMessages({ folder: "INBOX", from: "Mueller" });
+  assert.ok(sent.queries.some((q) => q.from === "Mueller"));
+  assert.equal(sent.fetched, 0, "an ASCII query still needs no local verification");
 });

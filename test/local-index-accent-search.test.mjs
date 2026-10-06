@@ -43,6 +43,8 @@ async function withIndex(fn) {
         mail(3, { subject: "Zaproszenie", from: { name: "Bob", address: "bob@example.com" }, to: "zk@example.com", toName: "Zażółć Gęślą" }),
         mail(4, { subject: "Rozliczenie", from: { name: "Eve", address: "eve@example.com" }, labels: ["Labels/Księgowość"], attachments: [{ filename: "Umowa-Łódź.pdf", contentType: "application/pdf", kind: "document" }] }),
         mail(5, { subject: "Hello", from: { name: "Carl", address: "carl@example.com" }, preview: "Nowe książki w ofercie" }),
+        mail(6, { subject: "Grüße aus dem Büro", from: { name: "Herr Müller", address: "mueller@firma.de" }, labels: ["Labels/Büro"] }),
+        mail(7, { subject: "Duck and cover", from: { name: "Dueck", address: "dueck@firma.de" } }),
       ],
     });
     await fn(service);
@@ -105,5 +107,24 @@ test("plain ASCII searches behave as before (case-insensitive substring)", async
   await withIndex(async (service) => {
     assert.deepEqual(ids(await service.search({ subject: "FAKTURA", limit: 10 })), ["INBOX::1"]);
     assert.deepEqual(ids(await service.search({ from: "ANN@EXAMPLE", limit: 10 })), ["INBOX::2"]);
+  });
+});
+
+test("the spelling pair works in the filters: Müller/Mueller, Büro/Buero, Grüße/Gruesse", async () => {
+  await withIndex(async (service) => {
+    for (const from of ["Müller", "muller", "mueller", "MUELLER"]) {
+      assert.deepEqual(ids(await service.search({ from, limit: 10 })), ["INBOX::6"], from);
+    }
+    assert.deepEqual(ids(await service.search({ subject: "gruesse", limit: 10 })), ["INBOX::6"]);
+    assert.deepEqual(ids(await service.search({ subject: "grusse", limit: 10 })), ["INBOX::6"]);
+    assert.deepEqual(ids(await service.search({ label: "buero", limit: 10 })), ["INBOX::6"]);
+    assert.deepEqual(ids(await service.search({ label: "Büro", limit: 10 })), ["INBOX::6"]);
+  });
+});
+
+test("plain ue/oe spelling is not widened in the filters: Dueck is not found as duck", async () => {
+  await withIndex(async (service) => {
+    assert.deepEqual(ids(await service.search({ from: "dueck", limit: 10 })), ["INBOX::7"]);
+    assert.deepEqual(ids(await service.search({ from: "duck", limit: 10 })), []);
   });
 });

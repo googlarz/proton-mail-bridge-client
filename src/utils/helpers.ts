@@ -529,6 +529,45 @@ export function foldSearchText(value: string): string {
     .replace(/[ßæœøłđðþı]/g, (letter) => FOLD_EXTRA[letter] ?? letter);
 }
 
+// Letters that people also write as a letter pair when they cannot type them: Müller/Mueller,
+// Köln/Koeln, Søren/Soeren, Åre/Aare. Folding alone (Müller -> muller) cannot match the pair spelling.
+const SPELLED_OUT: Record<string, string> = { ä: "ae", ö: "oe", ü: "ue", ø: "oe", å: "aa" };
+
+// The value with those letters spelled out as pairs, or undefined when it has none.
+function spelledOutText(value: string): string | undefined {
+  const lower = value.normalize("NFC").toLowerCase();
+  if (!/[äöüøå]/.test(lower)) return undefined;
+  return foldSearchText(lower.replace(/[äöüøå]/g, (letter) => SPELLED_OUT[letter] ?? letter));
+}
+
+// What a stored text is searched as: its folded form plus, when it has such letters, the spelled-out
+// form (`Müller` -> "muller" and "mueller"). Plain spelling stays alone, so "Dueck" is NOT also found as "duck".
+export function searchKey(value: string): string {
+  const folded = foldSearchText(value);
+  const spelled = spelledOutText(value);
+  // A newline, not a space: a term made of several words must not match across the join.
+  return spelled !== undefined && spelled !== folded ? `${folded}\n${spelled}` : folded;
+}
+
+// What a search term is looked for as: one spelling, or both when the term has such letters.
+export function searchNeedles(value: string): string[] {
+  const folded = foldSearchText(value);
+  const spelled = spelledOutText(value);
+  return spelled !== undefined && spelled !== folded ? [folded, spelled] : [folded];
+}
+
+// Accent-, case- and spelling-insensitive "contains".
+export function searchIncludes(haystack: string, needle: string): boolean {
+  const key = searchKey(haystack);
+  return searchNeedles(needle).some((candidate) => key.includes(candidate));
+}
+
+// Accent-, case- and spelling-insensitive equality (labels, folder names).
+export function searchEquals(a: string, b: string): boolean {
+  const keys = searchKey(a).split("\n");
+  return searchNeedles(b).some((form) => keys.includes(form));
+}
+
 // Longest run of ASCII letters/digits in the value ("Pelcová" -> "Pelcov"), or "" when there is
 // nothing usable (fewer than 2 characters would match far too much to be worth sending).
 export function asciiNarrowing(value: string): string {
@@ -565,7 +604,7 @@ function addressText(entries: Array<{ name?: string; address?: string }> | undef
 // Local, accent- and case-insensitive check of the criteria Bridge could not evaluate. `bodyText`
 // is only needed for a non-ASCII free-text `query`.
 export function matchesNonAsciiCriteria(email: EmailSummary, criteria: NonAsciiCriteria, bodyText?: string): boolean {
-  const has = (haystack: string, needle: string): boolean => foldSearchText(haystack).includes(foldSearchText(needle));
+  const has = searchIncludes;
   if (criteria.from && !has(addressText(email.from), criteria.from)) return false;
   if (criteria.to && !has(addressText(email.to), criteria.to)) return false;
   if (criteria.cc && !has(addressText(email.cc), criteria.cc)) return false;

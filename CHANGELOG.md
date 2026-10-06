@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [2.3.0] — 2026-10-06
+
+### Fixed
+- **The local index now finds words however they are spelled, in free text as well as in filters.** One shared "search key" is used everywhere the index compares text: case and accents are ignored (`pelcova` finds `Pelcová`), letters Unicode does not decompose are folded (`lodzi` finds `Łodzi`, `strasse` finds `Straße`, `soren` finds `Søren`), and ä/ö/ü/ø/å also match the way people write them without those letters: `mueller` and `muller` both find `Müller`, `koeln` finds `Köln`, `soeren` finds `Søren`, `buero` finds `Büro`. Text that is simply spelled with `ue`, `oe` or `ae` is not widened, so `duck` does not find `Dueck`. It covers `search_indexed_emails` (free text, `from`, `to`, `subject`, `label`, `attachmentName`, and the inline shortcuts), `get_threads`, `find_document_threads` and `prepare_meeting_context`. This replaces the known limitation listed in 2.2.4.
+- On the live-IMAP side (`search_emails`, `count_messages`), a query that contains umlauts or other non-ASCII letters is now also matched against the spelled-out form (`Müller` finds `Mueller`). A query written in plain ASCII, such as `Mueller`, still goes to Bridge exactly as typed, so it does not find `Müller` there: widening it would make ordinary words (`request`, `queue`, `value`) match far too much. Use `search_indexed_emails` for that.
+
+### Changed
+- **One-time rebuild of the full-text index on the first start after the upgrade** (about 3 seconds for 57,000 messages; each account's index is rebuilt separately). It is done in one transaction, so an interrupted rebuild leaves the old index in place and is repeated on the next start. The index now stores each text's search key instead of the raw text. The data stays valid if you go back to an older version, but an older version will no longer find words with `ł`, `ß` or `ø` by free text.
+- Filters in the index are a few tens of milliseconds slower on a large mailbox (about 0.25 s at worst, a keyword search over attachment text), because both sides are folded.
+
 ## [2.2.4] — 2026-10-06
 
 ### Fixed

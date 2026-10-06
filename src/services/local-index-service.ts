@@ -28,6 +28,10 @@ import {
   normalizeMailboxLabel,
   normalizeMessageId,
   normalizeSubjectForThread,
+  searchEquals,
+  searchIncludes,
+  searchKey,
+  searchNeedles,
   sortEmailsByNewest,
 } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -90,6 +94,11 @@ type MessageRow = {
 };
 
 const DB_SCHEMA_VERSION = 3;
+
+// Version of what the full-text index stores. 2 = every column holds the text's searchKey (folded,
+// with Müller also as "mueller"), so ł, ß, ø and the Mueller spelling are found. Bumping it makes the
+// next open rebuild the index from the messages table, once.
+const FTS_KEY_VERSION = "2";
 const STALE_THRESHOLD_MINUTES = 60;
 const DEFAULT_SNAPSHOT_LIMIT = 5000;
 // Results older than this carry `stale:true` plus a warning. Deliberately much lower than
@@ -140,6 +149,20 @@ export function shapeThreadForList<T extends { participants?: unknown[]; message
 
 function escapeLike(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+// WHERE fragment: any of `columns` contains `needle`, ignoring case, accents and spelling variants
+// (Müller/Mueller, see searchKey). FOLD() is the SQL function registered in ensureDb.
+function foldedLike(columns: string[], needle: string): { sql: string; params: string[] } {
+  const parts: string[] = [];
+  const params: string[] = [];
+  for (const form of searchNeedles(needle)) {
+    for (const column of columns) {
+      parts.push(`FOLD(${column}) LIKE ? ESCAPE '\\'`);
+      params.push(`%${escapeLike(form)}%`);
+    }
+  }
+  return { sql: `(${parts.join(" OR ")})`, params };
 }
 
 interface SnapshotLoadOptions {
@@ -219,11 +242,9 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   }
 
   if (normalizedFilters.label) {
-    const labelNeedle = foldSearchText(normalizedFilters.label);
-    const folderMatch = foldSearchText(normalizeMailboxLabel(email.folder) ?? "") === labelNeedle;
-    const labelMatch = email.labels.some(
-      (label) => foldSearchText(normalizeMailboxLabel(label) ?? "") === labelNeedle,
-    );
+    const wanted = normalizedFilters.label;
+    const folderMatch = searchEquals(normalizeMailboxLabel(email.folder) ?? "", wanted);
+    const labelMatch = email.labels.some((label) => searchEquals(normalizeMailboxLabel(label) ?? "", wanted));
     if (!folderMatch && !labelMatch) {
       return false;
     }
@@ -260,9 +281,9 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   }
 
   if (normalizedFilters.attachmentName) {
-    const attachmentNeedle = foldSearchText(normalizedFilters.attachmentName);
+    const attachmentNeedle = normalizedFilters.attachmentName;
     const match = email.attachments.some((attachment) =>
-      foldSearchText(attachment.filename || "").includes(attachmentNeedle),
+      searchIncludes(attachment.filename || "", attachmentNeedle),
     );
     if (!match) {
       return false;
@@ -287,7 +308,7 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
     ...email.to.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
     ...email.cc.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
   ].join("\n");
-  const foldedHaystacks = foldSearchText(haystacks);
+  const haystackKey = searchKey(haystacks);
 
   // searchFtsIds() ANDs every whitespace-separated query token as its own quoted FTS5 term
   // (so "invoice payment" matches a preview like "payment for the invoice is overdue"), but
@@ -295,23 +316,23 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   // rejecting anything FTS already matched whose words were merely out of order or separated
   // by other words. Match FTS's own AND-of-terms semantics instead of a single-phrase substring.
   if (normalizedFilters.query) {
-    const terms = foldSearchText(normalizedFilters.query).split(/\s+/).filter(Boolean);
-    if (terms.length > 0 && !terms.every((term) => foldedHaystacks.includes(term))) {
+    const terms = normalizedFilters.query.split(/\s+/).filter(Boolean);
+    if (terms.length > 0 && !terms.every((term) => searchNeedles(term).some((form) => haystackKey.includes(form)))) {
       return false;
     }
   }
 
   if (
     normalizedFilters.subject &&
-    !foldSearchText(email.subject).includes(foldSearchText(normalizedFilters.subject))
+    !searchIncludes(email.subject, normalizedFilters.subject)
   ) {
     return false;
   }
 
   if (normalizedFilters.from) {
-    const fromNeedle = foldSearchText(normalizedFilters.from);
+    const fromNeedle = normalizedFilters.from;
     const match = email.from.some((value) =>
-      foldSearchText(`${value.name ?? ""} ${value.address ?? ""}`).includes(fromNeedle),
+      searchIncludes(`${value.name ?? ""} ${value.address ?? ""}`, fromNeedle),
     );
     if (!match) {
       return false;
@@ -319,10 +340,10 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   }
 
   if (normalizedFilters.to) {
-    const toNeedle = foldSearchText(normalizedFilters.to);
+    const toNeedle = normalizedFilters.to;
     const recipients = [...email.to, ...email.cc, ...email.bcc];
     const match = recipients.some((value) =>
-      foldSearchText(`${value.name ?? ""} ${value.address ?? ""}`).includes(toNeedle),
+      searchIncludes(`${value.name ?? ""} ${value.address ?? ""}`, toNeedle),
     );
     if (!match) {
       return false;
@@ -562,6 +583,12 @@ function safeJsonParse<T>(value: string | null, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+// The six searchable columns of messages_fts, in table order after email_id, as their searchKey.
+function ftsColumns(email: EmailSummary, preview: string, attachmentText: string | undefined): string[] {
+  const parts = emailToSearchParts({ ...email, attachmentText });
+  return [email.subject, preview, email.folder, parts.labels, parts.participants, parts.attachmentNames].map(searchKey);
 }
 
 function emailToSearchParts(email: EmailSummary): {
@@ -1036,24 +1063,19 @@ export class LocalIndexService {
     // get plain ThreadSummary shapes, not the full per-message detail.
     const threads = (this.buildThreads(snapshot, true) as ThreadDetail[]).filter((thread) => {
       if (input.label) {
-        const labelNeedle = foldSearchText(input.label);
-        if (!thread.normalizedLabels.some((label) => foldSearchText(label) === labelNeedle)) {
+        const wanted = input.label;
+        if (!thread.normalizedLabels.some((label) => searchEquals(label, wanted))) {
           return false;
         }
       }
 
       if (input.query) {
-        const queryNeedle = foldSearchText(input.query);
-        const threadLevelHaystack = foldSearchText(
-          [
-            ...thread.participants.map((participant) => `${participant.name ?? ""} ${participant.address ?? ""}`),
-            ...thread.normalizedLabels,
-          ].join("\n"),
-        );
-        const matchesAnyMessage = thread.messages.some((message) =>
-          foldSearchText(message.subject).includes(queryNeedle),
-        );
-        if (!matchesAnyMessage && !threadLevelHaystack.includes(queryNeedle)) {
+        const threadLevelHaystack = [
+          ...thread.participants.map((participant) => `${participant.name ?? ""} ${participant.address ?? ""}`),
+          ...thread.normalizedLabels,
+        ].join("\n");
+        const matchesAnyMessage = thread.messages.some((message) => searchIncludes(message.subject, input.query as string));
+        if (!matchesAnyMessage && !searchIncludes(threadLevelHaystack, input.query)) {
           return false;
         }
       }
@@ -1169,16 +1191,14 @@ export class LocalIndexService {
         conditions.push(`is_read = 0`);
       }
       if (input.label) {
-        const labelNeedle = escapeLike(foldSearchText(input.label));
-        conditions.push(`(FOLD(folder) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`);
-        params.push(`%${labelNeedle}%`, `%${labelNeedle}%`);
+        const like = foldedLike(["folder", "labels_json"], input.label);
+        conditions.push(like.sql);
+        params.push(...like.params);
       }
       if (input.query) {
-        const needle = `%${escapeLike(foldSearchText(input.query))}%`;
-        conditions.push(
-          `(FOLD(subject) LIKE ? ESCAPE '\\' OR FOLD(preview) LIKE ? ESCAPE '\\' OR FOLD(from_json) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`,
-        );
-        params.push(needle, needle, needle, needle);
+        const like = foldedLike(["subject", "preview", "from_json", "labels_json"], input.query);
+        conditions.push(like.sql);
+        params.push(...like.params);
       }
       const sql = `SELECT * FROM messages${conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : ""}`;
       const candidateMessages = db
@@ -1221,22 +1241,20 @@ export class LocalIndexService {
         }
 
         if (input.label) {
-          const labelNeedle = foldSearchText(input.label);
-          if (!thread.normalizedLabels.some((label) => foldSearchText(label) === labelNeedle)) {
+          const wanted = input.label;
+          if (!thread.normalizedLabels.some((label) => searchEquals(label, wanted))) {
             return false;
           }
         }
 
         if (input.query) {
-          const haystack = foldSearchText(
-            [
-              thread.subject,
-              thread.latestPreview || "",
-              ...thread.latestFrom.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
-              ...thread.normalizedLabels,
-            ].join("\n"),
-          );
-          if (!haystack.includes(foldSearchText(input.query))) {
+          const haystack = [
+            thread.subject,
+            thread.latestPreview || "",
+            ...thread.latestFrom.map((value) => `${value.name ?? ""} ${value.address ?? ""}`),
+            ...thread.normalizedLabels,
+          ].join("\n");
+          if (!searchIncludes(haystack, input.query)) {
             return false;
           }
         }
@@ -1574,16 +1592,16 @@ export class LocalIndexService {
     const db = await this.ensureDb();
     const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
     const syncCheckpoints = this.loadCheckpointsSync(db);
-    const personNeedle = input.person ? foldSearchText(input.person) : undefined;
+    const personNeedle = input.person || undefined;
     const domainNeedle = input.domain?.toLowerCase();
     const limit = input.limit ?? 10;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (personNeedle) {
-      const needle = `%${escapeLike(personNeedle)}%`;
-      conditions.push(`(FOLD(from_json) LIKE ? ESCAPE '\\' OR FOLD(to_json) LIKE ? ESCAPE '\\' OR FOLD(cc_json) LIKE ? ESCAPE '\\')`);
-      params.push(needle, needle, needle);
+      const like = foldedLike(["from_json", "to_json", "cc_json"], personNeedle);
+      conditions.push(like.sql);
+      params.push(...like.params);
     }
     if (domainNeedle) {
       const needle = `%@${escapeLike(domainNeedle)}%`;
@@ -1615,9 +1633,9 @@ export class LocalIndexService {
     const threads = (this.buildThreads(snapshot, true) as ThreadDetail[])
       .filter((thread) =>
         thread.participants.some((participant) => {
-          const participantText = foldSearchText(`${participant.name ?? ""} ${participant.address ?? ""}`);
+          const participantText = `${participant.name ?? ""} ${participant.address ?? ""}`;
           const participantDomain = extractDomain(participant.address || "");
-          if (personNeedle && participantText.includes(personNeedle)) {
+          if (personNeedle && searchIncludes(participantText, personNeedle)) {
             return true;
           }
           if (domainNeedle && participantDomain === domainNeedle) {
@@ -1705,7 +1723,7 @@ export class LocalIndexService {
       this.chmodDbFiles();
       // SQLite's LOWER() only folds ASCII and LIKE does not ignore accents, so "łódź" could not find
       // "Łódź" and "pelcova" could not find "Pelcová". Compare folded text on both sides instead.
-      db.function("FOLD", { deterministic: true }, (value) => (value == null ? null : foldSearchText(String(value))));
+      db.function("FOLD", { deterministic: true }, (value) => (value == null ? null : searchKey(String(value))));
     }
     // auto_vacuum only takes effect on a brand-new/empty database (page_count 0) —
     // setting the pragma alone does NOT retroactively enable incremental vacuuming
@@ -1737,6 +1755,7 @@ export class LocalIndexService {
     }
 
     this.runMigrations(db);
+    this.rebuildFtsIfNeeded(db);
     this.db = db;
     await this.maybeImportLegacyIndex(db);
 
@@ -2124,18 +2143,8 @@ export class LocalIndexService {
           delivered_to: email.deliveredTo ?? null,
         }) as { preview: string | null; attachment_text: string | null };
 
-        const mergedPreview = persisted.preview ?? "";
-        const search = emailToSearchParts({ ...email, attachmentText: persisted.attachment_text ?? undefined });
         deleteFts.run(email.id);
-        insertFts.run(
-          email.id,
-          email.subject,
-          mergedPreview,
-          email.folder,
-          search.labels,
-          search.participants,
-          search.attachmentNames,
-        );
+        insertFts.run(email.id, ...ftsColumns(email, persisted.preview ?? "", persisted.attachment_text ?? undefined));
       }
 
       if (cleanupExpunged) {
@@ -2204,6 +2213,36 @@ export class LocalIndexService {
       // proportionate.
       db.pragma("incremental_vacuum");
     }
+  }
+
+  // Rebuilds messages_fts from the messages table when it was written by an older version (text stored
+  // as-is, so "lodzi" could not find "Łodzi"). One transaction: either every row is converted or none.
+  private rebuildFtsIfNeeded(db: Database.Database): void {
+    const stored = db.prepare(`SELECT value FROM metadata WHERE key = 'ftsKeyVersion'`).get() as { value: string } | undefined;
+    if (stored?.value === FTS_KEY_VERSION) return;
+    const total = Number((db.prepare(`SELECT COUNT(*) AS count FROM messages`).get() as { count: number }).count);
+    if (total > 0) {
+      this.log.info(`Rebuilding the full-text index for ${total} messages (one-time)`, "LocalIndexService");
+    }
+    const insertFts = db.prepare(`
+      INSERT INTO messages_fts (email_id, subject, preview, folder, labels, participants, attachment_names)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const nextBatch = db.prepare(`SELECT rowid AS _rowid, * FROM messages WHERE rowid > ? ORDER BY rowid LIMIT 500`);
+    db.transaction(() => {
+      db.exec(`DELETE FROM messages_fts`);
+      let after = 0;
+      for (;;) {
+        const rows = nextBatch.all(after) as Array<MessageRow & { _rowid: number }>;
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          const email = this.rowToEmailSummary(row);
+          insertFts.run(email.id, ...ftsColumns(email, row.preview ?? "", row.attachment_text ?? undefined));
+        }
+        after = rows[rows.length - 1]._rowid;
+      }
+      db.prepare(`INSERT INTO metadata (key, value) VALUES ('ftsKeyVersion', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(FTS_KEY_VERSION);
+    })();
   }
 
   private runMigrations(db: Database.Database): void {
@@ -2418,8 +2457,9 @@ export class LocalIndexService {
       params.push(filters.hasAttachment ? 1 : 0);
     }
     if (filters.subject) {
-      conditions.push(`FOLD(subject) LIKE ? ESCAPE '\\'`);
-      params.push(`%${escapeLike(foldSearchText(filters.subject))}%`);
+      const like = foldedLike(["subject"], filters.subject);
+      conditions.push(like.sql);
+      params.push(...like.params);
     }
     if (filters.senderDomain) {
       conditions.push(`FOLD(from_json) LIKE ? ESCAPE '\\'`);
@@ -2433,13 +2473,14 @@ export class LocalIndexService {
     // genuine match older than the window instead of finding it. Mirror the
     // existing senderDomain LIKE pattern (a safe superset pre-filter).
     if (filters.from) {
-      conditions.push(`FOLD(from_json) LIKE ? ESCAPE '\\'`);
-      params.push(`%${escapeLike(foldSearchText(filters.from))}%`);
+      const like = foldedLike(["from_json"], filters.from);
+      conditions.push(like.sql);
+      params.push(...like.params);
     }
     if (filters.to) {
-      conditions.push(`(FOLD(to_json) LIKE ? ESCAPE '\\' OR FOLD(cc_json) LIKE ? ESCAPE '\\' OR FOLD(bcc_json) LIKE ? ESCAPE '\\')`);
-      const toNeedle = `%${escapeLike(foldSearchText(filters.to))}%`;
-      params.push(toNeedle, toNeedle, toNeedle);
+      const like = foldedLike(["to_json", "cc_json", "bcc_json"], filters.to);
+      conditions.push(like.sql);
+      params.push(...like.params);
     }
     if (filters.messageId) {
       conditions.push(`message_id = ?`);
@@ -2498,8 +2539,13 @@ export class LocalIndexService {
     // NOT-prefix, so this searches for the term itself instead of silently dropping
     // it (e.g. `AND gate schematics` now matches "AND", "gate" and "schematics" all
     // required, rather than dropping "AND" and searching only the other two).
+    // Each term is looked for in its folded form(s): the stored text is a searchKey (see
+    // rebuildFtsIfNeeded), so Müller is stored as "muller" and "mueller" and either finds it.
+    const quote = (form: string): string => `"${form.replace(/"/g, '""')}"`;
     const match = parsed.residualTerms
-      .map((token) => `"${token.replace(/"/g, '""')}"`)
+      .map((token) => searchNeedles(token).filter(Boolean).map(quote))
+      .filter((forms) => forms.length > 0)
+      .map((forms) => (forms.length > 1 ? `(${forms.join(" OR ")})` : forms[0]))
       .join(" AND ");
 
     if (!match) {
@@ -2624,9 +2670,9 @@ export class LocalIndexService {
       messageParams.push(options.folder);
     }
     if (options.label) {
-      const labelNeedle = escapeLike(foldSearchText(options.label));
-      messageConditions.push(`(FOLD(folder) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`);
-      messageParams.push(`%${labelNeedle}%`, `%${labelNeedle}%`);
+      const like = foldedLike(["folder", "labels_json"], options.label);
+      messageConditions.push(like.sql);
+      messageParams.push(...like.params);
     }
     if (typeof options.isRead === "boolean") {
       messageConditions.push(`is_read = ?`);
@@ -2674,16 +2720,14 @@ export class LocalIndexService {
       params.push(input.folder);
     }
     if (input.label) {
-      const labelNeedle = escapeLike(foldSearchText(input.label));
-      conditions.push(`(FOLD(folder) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`);
-      params.push(`%${labelNeedle}%`, `%${labelNeedle}%`);
+      const like = foldedLike(["folder", "labels_json"], input.label);
+      conditions.push(like.sql);
+      params.push(...like.params);
     }
     if (input.query) {
-      const needle = `%${escapeLike(foldSearchText(input.query))}%`;
-      conditions.push(
-        `(FOLD(subject) LIKE ? ESCAPE '\\' OR FOLD(from_json) LIKE ? ESCAPE '\\' OR FOLD(to_json) LIKE ? ESCAPE '\\' OR FOLD(cc_json) LIKE ? ESCAPE '\\' OR FOLD(bcc_json) LIKE ? ESCAPE '\\' OR FOLD(labels_json) LIKE ? ESCAPE '\\')`,
-      );
-      params.push(needle, needle, needle, needle, needle, needle);
+      const like = foldedLike(["subject", "from_json", "to_json", "cc_json", "bcc_json", "labels_json"], input.query);
+      conditions.push(like.sql);
+      params.push(...like.params);
     }
 
     const sql = `SELECT * FROM messages${conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : ""}`;
