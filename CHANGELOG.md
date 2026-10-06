@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [2.2.1] — 2026-10-06
+
+### Fixed
+- **2.2.0 did not start when installed from npm, as a `.mcpb` bundle or through `npm run install:claude-desktop`:** `better-sqlite3` had been moved from `dependencies` to `devDependencies` by mistake, so every install that omits dev packages lacked it (`Cannot find package 'better-sqlite3'`). It is a runtime dependency again. Use 2.2.1 instead of 2.2.0.
+- A new test fails when `src/` imports a package that is not listed under `dependencies`, which is how this slipped through: the repo has `better-sqlite3` installed either way, so the existing tests could not notice.
+
 ## [2.2.0] — 2026-10-06
 
 ### Changed

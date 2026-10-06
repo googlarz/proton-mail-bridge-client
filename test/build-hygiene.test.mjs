@@ -71,3 +71,38 @@ test("the allowScripts pin names the better-sqlite3 version that is actually ins
   const installed = lock.packages["node_modules/better-sqlite3"].version;
   assert.equal(pkg.allowScripts?.[`better-sqlite3@${installed}`], true, `allowScripts must pin better-sqlite3@${installed}`);
 });
+
+test("every package the source imports is a runtime dependency, not a devDependency", async () => {
+  // The installed runtime and the .mcpb bundles are built with --omit=dev. A package that src/
+  // imports but package.json lists under devDependencies is present in the repo, so tests pass,
+  // and missing everywhere users run it. (`npm install --save-dev a b` moves BOTH packages.)
+  const pkg = JSON.parse(await read("package.json"));
+  const files = [];
+  const walk = async (dir) => {
+    for (const entry of await readdir(join(root, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) await walk(rel);
+      else if (rel.endsWith(".ts")) files.push(rel);
+    }
+  };
+  await walk("src");
+  const imported = new Set();
+  for (const file of files) {
+    const code = await read(file);
+    const specs = [
+      ...code.matchAll(/^\s*(?:import|export)\b[^;'"]*?\bfrom\s*["']([^"']+)["']/gm),
+      ...code.matchAll(/^\s*import\s*["']([^"']+)["']/gm),
+      ...code.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g),
+    ];
+    for (const m of specs) {
+      const spec = m[1];
+      if (spec.startsWith("node:") || spec.startsWith(".")) continue;
+      imported.add(spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]);
+    }
+  }
+  assert.ok(imported.has("better-sqlite3"), "scan should see better-sqlite3 (guards the regex itself)");
+  const builtins = new Set((await import("node:module")).builtinModules);
+  for (const name of [...imported].filter((n) => !builtins.has(n))) {
+    assert.ok(pkg.dependencies?.[name], `${name} is imported by src/ but is not in "dependencies"`);
+  }
+});

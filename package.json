@@ -1,6 +1,6 @@
 {
   "name": "proton-mail-bridge-client",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Proton Mail Bridge Client — full-featured CLI and Claude Desktop MCP for Proton Mail via Proton Bridge. Read, search, send, draft, archive, manage folders, and more.",
   "mcpName": "io.github.googlarz/proton-mail-bridge-client",
   "type": "module",
@@ -72,6 +72,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
+    "better-sqlite3": "^13.0.3",
     "imapflow": "^2.2.5",
     "mailparser": "^3.9.33",
     "nodemailer": "^10.0.13",
@@ -83,7 +84,6 @@
     "@types/node": "^24.19.1",
     "@types/sanitize-html": "^2.16.1",
     "@types/turndown": "^5.0.6",
-    "better-sqlite3": "^13.0.3",
     "typescript": "^7.0.2"
   },
   "files": [
