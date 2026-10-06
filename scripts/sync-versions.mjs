@@ -1,7 +1,9 @@
 // Keeps the checked-in copies of the package version in step with package.json.
 // Wired to the npm "version" lifecycle, so `npm version X` updates them too. (The .mcpb build
 // also stamps the version itself, but server.json is published as-is to the MCP registry.)
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const root = new URL("../", import.meta.url);
 const { version } = JSON.parse(readFileSync(new URL("package.json", root), "utf8"));
@@ -20,4 +22,11 @@ function stamp(path, { all }) {
 
 stamp("mcpb/manifest.json", { all: false }); // only the top-level version
 stamp("server.json", { all: true }); // the server entry and each package entry
+// `npm version` runs this script BEFORE it commits, and only commits what is staged: without this
+// the version commit would carry package.json but leave these two files behind at the old version.
+try {
+  execFileSync("git", ["add", "mcpb/manifest.json", "server.json"], { cwd: fileURLToPath(root), stdio: "ignore" });
+} catch {
+  // Not a git checkout (or git missing): nothing to stage.
+}
 console.log(`mcpb/manifest.json and server.json set to ${version}`);

@@ -34,7 +34,7 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
 
 1. **Install and sign in to [Proton Mail Bridge](https://proton.me/mail/bridge)**, and leave it running. In the Bridge app, open your account and copy the **Bridge password** (it is not your Proton password).
 2. **Connect Claude Desktop**, either way:
-   - **Bundle:** download the `proton-mail-bridge-client-<your-os>.mcpb` for macOS (`darwin-arm64`), Linux (`linux-x64`) or Windows (`win32-x64`) from the [latest release](https://github.com/googlarz/proton-mail-bridge-client/releases/latest) and open it. Claude Desktop asks for your Proton address and the Bridge password.
+   - **Bundle:** download the `proton-mail-bridge-client-<your-os>.mcpb` for macOS (`darwin-arm64` Apple silicon, `darwin-x64` Intel), Linux (`linux-x64`, `linux-arm64`) or Windows (`win32-x64`) from the [latest release](https://github.com/googlarz/proton-mail-bridge-client/releases/latest) and open it. Claude Desktop asks for your Proton address and the Bridge password, plus optional settings (Bridge IMAP/SMTP host and port, read-only, allow sending, signature, extra accounts, data and download folders, tool tier); the defaults match a standard Bridge install.
    - **npm:** `npm install -g proton-mail-bridge-client`, then `proton-mail-bridge-client setup-claude-desktop` (it checks your Bridge ports and writes the config). Fully quit and reopen Claude Desktop afterwards.
 3. **Check it works:** run `proton-mail-bridge-client doctor`, or ask Claude "run the Proton Mail doctor".
 4. **Try these prompts:**
@@ -128,6 +128,8 @@ The wizard:
 - checks your local Bridge ports
 - asks for your Bridge username and Bridge password
 - writes the Claude Desktop MCP config entry
+
+The runtime is installed into a staging directory first, checked (Node starts, `better-sqlite3` opens a database, `dist` imports, version matches) and only then swapped in; the previous runtime stays next to it as `<runtime dir>.previous`, and a failed install leaves the working one untouched. The config is merged, not replaced: existing `env` keys you added by hand are kept, and the config is rewritten atomically (the newest 5 `.bak-*` copies are kept). Passwords are never printed. Run `npm run check:claude-desktop` to verify an install; it exits non-zero when the command, the runtime or the database module is broken.
 
 **After setup:** restart Claude Desktop, make sure Proton Bridge is open, then check **`+` → Connectors → proton-mail-bridge**.
 
@@ -507,7 +509,7 @@ PROTONMAIL_CLAUDE_RUNTIME_DIR=''      # where the Claude Desktop installer puts 
 
 ## Ask before sending: address and signature (optional skill)
 
-With several accounts or a signature, the server sends from whichever `from` the caller passes and cannot know which one you meant. [`skills/send-with-identity`](skills/send-with-identity/SKILL.md) is a Claude skill that makes the agent ask "from which address, and with which signature?" before every send, reply, forward or schedule, then pass `from` and its own signature with `appendSignature: false` so nothing is doubled. It does not replace your explicit approval to send. Copy the folder to `~/.claude/skills/send-with-identity`, and fill in your addresses and signatures there (keep that copy private).
+With several accounts or a signature, the server sends from whichever `from` the caller passes and cannot know which one you meant. [`skills/send-with-identity`](skills/send-with-identity/SKILL.md) is a Claude skill that makes the agent ask "from which address, and with which signature?" before every send, reply, forward or schedule, then pass `from` and its own signature. On the four immediate-send tools (`send_email`, `reply_to_email`, `reply_all_email`, `forward_email`) that means `appendSignature: false` plus `isHtml: true` for an HTML signature, so nothing is doubled; drafts never get `PROTONMAIL_SIGNATURE` appended, so the skill writes the signature into the draft body, and `send_draft`/`schedule_draft` take no `from`, so the address and signature are settled on the draft first. It does not replace your explicit approval to send. Copy the folder to `~/.claude/skills/send-with-identity`, and fill in your addresses and signatures there (keep that copy private).
 
 ## Compared with Claude's native Gmail connector
 

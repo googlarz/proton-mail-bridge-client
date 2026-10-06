@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { constants as fsConstants, realpathSync } from "node:fs";
-import { access, chmod, copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -25,6 +25,11 @@ export interface InstallOptions {
   includeEnv?: boolean;
   env?: Record<string, string>;
   useRepoRuntime?: boolean;
+  /** Test seams for the staged install; the defaults are the real implementations. */
+  installDependencies?: (stagingDir: string, hasLockfile: boolean) => Promise<void>;
+  afterInstall?: (stagingDir: string) => Promise<void>;
+  rename?: (from: string, to: string) => Promise<void>;
+  verifyRuntime?: (dir: string, nodeCommand: string, expectedVersion: string) => Promise<void>;
 }
 
 function parseCliArgs(argv: string[]): InstallOptions {
@@ -152,7 +157,11 @@ export function resolveClaudeDesktopRuntimeDir(explicitPath?: string): string {
 export function collectInstallEnv(sourceEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
   return Object.fromEntries(
     Object.entries(sourceEnv).filter(
-      ([key, value]) => Boolean(value) && (key.startsWith("PROTONMAIL_") || key === "DEBUG"),
+      ([key, value]) =>
+        Boolean(value) &&
+        (key.startsWith("PROTONMAIL_") || key === "DEBUG") &&
+        // The installer's own override; the server never reads it.
+        key !== "PROTONMAIL_CLAUDE_RUNTIME_DIR",
     ) as Array<[string, string]>,
   );
 }
@@ -181,12 +190,17 @@ export function resolveStableNodeCommand(
   execPath: string,
   realpath: (path: string) => string = (path) => realpathSync(path),
 ): string {
-  const cellarMatch = execPath.match(/^(.*)\/Cellar\/node\/[^/]+\/bin\/node$/);
+  // `node` -> <prefix>/bin/node; versioned formulae (`node@22`) keep their stable
+  // link under <prefix>/opt/node@22/bin/node (there is no <prefix>/bin/node for them).
+  const cellarMatch = execPath.match(/^(.*)\/Cellar\/(node(?:@\d+)?)\/[^/]+\/bin\/node$/);
   if (!cellarMatch) {
     return execPath;
   }
 
-  const stableCandidate = join(cellarMatch[1], "bin", "node");
+  const stableCandidate =
+    cellarMatch[2] === "node"
+      ? join(cellarMatch[1], "bin", "node")
+      : join(cellarMatch[1], "opt", cellarMatch[2], "bin", "node");
   try {
     if (realpath(stableCandidate) === execPath) {
       return stableCandidate;
@@ -196,6 +210,16 @@ export function resolveStableNodeCommand(
   }
 
   return execPath;
+}
+
+/** A version-pinned nvm path stops existing after `nvm uninstall`; the config would silently break. */
+export function nodeCommandWarnings(command: string): string[] {
+  if (/[\\/]\.nvm[\\/]versions[\\/]node[\\/]v[^\\/]+[\\/]bin[\\/]node$/.test(command)) {
+    return [
+      `The configured Node (${command}) is a version-pinned nvm path. It disappears after "nvm uninstall"/"nvm install" of another version and Claude Desktop would then fail to start the server. Install Node via Homebrew or pass --command with a stable path.`,
+    ];
+  }
+  return [];
 }
 
 export function buildClaudeDesktopServerConfig(
@@ -259,6 +283,34 @@ async function installRuntimeDependencies(runtimeDir: string, hasLockfile: boole
   });
 }
 
+// Runs in the runtime dir with the node Claude Desktop will use. Exits non-zero (stderr says why)
+// unless the native module works, the version matches and both entry points import.
+const VERIFY_SCRIPT = [
+  'const { createRequire } = require("node:module");',
+  'const path = require("node:path");',
+  'const req = createRequire(path.join(process.cwd(), "package.json"));',
+  'const Database = req("better-sqlite3");',
+  'const db = new Database(":memory:");',
+  'db.prepare("select 1").get();',
+  "db.close();",
+  'const version = req("./package.json").version;',
+  'if (version !== process.argv[1]) throw new Error("runtime package.json is " + version + ", expected " + process.argv[1]);',
+  'Promise.all([import("./dist/index.js"), import("./dist/lib.js")]).then(() => process.exit(0), (error) => { console.error(error && error.stack || String(error)); process.exit(1); });',
+].join("\n");
+
+export async function verifyRuntime(dir: string, nodeCommand: string, expectedVersion: string): Promise<void> {
+  try {
+    await execFileAsync(nodeCommand, ["-e", VERIFY_SCRIPT, expectedVersion], { cwd: dir, timeout: 60_000 });
+  } catch (error) {
+    const detail =
+      (error as { stderr?: string }).stderr?.trim() || (error instanceof Error ? error.message : String(error));
+    throw new Error(`Runtime verification failed in ${dir}: ${detail}`);
+  }
+}
+
+// Entries the installer owns inside the runtime dir; anything else is the user's and is carried over.
+const MANAGED_RUNTIME_ENTRIES = new Set(["dist", "node_modules", "package.json", "package-lock.json"]);
+
 export async function prepareClaudeDesktopRuntime(options: InstallOptions = {}): Promise<{
   runtimeDir: string;
   sourceCwd: string;
@@ -275,21 +327,64 @@ export async function prepareClaudeDesktopRuntime(options: InstallOptions = {}):
     };
   }
 
-  await mkdir(runtimeDir, { recursive: true });
-  await rm(join(runtimeDir, "dist"), { recursive: true, force: true });
-  await cp(join(sourceCwd, "dist"), join(runtimeDir, "dist"), { recursive: true, force: true });
-  await copyFile(join(sourceCwd, "package.json"), join(runtimeDir, "package.json"));
+  // Build and verify a complete runtime next to the live one, then swap by rename. The live
+  // runtime is never touched until the replacement is known to work, and the old one is kept
+  // as <runtimeDir>.previous (release 2.2.0 broke a machine by deleting dist and running
+  // `npm ci` in place).
+  const stagingDir = `${runtimeDir}.staging-${process.pid}`;
+  const previousDir = `${runtimeDir}.previous`;
+  const nodeCommand = options.command || resolveStableNodeCommand(process.execPath);
+  const verify = options.verifyRuntime ?? verifyRuntime;
+  const move = options.rename ?? rename;
+  const install = options.installDependencies ?? installRuntimeDependencies;
+  const { version } = JSON.parse(await readFile(join(sourceCwd, "package.json"), "utf8")) as { version: string };
 
-  // Only present when installing from a git checkout; published tarballs never contain it.
-  const lockfilePath = join(sourceCwd, "package-lock.json");
-  const hasLockfile = await pathExists(lockfilePath);
-  if (hasLockfile) {
-    await copyFile(lockfilePath, join(runtimeDir, "package-lock.json"));
-  } else {
-    await rm(join(runtimeDir, "package-lock.json"), { force: true });
+  await rm(stagingDir, { recursive: true, force: true });
+  await mkdir(dirname(runtimeDir), { recursive: true });
+  await mkdir(stagingDir);
+
+  try {
+    await cp(join(sourceCwd, "dist"), join(stagingDir, "dist"), { recursive: true });
+    await copyFile(join(sourceCwd, "package.json"), join(stagingDir, "package.json"));
+
+    // Only present when installing from a git checkout; published tarballs never contain it.
+    const hasLockfile = await pathExists(join(sourceCwd, "package-lock.json"));
+    if (hasLockfile) {
+      await copyFile(join(sourceCwd, "package-lock.json"), join(stagingDir, "package-lock.json"));
+    }
+
+    await install(stagingDir, hasLockfile);
+    await options.afterInstall?.(stagingDir);
+    await verify(stagingDir, nodeCommand, version);
+
+    const hadPrevious = await pathExists(runtimeDir);
+    if (hadPrevious) {
+      for (const entry of await readdir(runtimeDir)) {
+        if (!MANAGED_RUNTIME_ENTRIES.has(entry)) {
+          await cp(join(runtimeDir, entry), join(stagingDir, entry), { recursive: true });
+        }
+      }
+      await rm(previousDir, { recursive: true, force: true });
+      await move(runtimeDir, previousDir);
+    }
+
+    try {
+      await move(stagingDir, runtimeDir);
+      await verify(runtimeDir, nodeCommand, version);
+    } catch (error) {
+      await rm(runtimeDir, { recursive: true, force: true });
+      if (hadPrevious) {
+        await move(previousDir, runtimeDir);
+      }
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\n${
+          hadPrevious ? "The previous runtime was restored." : "Nothing was installed."
+        }`,
+      );
+    }
+  } finally {
+    await rm(stagingDir, { recursive: true, force: true });
   }
-
-  await installRuntimeDependencies(runtimeDir, hasLockfile);
 
   return {
     runtimeDir,
@@ -308,27 +403,20 @@ export function mergeClaudeDesktopConfig(
       ? (existing.mcpServers as Record<string, unknown>)
       : {};
 
-  // collectInstallEnv() only sees PROTONMAIL_*/DEBUG vars exported in the
-  // shell that's running this installer right now — it has no way to see
-  // credentials that were hand-added straight into the config (e.g. because
-  // Claude Desktop itself, not this shell, is what had them set). A plain
-  // re-run of `npm run install:claude-desktop` from a shell without those
-  // vars exported used to silently wipe a working env block, since this
-  // function replaced the whole server entry outright. Reproduced live:
-  // install ran with none of PROTONMAIL_* exported, and the previously-
-  // working server lost its login and failed with "Missing required
-  // environment variables" until the config was hand-repaired from the
-  // installer's own pre-write backup. If this run has nothing new to
-  // contribute, keep whatever was already configured instead of dropping it.
+  // collectInstallEnv() only sees PROTONMAIL_*/DEBUG vars exported in the shell running this
+  // installer; it cannot see keys that were hand-added to the config (accounts, signature, ...).
+  // Replacing the env wholesale dropped them: with only PROTONMAIL_PASSWORD exported, the
+  // existing PROTONMAIL_ACCOUNTS_JSON vanished. Merge instead, new values winning per key.
   const existingServerConfig = existingServers[serverName];
   const existingEnv =
     existingServerConfig &&
     typeof existingServerConfig === "object" &&
     !Array.isArray(existingServerConfig) &&
+    (existingServerConfig as { env?: unknown }).env &&
     typeof (existingServerConfig as { env?: unknown }).env === "object"
-      ? ((existingServerConfig as { env?: Record<string, string> }).env ?? undefined)
+      ? ((existingServerConfig as { env: Record<string, string> }).env)
       : undefined;
-  const env = serverConfig.env && Object.keys(serverConfig.env).length > 0 ? serverConfig.env : existingEnv;
+  const env = { ...existingEnv, ...serverConfig.env };
 
   return {
     ...existing,
@@ -336,25 +424,77 @@ export function mergeClaudeDesktopConfig(
       ...existingServers,
       [serverName]: {
         ...serverConfig,
-        ...(env && Object.keys(env).length > 0 ? { env } : {}),
+        ...(Object.keys(env).length > 0 ? { env } : {}),
       },
     },
   };
 }
 
+function lineOf(raw: string, message: string): string {
+  const line = message.match(/\(line (\d+)/)?.[1];
+  if (line) return line;
+  const position = message.match(/position (\d+)/)?.[1];
+  if (position) return String(raw.slice(0, Number(position)).split("\n").length);
+  return "unknown";
+}
+
+export function parseClaudeDesktopConfig(raw: string, configPath: string): Record<string, unknown> {
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${basename(configPath)} is not valid JSON at line ${lineOf(text, message)}: ${message} — Claude Desktop does not accept comments or trailing commas. The file was not changed.`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Claude Desktop config at ${configPath} must contain a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 async function readExistingConfig(configPath: string): Promise<Record<string, unknown>> {
   try {
-    const raw = await readFile(configPath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error(`Claude Desktop config at ${configPath} must contain a JSON object.`);
-    }
-    return parsed as Record<string, unknown>;
+    return parseClaudeDesktopConfig(await readFile(configPath, "utf8"), configPath);
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
       return {};
     }
     throw error;
+  }
+}
+
+// Fail before the runtime is replaced, not after: a read-only config used to surface only at
+// the final write, with the new runtime already in place and a stray backup left behind.
+async function assertConfigWritable(configPath: string): Promise<void> {
+  try {
+    await access(configPath, fsConstants.W_OK);
+    return;
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT")) {
+      throw new Error(`Claude Desktop config ${configPath} is not writable: ${(error as Error).message}`);
+    }
+  }
+  // Not there yet: the first existing ancestor must be writable.
+  let dir = dirname(configPath);
+  while (!(await pathExists(dir)) && dirname(dir) !== dir) dir = dirname(dir);
+  try {
+    await access(dir, fsConstants.W_OK);
+  } catch (error) {
+    throw new Error(`Cannot create ${configPath}: ${(error as Error).message}`);
+  }
+}
+
+const MAX_CONFIG_BACKUPS = 5;
+
+async function pruneConfigBackups(configPath: string): Promise<void> {
+  const prefix = `${basename(configPath)}.bak-`;
+  // The names embed an ISO timestamp, so lexical order is chronological.
+  const backups = (await readdir(dirname(configPath))).filter((name) => name.startsWith(prefix)).sort();
+  for (const name of backups.slice(0, Math.max(0, backups.length - MAX_CONFIG_BACKUPS))) {
+    await rm(join(dirname(configPath), name), { force: true });
   }
 }
 
@@ -369,6 +509,7 @@ async function backupConfigIfPresent(configPath: string): Promise<string | undef
     // codebase that persists secrets (audit log, draft store, delivery queue).
     await copyFile(configPath, backupPath);
     await chmod(backupPath, 0o600);
+    await pruneConfigBackups(configPath);
     return backupPath;
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
@@ -376,6 +517,36 @@ async function backupConfigIfPresent(configPath: string): Promise<string | undef
     }
     throw error;
   }
+}
+
+const SECRET_KEY = /password|secret|token/i;
+const REDACTED = "[redacted]";
+
+function redactAccountsJson(value: string): string {
+  try {
+    const parsed = JSON.parse(value);
+    const scrub = (node: unknown): unknown =>
+      Array.isArray(node)
+        ? node.map(scrub)
+        : node && typeof node === "object"
+          ? Object.fromEntries(
+              Object.entries(node).map(([key, inner]) => [key, SECRET_KEY.test(key) ? REDACTED : scrub(inner)]),
+            )
+          : node;
+    return JSON.stringify(scrub(parsed));
+  } catch {
+    return REDACTED;
+  }
+}
+
+/** Copy of an env map that is safe to print: secret values hidden, key names kept. */
+export function redactEnv(env: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).map(([key, value]) => [
+      key,
+      key === "PROTONMAIL_ACCOUNTS_JSON" ? redactAccountsJson(value) : SECRET_KEY.test(key) ? REDACTED : value,
+    ]),
+  );
 }
 
 export async function installClaudeDesktopConfig(options: InstallOptions = {}): Promise<{
@@ -386,22 +557,36 @@ export async function installClaudeDesktopConfig(options: InstallOptions = {}): 
   runtimeDir: string;
   sourceCwd: string;
   usedRepoRuntime: boolean;
+  warnings: string[];
 }> {
   const configPath = resolveClaudeDesktopConfigPath(options.configPath);
-  const existing = await readExistingConfig(configPath);
+  // Validate first (bad JSON, read-only) so nothing has been replaced when we refuse.
+  await readExistingConfig(configPath);
+  await assertConfigWritable(configPath);
+
   const runtime = await prepareClaudeDesktopRuntime(options);
   const { serverName, serverConfig } = buildClaudeDesktopServerConfig({
     ...options,
     runtimeDir: runtime.runtimeDir,
   });
+
+  // Read again now: Claude Desktop or the user may have edited the file while the runtime installed.
+  const existing = await readExistingConfig(configPath);
   const merged = mergeClaudeDesktopConfig(existing, serverName, serverConfig);
 
   await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
   const backupPath = await backupConfigIfPresent(configPath);
+  // Temp file in the same directory + rename, so a crash never leaves a half-written config.
   // See backupConfigIfPresent's comment: this file holds live Bridge credentials.
-  await writeFile(configPath, `${JSON.stringify(merged, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  // writeFile's mode only applies to a newly created file; tighten an existing one too.
-  await chmod(configPath, 0o600);
+  const tempPath = `${configPath}.tmp-${process.pid}`;
+  try {
+    await writeFile(tempPath, `${JSON.stringify(merged, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(tempPath, 0o600);
+    await rename(tempPath, configPath);
+  } catch (error) {
+    await rm(tempPath, { force: true });
+    throw error;
+  }
 
   return {
     configPath,
@@ -411,13 +596,24 @@ export async function installClaudeDesktopConfig(options: InstallOptions = {}): 
     runtimeDir: runtime.runtimeDir,
     sourceCwd: runtime.sourceCwd,
     usedRepoRuntime: runtime.usedRepoRuntime,
+    warnings: nodeCommandWarnings(serverConfig.command),
   };
 }
 
 async function main(): Promise<void> {
   const options = parseCliArgs(process.argv.slice(2));
   const result = await installClaudeDesktopConfig(options);
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  const printable = {
+    ...result,
+    serverConfig: {
+      ...result.serverConfig,
+      ...(result.serverConfig.env ? { env: redactEnv(result.serverConfig.env) } : {}),
+    },
+  };
+  process.stdout.write(`${JSON.stringify(printable, null, 2)}\n`);
+  for (const warning of result.warnings) {
+    process.stderr.write(`Warning: ${warning}\n`);
+  }
 }
 
 const isDirectExecution =
