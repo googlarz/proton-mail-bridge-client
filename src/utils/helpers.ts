@@ -515,17 +515,39 @@ export function sortEmailsByNewest<T extends Pick<EmailSummary, "date" | "intern
   });
 }
 
+// A tool argument that could not be read as what it should be. The server maps it to InvalidParams, so
+// the caller is told, instead of the argument being ignored and a default used.
+export class InvalidArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidArgumentError";
+  }
+}
+
+// Reads an integer argument: a number, or a string that holds one ("5"), clamped to [min, max]. Nothing given
+// (undefined, null, "") uses the default. Anything else is an error rather than a silent default.
 export function normalizeLimit(
   value: unknown,
   defaultValue: number,
   min = 1,
   max = 250,
 ): number {
-  if (typeof value !== "number" || Number.isNaN(value)) {
+  if (value === undefined || value === null || value === "") {
     return defaultValue;
   }
+  let number: number;
+  if (typeof value === "number") {
+    number = value;
+  } else if (typeof value === "string" && /^\s*-?\d+(\.\d+)?\s*$/.test(value)) {
+    number = Number(value);
+  } else {
+    throw new InvalidArgumentError(`Expected a number but got ${JSON.stringify(value)}.`);
+  }
+  if (Number.isNaN(number)) {
+    throw new InvalidArgumentError("Expected a number but got NaN.");
+  }
 
-  const rounded = Math.trunc(value);
+  const rounded = Math.trunc(number);
   if (rounded < min) {
     return min;
   }
@@ -535,8 +557,50 @@ export function normalizeLimit(
   return rounded;
 }
 
+// Like normalizeLimit, but "nothing given" stays undefined, for arguments whose default lives in the service.
+export function optionalInteger(value: unknown, min: number, max: number): number | undefined {
+  return value === undefined || value === null || value === "" ? undefined : normalizeLimit(value, min, min, max);
+}
+
+// A number argument that may be absent (a filter such as sizeLarger): absent stays undefined, "1.5" and 1.5
+// both read as 1.5, anything unreadable is an error, and the value is kept inside [min, max].
+export function optionalNumber(value: unknown, min: number, max: number): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  let number: number;
+  if (typeof value === "number") {
+    number = value;
+  } else if (typeof value === "string" && /^\s*-?\d+(\.\d+)?\s*$/.test(value)) {
+    number = Number(value);
+  } else {
+    throw new InvalidArgumentError(`Expected a number but got ${JSON.stringify(value)}.`);
+  }
+  if (Number.isNaN(number)) throw new InvalidArgumentError("Expected a number but got NaN.");
+  return Math.min(max, Math.max(min, number));
+}
+
+const TRUE_WORDS = new Set(["true", "yes", "1", "on"]);
+const FALSE_WORDS = new Set(["false", "no", "0", "off"]);
+
+// Reads a boolean argument. Clients and models do send "true" and 1; reading only a real boolean made
+// dryRun:"true" run for real and isRead:"false" mark a message read. Nothing given uses the default; a value
+// that is none of the recognised spellings is an error, never a silent default.
+export function optionalBoolean(value: unknown): boolean | undefined {
+  return value === undefined || value === null || value === "" ? undefined : normalizeBoolean(value, false);
+}
+
 export function normalizeBoolean(value: unknown, defaultValue: boolean): boolean {
-  return typeof value === "boolean" ? value : defaultValue;
+  if (typeof value === "boolean") return value;
+  if (value === undefined || value === null) return defaultValue;
+  if (typeof value === "number") {
+    if (value === 1) return true;
+    if (value === 0) return false;
+  } else if (typeof value === "string") {
+    const word = value.trim().toLowerCase();
+    if (word === "") return defaultValue;
+    if (TRUE_WORDS.has(word)) return true;
+    if (FALSE_WORDS.has(word)) return false;
+  }
+  throw new InvalidArgumentError(`Expected true or false but got ${JSON.stringify(value)}.`);
 }
 
 export function parseDateInput(value?: string): Date | undefined {

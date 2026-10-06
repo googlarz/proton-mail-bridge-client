@@ -52,8 +52,12 @@ import {
   isValidEmail,
   isSelfAddress,
   lowerCaseAddress,
+  InvalidArgumentError,
   normalizeBoolean,
   normalizeLimit,
+  optionalBoolean,
+  optionalInteger,
+  optionalNumber,
   normalizeJsonValue,
   parseEmailId,
   parseEmails,
@@ -3497,7 +3501,7 @@ async function verifySentCopy(
 }
 
 export function getBulkMaxBatchSize(args: Record<string, unknown>): number {
-  return typeof args.maxBatchSize === "number" ? Math.min(args.maxBatchSize, 2000) : 500;
+  return normalizeLimit(args.maxBatchSize, 500, 1, 2000);
 }
 
 export function ensureBulkBatchSize(uidsLength: number, max: number): void {
@@ -5427,7 +5431,7 @@ export function createServer(
             subject: optionalString(args, "subject"),
             body,
             bodyEdits,
-            isHtml: typeof args.isHtml === "boolean" ? args.isHtml : undefined,
+            isHtml: optionalBoolean(args.isHtml),
             priority:
               priority === "high" || priority === "low" || priority === "normal"
                 ? priority
@@ -5904,7 +5908,7 @@ export function createServer(
           const getEmailsInput = {
             folder: optionalString(args, "folder"),
             limit: effectiveLimit,
-            offset: typeof args.offset === "number" ? args.offset : undefined,
+            offset: optionalInteger(args.offset, 0, 1_000_000),
             beforeUid: typeof args?.beforeUid === "number" ? args.beforeUid : undefined,
             sortByUid: (args?.sortByUid === "asc" || args?.sortByUid === "desc" ? args.sortByUid : undefined) as "asc" | "desc" | undefined,
             includeSnippet: normalizeBoolean(args.includeSnippet, false),
@@ -6063,14 +6067,14 @@ export function createServer(
               bcc: optionalString(args, "bcc"),
               subject: optionalString(args, "subject"),
               hasAttachment:
-                typeof args.hasAttachment === "boolean" ? args.hasAttachment : undefined,
+                optionalBoolean(args.hasAttachment),
               attachmentName: optionalString(args, "attachmentName"),
-              isRead: typeof args.isRead === "boolean" ? args.isRead : undefined,
-              isStarred: typeof args.isStarred === "boolean" ? args.isStarred : undefined,
+              isRead: optionalBoolean(args.isRead),
+              isStarred: optionalBoolean(args.isStarred),
               dateFrom: optionalString(args, "dateFrom"),
               dateTo: optionalString(args, "dateTo"),
-              sizeLarger: typeof args.sizeLarger === "number" ? args.sizeLarger : undefined,
-              sizeSmaller: typeof args.sizeSmaller === "number" ? args.sizeSmaller : undefined,
+              sizeLarger: optionalNumber(args.sizeLarger, 0, Number.MAX_SAFE_INTEGER),
+              sizeSmaller: optionalNumber(args.sizeSmaller, 0, Number.MAX_SAFE_INTEGER),
               listId: optionalString(args, "listId"),
               limit: effectiveLimit,
               includeSnippet: normalizeBoolean(args.includeSnippet, false),
@@ -6194,16 +6198,16 @@ export function createServer(
             to: optionalString(args, "to"),
             subject: optionalString(args, "subject"),
             hasAttachment:
-              typeof args.hasAttachment === "boolean" ? args.hasAttachment : undefined,
+              optionalBoolean(args.hasAttachment),
             label: optionalString(args, "label"),
             threadId: optionalString(args, "threadId"),
             senderDomain: optionalString(args, "senderDomain"),
-            isRead: typeof args.isRead === "boolean" ? args.isRead : undefined,
-            isStarred: typeof args.isStarred === "boolean" ? args.isStarred : undefined,
+            isRead: optionalBoolean(args.isRead),
+            isStarred: optionalBoolean(args.isStarred),
             dateFrom: optionalString(args, "dateFrom"),
             dateTo: optionalString(args, "dateTo"),
-            sizeLarger: typeof args.sizeLarger === "number" ? args.sizeLarger : undefined,
-            sizeSmaller: typeof args.sizeSmaller === "number" ? args.sizeSmaller : undefined,
+            sizeLarger: optionalNumber(args.sizeLarger, 0, Number.MAX_SAFE_INTEGER),
+            sizeSmaller: optionalNumber(args.sizeSmaller, 0, Number.MAX_SAFE_INTEGER),
           };
           if (accountManager.all().length === 1) {
             const result = await imapService.countMessages(countInput);
@@ -6591,13 +6595,13 @@ export function createServer(
         }
 
         case "top_senders": {
-          const topSendersLimit = typeof args.limit === "number" ? args.limit : undefined;
+          const topSendersLimit = optionalInteger(args.limit, 1, 200);
           const topSendersInput = {
             folder: optionalString(args, "folder"),
             since: optionalString(args, "since"),
             before: optionalString(args, "before"),
             limit: topSendersLimit,
-            scanLimit: typeof args.scanLimit === "number" ? args.scanLimit : undefined,
+            scanLimit: optionalInteger(args.scanLimit, 1, 20_000),
             excludeSelf: normalizeBoolean(args.excludeSelf, true),
           };
           if (accountManager.all().length === 1) {
@@ -7139,8 +7143,8 @@ export function createServer(
         }
 
         case "get_email_stats": {
-          const statsDays = typeof args.days === "number" ? args.days : 30;
-          const statsLimit = typeof args.limit === "number" ? args.limit : 2000;
+          const statsDays = normalizeLimit(args.days, 30, 1, 365);
+          const statsLimit = normalizeLimit(args.limit, 2000, 1, 10_000);
           if (accountManager.all().length === 1) {
             const folders = await imapService.getFolders();
             const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, statsDays, statsLimit);
@@ -7183,8 +7187,8 @@ export function createServer(
         }
 
         case "get_email_analytics": {
-          const analyticsDays = typeof args.days === "number" ? args.days : 30;
-          const analyticsLimit = typeof args.limit === "number" ? args.limit : 2000;
+          const analyticsDays = normalizeLimit(args.days, 30, 1, 365);
+          const analyticsLimit = normalizeLimit(args.limit, 2000, 1, 10_000);
           if (accountManager.all().length === 1) {
             const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, analyticsDays, analyticsLimit);
             return createTextResult(analyticsService.getEmailAnalytics(sample, config.smtp.username));
@@ -7603,10 +7607,10 @@ export function createServer(
         case "sync_emails":
         {
           const folder = optionalString(args, "folder");
-          const full = typeof args.full === "boolean" ? args.full : undefined;
-          const limitPerFolder = typeof args.limitPerFolder === "number" ? args.limitPerFolder : undefined;
+          const full = optionalBoolean(args.full);
+          const limitPerFolder = optionalInteger(args.limitPerFolder, 1, 50_000);
           const includeAttachmentText =
-            typeof args.includeAttachmentText === "boolean" ? args.includeAttachmentText : undefined;
+            optionalBoolean(args.includeAttachmentText);
 
           // backgroundSyncService.runNow() always runs the *fixed* background-
           // sync config (autoSyncFolder/autoSyncFull/autoSyncLimitPerFolder —
@@ -7736,14 +7740,14 @@ export function createServer(
             senderDomain: optionalString(args, "senderDomain"),
             subject: optionalString(args, "subject"),
             hasAttachment:
-              typeof args.hasAttachment === "boolean" ? args.hasAttachment : undefined,
+              optionalBoolean(args.hasAttachment),
             attachmentName: optionalString(args, "attachmentName"),
-            isRead: typeof args.isRead === "boolean" ? args.isRead : undefined,
-            isStarred: typeof args.isStarred === "boolean" ? args.isStarred : undefined,
+            isRead: optionalBoolean(args.isRead),
+            isStarred: optionalBoolean(args.isStarred),
             mailboxRole: optionalString(args, "mailboxRole"),
             dateFrom: optionalString(args, "dateFrom"),
             dateTo: optionalString(args, "dateTo"),
-            limit: typeof args.limit === "number" ? args.limit : undefined,
+            limit: optionalInteger(args.limit, 1, 1000),
           };
           const indexedAccount = resolveAccountArg(args);
           // Serve fresh data: a cheap UIDNEXT/message-count probe, refreshing only when the
@@ -7819,8 +7823,8 @@ export function createServer(
           const threadsInput = {
             query: optionalString(args, "query"),
             label: optionalString(args, "label"),
-            limit: typeof args.limit === "number" ? args.limit : undefined,
-            offset: typeof args.offset === "number" ? args.offset : undefined,
+            limit: optionalInteger(args.limit, 1, 1000),
+            offset: optionalInteger(args.offset, 0, 1_000_000),
           };
           if (accountManager.all().length === 1) {
             await maybeRefreshLocalIndex(imapService, localIndexService, {
@@ -7882,8 +7886,8 @@ export function createServer(
 
         case "get_actionable_threads":
         {
-          const limit = typeof args.limit === "number" ? args.limit : 50;
-          const offset = typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : 0;
+          const limit = normalizeLimit(args.limit, 50, 1, 1000);
+          const offset = normalizeLimit(args.offset, 0, 0, 1_000_000);
           // Fan-out merge: ask every account for its own top-`limit` actionable threads
           // (each account's own getActionableThreads already sorts by score, then
           // recency — see local-index-service.ts), tag every thread/message id with its
@@ -7942,8 +7946,8 @@ export function createServer(
 
         case "get_inbox_digest":
         {
-          const limit = typeof args.limit === "number" ? args.limit : 10;
-          const offset = typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : 0;
+          const limit = normalizeLimit(args.limit, 10, 1, 1000);
+          const offset = normalizeLimit(args.offset, 0, 0, 1_000_000);
           // Each account is asked for offset+limit+1 rows per section: enough to slice the requested
           // page from the merged list and to know whether another page exists.
           const perAccountWindow = offset + limit + 1;
@@ -7965,7 +7969,7 @@ export function createServer(
               });
               const result = await bundle.localIndexService.getInboxDigest({
                 limit: perAccountWindow,
-                minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : undefined,
+                minAgeHours: optionalNumber(args.minAgeHours, 0, 87_600),
               });
               const slug = slugForBundle(bundle);
               return {
@@ -8014,8 +8018,8 @@ export function createServer(
 
         case "get_follow_up_candidates":
         {
-          const limit = typeof args.limit === "number" ? args.limit : 25;
-          const offset = typeof args.offset === "number" ? Math.max(0, Math.floor(args.offset)) : 0;
+          const limit = normalizeLimit(args.limit, 25, 1, 1000);
+          const offset = normalizeLimit(args.offset, 0, 0, 1_000_000);
           // Fan-out merge: ask every account for its own top-`limit` follow-up
           // candidates (each account's own getFollowUpCandidates sorts by ageHours, then
           // score), tag ids with the account's slug, concatenate, re-sort by that same
@@ -8030,7 +8034,7 @@ export function createServer(
               });
               const result = await bundle.localIndexService.getFollowUpCandidates({
                 limit: limit + offset,
-                minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : undefined,
+                minAgeHours: optionalNumber(args.minAgeHours, 0, 87_600),
                 pendingOn:
                   args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any"
                     ? args.pendingOn
@@ -8056,7 +8060,7 @@ export function createServer(
           const result = {
             generatedAt: new Date().toISOString(),
             indexUpdatedAt: perAccount.map((entry) => entry.indexUpdatedAt).filter(Boolean).sort().reverse()[0],
-            minAgeHours: typeof args.minAgeHours === "number" ? args.minAgeHours : 24,
+            minAgeHours: (optionalNumber(args.minAgeHours, 0, 87_600) ?? 24),
             pendingOn: args.pendingOn === "you" || args.pendingOn === "them" || args.pendingOn === "any" ? args.pendingOn : "you",
             total: totalCount,
             ...paginationFields(totalCount, offset, followUpBudget.threads.length, followUpBudget.trimmed),
@@ -8075,7 +8079,7 @@ export function createServer(
 
         case "find_document_threads":
         {
-          const limit = typeof args.limit === "number" ? args.limit : 25;
+          const limit = normalizeLimit(args.limit, 25, 1, 1000);
           // Fan-out merge: ask every account for its own top-`limit` document threads
           // (each account's own findDocumentThreads sorts by document count, then
           // recency), tag ids (including each document's own emailId) with the
@@ -8135,7 +8139,7 @@ export function createServer(
 
         case "prepare_meeting_context":
         {
-          const limit = typeof args.limit === "number" ? args.limit : 10;
+          const limit = normalizeLimit(args.limit, 10, 1, 1000);
           // Fan-out merge: ask every account for its own top-`limit` meeting-prep
           // threads (each account's own getMeetingPrep sorts by recency — see
           // local-index-service.ts), tag ids with the account's slug, concatenate,
@@ -8688,6 +8692,9 @@ export function createServer(
     } catch (error) {
       if (error instanceof McpError) {
         throw error;
+      }
+      if (error instanceof InvalidArgumentError) {
+        throw new McpError(ErrorCode.InvalidParams, error.message);
       }
       logger.error("Tool call failed", "MCPServer", { name, error });
       if (isLikelyAuthenticationError(error)) {
