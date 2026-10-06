@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [2.4.1] — 2026-10-06
+
+### Changed
+- Dependency patch updates: `@modelcontextprotocol/sdk` 1.32.1, `imapflow` 2.2.6, `mailparser` 3.9.36, `nodemailer` 10.0.14 (10.0.15 was a day old and not picked up). No code changes; the full suite and the pack smoke test pass on the updated tree.
+
 ## [2.4.0] — 2026-10-06
 
 A second, broader review pass (server, CLI, installers) plus every issue found along the way. Each fix has a test that fails without it.
