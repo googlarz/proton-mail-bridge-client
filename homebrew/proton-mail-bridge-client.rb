@@ -7,8 +7,8 @@ require "language/node"
 class ProtonMailBridgeClient < Formula
   desc "Full-featured CLI and Claude Desktop MCP for Proton Mail via Proton Bridge"
   homepage "https://github.com/googlarz/proton-mail-bridge-client"
-  url "https://registry.npmjs.org/proton-mail-bridge-client/-/proton-mail-bridge-client-2.4.0.tgz"
-  sha256 "a3df8eb63e7ac8c10fd5ce8606d0c042a5249423e8c7cde87e6c1584a431496e"
+  url "https://registry.npmjs.org/proton-mail-bridge-client/-/proton-mail-bridge-client-2.4.1.tgz"
+  sha256 "6666b5c60ff38040e581a57f3048cebf317c91eff1c6bd9a905876d18be78840"
   license "MIT"
 
   # Needs Node >= 24 (package.json engines). Homebrew has no way to state a minimum version for
@@ -36,6 +36,6 @@ class ProtonMailBridgeClient < Formula
 
   test do
     output = shell_output("#{bin}/proton-mail-bridge-client --version 2>&1")
-    assert_match "2.4.0", output
+    assert_match "2.4.1", output
   end
 end
