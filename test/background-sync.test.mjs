@@ -274,3 +274,49 @@ test("background sync backs off cleanly on auth failures", async () => {
     service.stop();
   }
 });
+
+const quietLog = { info() {}, warn() {}, error() {}, debug() {} };
+
+function syncDeps(collect) {
+  const imapService = { collectEmailsForIndex: collect, async waitForMailboxChanges() { return { folder: "INBOX", timeoutMs: 1000, checkedAt: "now", changed: false, events: [] }; } };
+  const localIndexService = {
+    async getSyncCheckpointMap() { return {}; },
+    async recordSnapshot(snapshot) { return { path: "p", staleThresholdMinutes: 60, isStale: false, folderCount: 0, labelCount: 0, threadCount: 0, storedMessageCount: 0, dedupedMessageCount: 0, syncCheckpoints: [], folders: [], updatedAt: snapshot.syncedAt }; },
+  };
+  return { imapService, localIndexService };
+}
+
+test("an account identity mismatch is a failure that needs the user, not a transient one retried every few seconds", async () => {
+  const { AccountIdentityMismatchError } = await import("../dist/utils/account-identity.js");
+  const { imapService, localIndexService } = syncDeps(async () => { throw new AccountIdentityMismatchError("/data", "a@example.com", "b@example.com"); });
+  const service = new BackgroundSyncService(createConfig(), imapService, localIndexService, quietLog);
+  service.start();
+  try {
+    const status = await service.runNow("unit-test");
+    assert.equal(status.lastFailureKind, "auth", "slow back-off, like a wrong password");
+    assert.ok(status.backoffUntil);
+    assert.ok(new Date(status.backoffUntil).getTime() - Date.now() > 60_000, "the retry is minutes away, not seconds");
+  } finally {
+    service.stop();
+  }
+});
+
+test("a successful sync clears the back-off left by an earlier failure", async () => {
+  let fail = true;
+  const { imapService, localIndexService } = syncDeps(async () => {
+    if (fail) throw new Error("connect ECONNREFUSED");
+    return { syncedAt: "2026-03-24T12:00:00.000Z", full: false, folders: [], folderStats: [{ folder: "INBOX", fetched: 0, total: 0 }], emails: [] };
+  });
+  const service = new BackgroundSyncService(createConfig(), imapService, localIndexService, quietLog);
+  service.start();
+  try {
+    const failed = await service.runNow("unit-test");
+    assert.ok(failed.backoffUntil, "a failure sets a back-off");
+    fail = false;
+    const ok = await service.runNow("unit-test");
+    assert.equal(ok.backoffUntil, undefined, "recovery clears it");
+    assert.equal(ok.lastError, undefined);
+  } finally {
+    service.stop();
+  }
+});

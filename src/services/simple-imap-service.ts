@@ -739,7 +739,11 @@ export class SimpleIMAPService {
   private lastIdleError?: string;
   private _lastOpTs = 0;
   private _connectingPromise?: Promise<void>;
-  private readonly _idleActive = new Map<string, boolean>();
+  // One running IDLE session per folder; later callers wait on it (see waitForMailboxChanges).
+  private readonly _idleSession = new Map<
+    string,
+    Promise<{ folder: string; timeoutMs: number; checkedAt: string; changed: boolean; events: Array<Record<string, unknown>> }>
+  >();
   // Operations currently waiting for the mailbox lock (see withMailbox); the IDLE watcher
   // yields while this is non-zero.
   private _pendingMailboxOps = 0;
@@ -797,21 +801,24 @@ export class SimpleIMAPService {
   }
 
   async disconnect(): Promise<void> {
-    if (!this.client) {
+    const client = this.client;
+    if (!client) {
       return;
     }
+    // Forget this client now, not after the logout: a call that connects while the logout is still running
+    // installs a new client, and clearing `this.client` afterwards used to forget THAT one, leaving it open
+    // and never reused (one leaked Bridge session each time).
+    this.client = undefined;
 
     try {
-      if (this.client.usable) {
-        await this.client.logout();
+      if (client.usable) {
+        await client.logout();
       } else {
-        this.client.close();
+        client.close();
       }
     } catch (error) {
       this.log.warn("IMAP disconnect failed", "IMAPService", error);
-      this.client.close();
-    } finally {
-      this.client = undefined;
+      client.close();
     }
   }
 
@@ -850,17 +857,43 @@ export class SimpleIMAPService {
     const timeoutMs = normalizeLimit(input.timeoutMs, this.config.runtime.idleMaxSeconds * 1000, 1_000, 300_000);
 
     // IDLE semaphore: prevent stacking concurrent IDLE sessions per folder,
-    // which would exhaust Proton Bridge's connection limit.
-    if (this._idleActive.get(folder)) {
+    // which would exhaust Proton Bridge's connection limit. A caller that arrives while a session is
+    // already watching (typically the background watcher, while the wait_for_mailbox_changes tool is
+    // called) does not start another one: it waits, up to its own timeout, for the next session to see a
+    // change, instead of answering "no changes" at once.
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const active = this._idleSession.get(folder);
+      if (!active) break;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      let timer: NodeJS.Timeout | undefined;
+      const result = await Promise.race([
+        active.catch(() => undefined),
+        new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), remaining); timer.unref?.(); }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (result?.changed) return { ...result, timeoutMs };
+      // The session ended without a change (or its caller failed): give the next one a moment to start,
+      // then wait on it, until this caller's own time is up.
+      await new Promise<void>((resolve) => { const t = setTimeout(resolve, 20); t.unref?.(); });
+    }
+    if (this._idleSession.get(folder)) {
       return { folder, timeoutMs, checkedAt: new Date().toISOString(), changed: false, events: [] };
     }
-    this._idleActive.set(folder, true);
 
-    const client = await this.ensureConnected();
+    // The mark must be cleared whatever happens, including a failure to connect: it used to be set before
+    // connecting, outside the try/finally, so one failed connect (Bridge down at startup) left the folder
+    // "watched" forever and every later call returned "no changes" instantly.
+    const session = (async () => {
+      const client = await this.ensureConnected();
+      return this.waitForMailboxChangesWithClient(client, folder, timeoutMs, true);
+    })();
+    this._idleSession.set(folder, session);
     try {
-      return await this.waitForMailboxChangesWithClient(client, folder, timeoutMs, true);
+      return await session;
     } finally {
-      this._idleActive.delete(folder);
+      if (this._idleSession.get(folder) === session) this._idleSession.delete(folder);
     }
   }
 
@@ -923,7 +956,16 @@ export class SimpleIMAPService {
     client.on("expunge", onExpunge);
     client.on("flags", onFlags);
 
-    const lock = await client.getMailboxLock(folder, { readOnly: true });
+    let lock;
+    try {
+      lock = await client.getMailboxLock(folder, { readOnly: true });
+    } catch (error) {
+      // The client is reused: listeners left on it would keep collecting events for a call that is gone.
+      client.off("exists", onExists);
+      client.off("expunge", onExpunge);
+      client.off("flags", onFlags);
+      throw error;
+    }
 
     // Yield to operations waiting for the lock (see IDLE_YIELD_* above). The graceful
     // break is retried on every poll because preCheck only exists once IDLE has actually
@@ -975,7 +1017,7 @@ export class SimpleIMAPService {
       // still "usable" — so ensureConnected() won't reconnect, and every
       // subsequent idle() returns instantly. That turns the caller's watch loop
       // into a 100%-CPU busy spin (observed: an orphaned process burning a full
-      // core for days). Our IDLE calls are serialized per folder via _idleActive
+      // core for days). Our IDLE calls are serialized per folder via _idleSession
       // and awaited by the caller, so no legitimate IDLE can be in flight here —
       // if the flag is set, it is stuck. Clear it so idle() actually enters IDLE
       // and blocks.

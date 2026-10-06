@@ -1,6 +1,7 @@
 import type { BackgroundSyncStatus, ProtonMailConfig } from "../types/index.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { LocalIndexService } from "./local-index-service.js";
+import { AccountIdentityMismatchError } from "../utils/account-identity.js";
 import { isLikelyAuthenticationError, SimpleIMAPService } from "./simple-imap-service.js";
 
 const AUTH_BACKOFF_MIN_MS = 5 * 60_000;
@@ -11,6 +12,13 @@ const TRANSIENT_BACKOFF_MAX_MS = 2 * 60_000;
 // as a hard floor so the idle loop can never busy-spin, independent of how the
 // underlying IMAP client behaves.
 const IDLE_ITERATION_FLOOR_MS = 1_000;
+
+// "auth" backs off for minutes and, for the IDLE loop, stops retrying: use it for anything that only the
+// user can fix. A data directory that belongs to another account is exactly that; retrying it every
+// few seconds as if it were a network blip only floods the log.
+function classifyFailure(error: unknown): "auth" | "transient" {
+  return isLikelyAuthenticationError(error) || error instanceof AccountIdentityMismatchError ? "auth" : "transient";
+}
 
 export class BackgroundSyncService {
   private readonly status: BackgroundSyncStatus;
@@ -129,8 +137,9 @@ export class BackgroundSyncService {
         this.status.lastIdleError = undefined;
         this.authFailureCount = 0;
         this.transientFailureCount = 0;
+        this.status.backoffUntil = undefined;
       } catch (error) {
-        failureKind = isLikelyAuthenticationError(error) ? "auth" : "transient";
+        failureKind = classifyFailure(error);
         this.status.lastError = error instanceof Error ? error.message : String(error);
         this.status.lastFailureKind = failureKind;
         this.status.lastFailureMessage = this.status.lastError;
@@ -236,7 +245,7 @@ export class BackgroundSyncService {
           }
         } catch (error) {
           this.status.lastIdleError = error instanceof Error ? error.message : String(error);
-          const failureKind = isLikelyAuthenticationError(error) ? "auth" : "transient";
+          const failureKind = classifyFailure(error);
           this.log.warn("Mailbox IDLE watch failed", "BackgroundSyncService", {
             folder: this.primaryIdleFolder,
             failureKind,

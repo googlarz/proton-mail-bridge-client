@@ -9,7 +9,13 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
   error: 40,
 };
 
-function normalizeData(data: unknown): unknown {
+const MAX_LOG_DATA_DEPTH = 12;
+
+// Turns log data into plain JSON-safe values. `ancestors` holds the objects on the path from the root to
+// here: meeting one of them again is a cycle (marked, not followed), while the same object appearing twice
+// side by side is just shared and is logged in full both times. Depth is bounded so a pathological object
+// cannot overflow the stack: this runs inside catch blocks, where a throw becomes an unhandled rejection.
+function normalizeData(data: unknown, ancestors: Set<object> = new Set()): unknown {
   if (data instanceof Error) {
     return {
       name: data.name,
@@ -18,31 +24,36 @@ function normalizeData(data: unknown): unknown {
     };
   }
 
-  if (Array.isArray(data)) {
-    return data.map((value) => normalizeData(value));
-  }
-
-  if (data instanceof Set) {
-    return [...data].map((value) => normalizeData(value));
-  }
-
-  if (data instanceof Map) {
-    return Object.fromEntries(
-      [...data.entries()].map(([key, value]) => [String(key), normalizeData(value)]),
-    );
-  }
-
   if (typeof data === "bigint") {
     return data.toString();
   }
 
-  if (data && typeof data === "object") {
-    return Object.fromEntries(
-      Object.entries(data).map(([key, value]) => [key, normalizeData(value)]),
-    );
+  if (!data || typeof data !== "object") {
+    return data;
   }
 
-  return data;
+  if (ancestors.has(data)) {
+    return "[Circular]";
+  }
+  if (ancestors.size >= MAX_LOG_DATA_DEPTH) {
+    return "[Truncated]";
+  }
+
+  ancestors.add(data);
+  try {
+    if (Array.isArray(data)) {
+      return data.map((value) => normalizeData(value, ancestors));
+    }
+    if (data instanceof Set) {
+      return [...data].map((value) => normalizeData(value, ancestors));
+    }
+    if (data instanceof Map) {
+      return Object.fromEntries([...data.entries()].map(([key, value]) => [String(key), normalizeData(value, ancestors)]));
+    }
+    return Object.fromEntries(Object.entries(data).map(([key, value]) => [key, normalizeData(value, ancestors)]));
+  } finally {
+    ancestors.delete(data);
+  }
 }
 
 export class Logger {

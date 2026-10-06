@@ -8731,6 +8731,30 @@ export function createServer(
   };
 }
 
+// Stops every account's timers, then closes connections and indexes, waiting at most `timeoutMs` for the
+// closing to finish. A Bridge that never answers LOGOUT must not hold the process up (imapflow's own socket
+// timeout is minutes, and a pending shutdown ignores further signals).
+export async function stopAllAccounts(
+  bundles: Array<Pick<AccountBundle, "backgroundSyncService" | "deliveryQueueService" | "snoozeService" | "imapService" | "smtpService" | "localIndexService">>,
+  timeoutMs = 3_000,
+): Promise<void> {
+  for (const bundle of bundles) {
+    bundle.backgroundSyncService.stop();
+    bundle.deliveryQueueService.stop();
+    bundle.snoozeService.stop();
+  }
+  const closing = Promise.allSettled(
+    bundles.flatMap((bundle) => [
+      Promise.resolve().then(() => bundle.imapService.disconnect()),
+      Promise.resolve().then(() => bundle.smtpService.close()),
+      Promise.resolve().then(() => bundle.localIndexService.close()),
+    ]),
+  );
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([closing, new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); })]);
+  if (timer) clearTimeout(timer);
+}
+
 export async function main(): Promise<void> {
   const config = buildConfigFromEnv();
   // Create the data directory explicitly with a restrictive mode as its very
@@ -8747,7 +8771,7 @@ export async function main(): Promise<void> {
   // Explicitly chmod it too so the restriction actually takes effect on
   // upgrade, not only on a brand-new dataDir.
   await chmod(config.dataDir, 0o700).catch(() => {});
-  const { server, smtpService, imapService, backgroundSyncService, deliveryQueueService, snoozeService, accountManager } = createServer(config, {
+  const { server, accountManager } = createServer(config, {
     startBackgroundSync: true,
   });
 
@@ -8763,14 +8787,7 @@ export async function main(): Promise<void> {
     }
     shuttingDown = true;
     logger.info(`Received ${reason}, shutting down`, "MCPServer");
-    backgroundSyncService.stop();
-    deliveryQueueService.stop();
-    snoozeService.stop();
-    await Promise.allSettled([
-      imapService.disconnect(),
-      smtpService.close(),
-      ...accountManager.all().map((bundle) => bundle.localIndexService.close()),
-    ]);
+    await stopAllAccounts(accountManager.all());
     process.exit(0);
   };
 
