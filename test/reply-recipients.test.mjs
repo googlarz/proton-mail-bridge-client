@@ -91,3 +91,18 @@ test("a reply to someone else's message still honours that message's Reply-To", 
   const detail = { from: [{ address: "list@example.org" }], replyTo: [{ address: "owner@example.org" }], to: [{ address: "me@example.com" }], cc: [] };
   assert.deepEqual(getReplyRecipients(detail, "me@example.com", false), { to: ["owner@example.org"], cc: [] });
 });
+
+test("reply-all keeps the original sender in Cc when Reply-To redirects the To", () => {
+  const detail = detailWithFrom(["alice@example.com"], { to: ["owner@example.com", "bob@example.com"], replyTo: ["list@example.com"] });
+  const recipients = getReplyRecipients(detail, "owner@example.com", true);
+  assert.deepEqual(recipients.to, ["list@example.com"]);
+  assert.deepEqual(recipients.cc.sort(), ["alice@example.com", "bob@example.com"]);
+  assert.deepEqual(getReplyRecipients(detail, "owner@example.com", false).cc, []);
+});
+
+test("reply-all without Reply-To does not duplicate the sender", () => {
+  const detail = detailWithFrom(["alice@example.com"], { to: ["owner@example.com", "bob@example.com"] });
+  const recipients = getReplyRecipients(detail, "owner@example.com", true);
+  assert.deepEqual(recipients.to, ["alice@example.com"]);
+  assert.deepEqual(recipients.cc, ["bob@example.com"]);
+});

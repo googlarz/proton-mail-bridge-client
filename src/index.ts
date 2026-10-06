@@ -2520,7 +2520,8 @@ export function getReplyRecipients(
     return { to, cc: [] };
   }
 
-  const ccPool = notSelf([...addressValues(detail.to), ...addressValues(detail.cc)]).filter(
+  // Reply-To redirected the primary recipient; reply-all must still reach the original sender.
+  const ccPool = notSelf([...addressValues(detail.from), ...addressValues(detail.to), ...addressValues(detail.cc)]).filter(
     (address) => !to.some((recipient) => lowerCaseAddress(recipient) === lowerCaseAddress(address)),
   );
 
