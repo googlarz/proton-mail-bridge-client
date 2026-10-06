@@ -34,6 +34,7 @@ import {
   splitNonAsciiCriteria,
   nextDay,
   InvalidArgumentError,
+  decodeAttachmentText,
   isPathInside,
   normalizeLimit,
   optionalBoolean,
@@ -1892,20 +1893,18 @@ export class SimpleIMAPService {
     };
   }
 
-  private extractAttachmentText(attachment: { content: Buffer; contentType?: string }): string | undefined {
+  private extractAttachmentText(attachment: { content: Buffer; contentType?: string; charset?: string }): string | undefined {
     // GAP-12: guard zero-byte attachments before calling toString()
     if (!attachment.content || attachment.content.length === 0 || attachment.content.length > MAX_ATTACHMENT_TEXT_BYTES) {
       return undefined;
     }
     const contentType = attachment.contentType?.toLowerCase();
-    if (contentType === "text/html") {
-      return stripHtmlToText(attachment.content.toString("utf8"));
-    }
-    if (contentType === "text/calendar") {
-      return summarizeCalendarText(attachment.content.toString("utf8"));
-    }
-    if (isTextLikeMimeType(attachment.contentType)) {
-      return attachment.content.toString("utf8");
+    if (contentType === "text/html" || contentType === "text/calendar" || isTextLikeMimeType(attachment.contentType)) {
+      const text = decodeAttachmentText(attachment.content, attachment.charset);
+      if (text === undefined) return undefined;
+      if (contentType === "text/html") return stripHtmlToText(text);
+      if (contentType === "text/calendar") return summarizeCalendarText(text);
+      return text;
     }
     return undefined;
   }
@@ -4300,7 +4299,7 @@ export class SimpleIMAPService {
 
   private mapParsedAttachmentsWithContent(
     parsed: ParsedMail,
-  ): Array<EmailDetail["attachments"][number] & { content: Buffer; checksum?: string }> {
+  ): Array<EmailDetail["attachments"][number] & { content: Buffer; checksum?: string; charset?: string }> {
     return (parsed.attachments ?? []).map((attachment, index) => ({
       id: createParsedAttachmentId(attachment, index),
       filename: attachment.filename,
@@ -4317,6 +4316,7 @@ export class SimpleIMAPService {
         cid: attachment.cid,
       }),
       content: attachment.content,
+      charset: (attachment.headers?.get?.("content-type") as { params?: { charset?: string } } | undefined)?.params?.charset,
     }));
   }
 

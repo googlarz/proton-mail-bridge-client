@@ -6985,12 +6985,17 @@ export function createServer(
         case "snooze_email": {
           ensureEmailActionAllowed(config.runtime, "archive");
           const wakeAt = requireString(args, "wakeAt");
-          const wakeAtTime = new Date(wakeAt).getTime();
+          // A date-time with no zone ("2026-03-05T09:30:00") is read by JavaScript in the server's local time,
+          // which is not what a caller reading "ISO 8601" expects and changes with the machine. Read it as UTC.
+          const wakeAtTime = new Date(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(wakeAt.trim()) ? `${wakeAt.trim()}Z` : wakeAt).getTime();
           if (Number.isNaN(wakeAtTime)) {
             throw new McpError(ErrorCode.InvalidParams, `wakeAt is not a valid ISO 8601 timestamp: ${wakeAt}`);
           }
           if (wakeAtTime <= Date.now()) {
             throw new McpError(ErrorCode.InvalidParams, "wakeAt must be in the future.");
+          }
+          if (wakeAtTime > Date.now() + 10 * 365 * 24 * 60 * 60 * 1000) {
+            throw new McpError(ErrorCode.InvalidParams, "wakeAt is more than ten years away.");
           }
           // emailId carries the same "<slug>::" prefix as everywhere else — resolve it
           // to that account's own snoozeService instead of always the primary's, and

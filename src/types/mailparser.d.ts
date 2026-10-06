@@ -17,6 +17,8 @@ declare module "mailparser" {
     cid?: string;
     checksum?: string;
     contentDisposition?: string;
+    // The attachment part's own headers (mailparser keeps them): content-type carries the charset parameter.
+    headers?: Map<string, unknown>;
     content: Buffer;
   }
 

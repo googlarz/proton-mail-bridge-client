@@ -9,7 +9,7 @@ import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
-import { SimpleIMAPService } from "./simple-imap-service.js";
+import { isLikelyConnectionError, SimpleIMAPService } from "./simple-imap-service.js";
 
 // Same persistence pattern as DeliveryQueueService/DraftStoreService: atomic
 // temp+rename writes, corrupted-file backup, orphaned .tmp cleanup, in-process
@@ -24,6 +24,15 @@ const CHECK_INTERVAL_MS = 15_000;
 // or deleted before wakeAt so moveEmail can no longer find it), stop retrying
 // every 15s forever and mark the snooze terminally "failed" instead.
 const MAX_WAKE_FAILURES = 5;
+
+// A wake that failed because Bridge is unreachable, the move timed out, or the server is in read-only mode is
+// not a problem with the snooze: retrying later will work. Counting those toward MAX_WAKE_FAILURES marked a
+// snooze "failed" for good after about 75 seconds of an outage, stranding the message in the snooze folder.
+function isTransientWakeFailure(error: unknown): boolean {
+  if (isLikelyConnectionError(error)) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith("Timed out after") || /read-only mode/i.test(message) || (error as { code?: string } | undefined)?.code === "NoConnection";
+}
 const SNOOZE_WAKE_TIMEOUT_MS = 30_000;
 // How long a terminal (woken/canceled/failed) record is kept before
 // checkDue() prunes it — otherwise this JSON file grows without bound for
@@ -103,6 +112,11 @@ export class SnoozeService {
 
   async snooze(emailId: string, wakeAt: string): Promise<SnoozeRecord> {
     const { folder: originalFolder } = parseEmailId(emailId);
+    if (originalFolder === SNOOZE_FOLDER) {
+      // It would be recorded as "originally in the snooze folder", so waking it would move it from there to
+      // there and it would never come back.
+      throw new Error("This message is already snoozed (it is in the snooze folder). Use cancel_snooze on its snooze first.");
+    }
     await this.ensureSnoozeFolder();
     const moved = await this.imapService.moveEmail(emailId, SNOOZE_FOLDER);
     if (!moved.targetEmailId) {
@@ -159,7 +173,7 @@ export class SnoozeService {
   // stale-lock timeout and have the lock stolen mid-move by another
   // process, silently reintroducing the exact lost-update race that lock
   // exists to prevent.
-  private async wake(id: string, status: "woken" | "canceled"): Promise<SnoozeRecord> {
+  private async wake(id: string, status: "woken" | "canceled", options: { fromFailed?: boolean } = {}): Promise<SnoozeRecord> {
     // The locked callback reports whether THIS call is the one that flipped
     // pending -> waking, not just the record's resulting status — a status of
     // "waking" alone doesn't say who put it there, and treating any "waking"
@@ -172,9 +186,12 @@ export class SnoozeService {
       if (!record) {
         throw new Error(`Snoozed email not found for id ${id}`);
       }
-      if (record.status !== "pending") {
-        return { record, claimedByMe: false };
+      // A failed snooze can be retried by hand (cancel_snooze): the message may still be in the snooze folder.
+      const wakeable = record.status === "pending" || (options.fromFailed === true && record.status === "failed");
+      if (!wakeable) {
+        return { record, claimedByMe: false, revertTo: "pending" as const };
       }
+      const revertTo = record.status === "failed" ? ("failed" as const) : ("pending" as const);
       record.status = "waking";
       // Tag the claim with this process's identity — see the ownerPid
       // comment on SnoozeRecord and recoverInterruptedWakes() below for why
@@ -183,7 +200,7 @@ export class SnoozeService {
       record.ownerPid = process.pid;
       record.claimedAt = new Date().toISOString();
       await this.save(store);
-      return { record, claimedByMe: true };
+      return { record, claimedByMe: true, revertTo };
     });
 
     if (!claim.claimedByMe) {
@@ -226,7 +243,10 @@ export class SnoozeService {
         const store = await this.loadUnlocked();
         const record = store.items[id];
         if (record && record.status === "waking") {
-          record.status = "pending";
+          record.status = claim.revertTo;
+          if (claim.revertTo === "failed") {
+            record.failureReason = error instanceof Error ? error.message : String(error);
+          }
           await this.save(store);
         }
       });
@@ -259,7 +279,8 @@ export class SnoozeService {
   }
 
   async cancel(id: string): Promise<SnoozeRecord> {
-    return this.wake(id, "canceled");
+    const record = await this.get(id);
+    return this.wake(id, "canceled", { fromFailed: record.status === "failed" });
   }
 
   // Polls for the winning wake() caller's outcome instead of issuing a second
@@ -310,12 +331,15 @@ export class SnoozeService {
           const record = store.items[item.id];
           if (record && record.status === "pending") {
             record.failureReason = error instanceof Error ? error.message : String(error);
-            record.failureCount = (record.failureCount ?? 0) + 1;
-            // Cap retries — e.g. the email was moved or deleted before
-            // wakeAt, so moveEmail will never succeed. Without this, checkDue
-            // would retry the same doomed wake every 15s forever.
-            if (record.failureCount >= MAX_WAKE_FAILURES) {
-              record.status = "failed";
+            // Only a failure that retrying cannot fix counts toward the cap: an outage or a read-only
+            // server just leaves the snooze pending until it can be woken.
+            if (!isTransientWakeFailure(error)) {
+              record.failureCount = (record.failureCount ?? 0) + 1;
+              // Cap retries — e.g. the email was moved or deleted before wakeAt, so moveEmail will never
+              // succeed. Without this, checkDue would retry the same doomed wake every 15s forever.
+              if (record.failureCount >= MAX_WAKE_FAILURES) {
+                record.status = "failed";
+              }
             }
             await this.save(store);
           }

@@ -970,6 +970,40 @@ export function isPathInside(parent: string, child: string, separator: string = 
   return child.startsWith(parent.endsWith(separator) ? parent : parent + separator);
 }
 
+// Decodes the bytes of a text attachment. The charset the sender declared is honoured (windows-1250,
+// iso-8859-2... are common in mail from Poland and Czechia), a byte order mark is read and removed, and data
+// that is really binary (NUL bytes, or mostly bytes that are not valid text) is not returned as text.
+export function decodeAttachmentText(content: Buffer, declaredCharset?: string): string | undefined {
+  if (content.length === 0) return undefined;
+  let label = (declaredCharset ?? "").trim().toLowerCase().replace(/^["']|["']$/g, "");
+  let bytes = content;
+  if (content.length >= 3 && content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf) {
+    label = "utf-8";
+    bytes = content.subarray(3);
+  } else if (content.length >= 2 && content[0] === 0xff && content[1] === 0xfe) {
+    label = "utf-16le";
+    bytes = content.subarray(2);
+  } else if (content.length >= 2 && content[0] === 0xfe && content[1] === 0xff) {
+    label = "utf-16be";
+    bytes = content.subarray(2);
+  } else if (bytes.subarray(0, 8192).includes(0)) {
+    return undefined;
+  }
+  let decoder: InstanceType<typeof TextDecoder>;
+  try {
+    decoder = new TextDecoder(label || "utf-8");
+  } catch {
+    decoder = new TextDecoder("utf-8");
+  }
+  const text = decoder.decode(bytes);
+  let replacements = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === 0xfffd) replacements += 1;
+  }
+  if (text.length > 0 && replacements / text.length > 0.1) return undefined;
+  return text;
+}
+
 export function isTextLikeMimeType(mimeType?: string): boolean {
   if (!mimeType) {
     return false;
