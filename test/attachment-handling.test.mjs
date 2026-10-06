@@ -49,11 +49,11 @@ test("sanitizeFileName keeps a very long name within the 255-byte limit and keep
 // ---- isPathInside --------------------------------------------------------------------------------------
 
 test("isPathInside works for ordinary directories and for a filesystem root", () => {
-  assert.equal(isPathInside("/a/b", "/a/b/c.txt"), true);
-  assert.equal(isPathInside("/a/b", "/a/b"), true);
-  assert.equal(isPathInside("/a/b", "/a/bc/c.txt"), false);
-  assert.equal(isPathInside("/a/b", "/a/c.txt"), false);
-  assert.equal(isPathInside("/", "/c.txt"), true, "a download directory at the filesystem root");
+  assert.equal(isPathInside("/a/b", "/a/b/c.txt", "/"), true);
+  assert.equal(isPathInside("/a/b", "/a/b", "/"), true);
+  assert.equal(isPathInside("/a/b", "/a/bc/c.txt", "/"), false);
+  assert.equal(isPathInside("/a/b", "/a/c.txt", "/"), false);
+  assert.equal(isPathInside("/", "/c.txt", "/"), true, "a download directory at the filesystem root");
   assert.equal(isPathInside("C:\\", "C:\\a.txt", "\\"), true);
   assert.equal(isPathInside("C:\\dl", "C:\\dl\\a.txt", "\\"), true);
   assert.equal(isPathInside("C:\\dl", "C:\\dlx\\a.txt", "\\"), false);
