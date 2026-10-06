@@ -902,6 +902,15 @@ export function isSelfAddress(candidate: string | undefined, ownerEmail: string 
   return stripPlusTag(a) === stripPlusTag(b);
 }
 
+// Whether a message was written by the mailbox owner. The login address is compared the way every other
+// "is this me" check here does (case-insensitive, a +tag ignored), and anything in the Sent folder counts too: a
+// reply sent from an alias (alias@pm.me) is the owner's, but its address is not the login address.
+export function isOutgoingMessage(message: { from: Array<{ address?: string }>; folder?: string }, ownerEmail?: string): boolean {
+  if (normalizeMailboxLabel(message.folder) === "Sent") return true;
+  if (!ownerEmail) return false;
+  return message.from.some((entry) => isSelfAddress(entry.address, ownerEmail));
+}
+
 export function normalizeMessageId(value?: string): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) {

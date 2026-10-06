@@ -53,6 +53,7 @@ import {
   isSelfAddress,
   lowerCaseAddress,
   InvalidArgumentError,
+  isOutgoingMessage,
   isPathInside,
   normalizeBoolean,
   normalizeLimit,
@@ -3726,10 +3727,7 @@ function pickReplyTargetFromThread(
   if (preferLatestInbound) {
     const inbound = [...messages]
       .reverse()
-      .find(
-        (message) =>
-          !message.from.some((address) => lowerCaseAddress(address.address) === lowerCaseAddress(ownerEmail)),
-      );
+      .find((message) => !isOutgoingMessage(message, ownerEmail));
     if (inbound) {
       return inbound;
     }
@@ -3746,12 +3744,12 @@ function buildThreadBrief(
   const latestMessage = messages[messages.length - 1];
   const latestInbound = [...messages]
     .reverse()
-    .find((message) => !message.from.some((entry) => lowerCaseAddress(entry.address) === lowerCaseAddress(ownerEmail)));
+    .find((message) => !isOutgoingMessage(message, ownerEmail));
   const latestOutbound = [...messages]
     .reverse()
-    .find((message) => message.from.some((entry) => lowerCaseAddress(entry.address) === lowerCaseAddress(ownerEmail)));
+    .find((message) => isOutgoingMessage(message, ownerEmail));
   const pendingOn = latestMessage
-    ? latestMessage.from.some((entry) => lowerCaseAddress(entry.address) === lowerCaseAddress(ownerEmail))
+    ? isOutgoingMessage(latestMessage, ownerEmail)
       ? "them"
       : "you"
     : "unknown";

@@ -23,6 +23,7 @@ import {
   extractDomain,
   extractMessageIdList,
   foldSearchText,
+  isOutgoingMessage,
   lowerCaseAddress,
   nextDay,
   normalizeMailboxLabel,
@@ -513,15 +514,6 @@ function uniqueParticipants(messages: EmailSummary[]): MailboxMessage["from"] {
   }
 
   return participants;
-}
-
-function isOutgoingMessage(message: Pick<EmailSummary, "from">, ownerEmail?: string): boolean {
-  const owner = lowerCaseAddress(ownerEmail);
-  if (!owner) {
-    return false;
-  }
-
-  return message.from.some((address) => lowerCaseAddress(address.address) === owner);
 }
 
 // ponytail: the upgrade path has been taken — messages.is_automated now stores the real
