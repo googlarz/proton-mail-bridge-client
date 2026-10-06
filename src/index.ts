@@ -6662,10 +6662,12 @@ export function createServer(
           // Merge strategy: scan each account's folder independently, merge
           // sender frequency by address (summing counts across accounts), then
           // re-sort and re-apply the requested top-N limit over the merged set.
+          // Each account is asked for its WHOLE table, not just its own top N: a sender in the middle of every
+          // account's table can still be first in total, and cutting each table first made it disappear.
           const perAccount = await Promise.all(
             accountManager.all().map(async (bundle) => ({
               bundle,
-              result: await bundle.imapService.topSenders(topSendersInput),
+              result: await bundle.imapService.topSenders({ ...topSendersInput, limit: 10_000 }),
             })),
           );
           const senderMap = new Map<string, { address: string; name?: string; count: number; direction: "self" | "received" }>();
@@ -7110,7 +7112,10 @@ export function createServer(
         }
 
         case "render_template": {
-          const variables = (args.variables && typeof args.variables === "object" ? args.variables : {}) as Record<string, string>;
+          if (args.variables !== undefined && args.variables !== null && (typeof args.variables !== "object" || Array.isArray(args.variables))) {
+            throw new McpError(ErrorCode.InvalidParams, "variables must be an object of name: value pairs.");
+          }
+          const variables = (args.variables ?? {}) as Record<string, string>;
           const result = await withAudit(auditService, name, args, async () =>
             templateService.render(requireString(args, "id"), variables),
           );
@@ -7254,7 +7259,7 @@ export function createServer(
           const analyticsLimit = normalizeLimit(args.limit, 2000, 1, 10_000);
           if (accountManager.all().length === 1) {
             const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, analyticsDays, analyticsLimit);
-            return createTextResult(analyticsService.getEmailAnalytics(sample, config.smtp.username));
+            return createTextResult(analyticsService.getEmailAnalytics(sample, config.smtp.username, analyticsDays));
           }
           // Merge strategy: compute each account's own analytics independently
           // (self-detection needs each account's own address), then merge the
@@ -7264,7 +7269,7 @@ export function createServer(
           const analyticsPerAccount = await Promise.all(
             accountManager.all().map(async (bundle) => {
               const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, analyticsDays, analyticsLimit);
-              return analyticsService.getEmailAnalytics(sample, bundle.config.smtp.username);
+              return analyticsService.getEmailAnalytics(sample, bundle.config.smtp.username, analyticsDays);
             }),
           );
           const busiestHours = mergeCountedEntries(
@@ -7334,17 +7339,18 @@ export function createServer(
 
         case "get_volume_trends": {
           const days = normalizeLimit(args.days, 30, 1, 365);
+          // Counted in SQL over the whole index (a sample of the newest 3000 messages cut the older days short).
           if (accountManager.all().length === 1) {
-            const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, days, 3000);
-            return createTextResult(analyticsService.getVolumeTrends(sample, days));
+            await maybeRefreshLocalIndex(imapService, localIndexService, {});
+            return createTextResult(await localIndexService.getDailyVolume(days));
           }
           // Merge strategy: compute each account's own daily trend points
           // independently, then sum count/unreadCount/starredCount/attachmentCount
           // for matching dates across accounts.
           const trendsPerAccount = await Promise.all(
             accountManager.all().map(async (bundle) => {
-              const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, days, 3000);
-              return analyticsService.getVolumeTrends(sample, days);
+              await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {});
+              return bundle.localIndexService.getDailyVolume(days);
             }),
           );
           return createTextResult(mergeVolumeTrends(trendsPerAccount));

@@ -189,3 +189,14 @@ test("getEmailStats sums folder totals and derives sample stats from the dedup'd
   assert.equal(stats.sample.starredMessages, 1);
   assert.equal(stats.sample.messagesWithAttachments, 1);
 });
+
+test("getEmailAnalytics finds the busiest day inside the requested window, not only the last 30 days", () => {
+  const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+  const emails = [
+    ...Array.from({ length: 5 }, (_, i) => email({ id: `INBOX::${i + 1}`, uid: i + 1, messageId: `<old${i}@x>`, internalDate: daysAgo(60), date: daysAgo(60) })),
+    email({ id: "INBOX::99", uid: 99, messageId: "<new@x>", internalDate: daysAgo(2), date: daysAgo(2) }),
+  ];
+  const service = new AnalyticsService();
+  assert.equal(service.getEmailAnalytics(emails, "owner@example.com").busiestDay.count, 1, "the default window is 30 days");
+  assert.equal(service.getEmailAnalytics(emails, "owner@example.com", 90).busiestDay.count, 5, "a 90-day window sees the busy day 60 days ago");
+});

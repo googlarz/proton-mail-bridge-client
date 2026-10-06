@@ -15,6 +15,7 @@ import type {
   SearchEmailsInput,
   ThreadDetail,
   ThreadSummary,
+  VolumeTrendPoint,
 } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import {
@@ -719,6 +720,44 @@ export class LocalIndexService {
     // the original rejection via the returned/awaited `run` promise.
     this.snapshotQueue = run.catch(() => undefined);
     return run;
+  }
+
+  // Messages per day for the last `days` days, counted in SQL over the whole index: one point per day (zero
+  // filled, oldest first), a message that is in several folders counted once. The analytics tools used to count
+  // from a sample of the newest few thousand messages, which cut the older days short without saying so.
+  async getDailyVolume(days: number): Promise<VolumeTrendPoint[]> {
+    const db = await this.ensureDb();
+    const points = new Map<string, VolumeTrendPoint>();
+    const now = Date.now();
+    for (let index = days - 1; index >= 0; index -= 1) {
+      const key = new Date(now - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      points.set(key, { date: key, count: 0, unreadCount: 0, starredCount: 0, attachmentCount: 0 });
+    }
+    const earliest = [...points.keys()][0];
+    const rows = db
+      .prepare(
+        `SELECT substr(COALESCE(internal_date, date), 1, 10) AS day,
+                COUNT(*) AS count,
+                SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS unread,
+                SUM(CASE WHEN is_starred = 1 THEN 1 ELSE 0 END) AS starred,
+                SUM(CASE WHEN has_attachments = 1 THEN 1 ELSE 0 END) AS attachments
+           FROM messages
+          WHERE rowid IN (
+                  SELECT MIN(rowid) FROM messages
+                   WHERE substr(COALESCE(internal_date, date), 1, 10) >= ?
+                   GROUP BY COALESCE(message_id, email_id))
+          GROUP BY day`,
+      )
+      .all(earliest) as Array<{ day: string; count: number; unread: number; starred: number; attachments: number }>;
+    for (const row of rows) {
+      const point = points.get(row.day);
+      if (!point) continue;
+      point.count = Number(row.count);
+      point.unreadCount = Number(row.unread);
+      point.starredCount = Number(row.starred);
+      point.attachmentCount = Number(row.attachments);
+    }
+    return [...points.values()];
   }
 
   // Just what the refresh-before-search check needs: whether the index has any messages and whether it

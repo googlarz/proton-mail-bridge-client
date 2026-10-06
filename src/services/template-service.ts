@@ -6,6 +6,7 @@ import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
+import { InvalidArgumentError } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
 
 // Named, reusable email templates with {{variable}} substitution. Persistence
@@ -23,7 +24,9 @@ function createEmptyStore(): TemplateFile {
   return { version: 1, items: {} };
 }
 
-const VARIABLE_PATTERN = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
+// A variable name is letters (any script), digits, "_", "." and "-": {{imię}}, {{order.id}}, {{first-name}}. A
+// narrower pattern left such placeholders in the finished mail as literal text without listing them as missing.
+const VARIABLE_PATTERN = /\{\{\s*([\p{L}\p{N}_.-]+)\s*\}\}/gu;
 
 export function extractTemplateVariables(text: string): string[] {
   const found = new Set<string>();
@@ -33,10 +36,30 @@ export function extractTemplateVariables(text: string): string[] {
   return [...found];
 }
 
-export function renderTemplateText(text: string, variables: Record<string, string>): string {
-  return text.replace(VARIABLE_PATTERN, (full, name) =>
-    Object.prototype.hasOwnProperty.call(variables, name) ? variables[name] : full,
-  );
+function escapeHtmlValue(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+export function renderTemplateText(text: string, variables: Record<string, string>, options: { escapeHtml?: boolean } = {}): string {
+  return text.replace(VARIABLE_PATTERN, (full, name) => {
+    if (!Object.prototype.hasOwnProperty.call(variables, name)) return full;
+    const value = variables[name];
+    return options.escapeHtml ? escapeHtmlValue(value) : value;
+  });
+}
+
+// Reads the variables a caller passed: text, numbers and booleans are written as text; nothing (null, undefined)
+// means "not given", so the placeholder is reported as missing instead of the word "null" being printed; an
+// object or array has no sensible text form and is refused.
+function readTemplateVariables(input: Record<string, unknown>): Record<string, string> {
+  const variables: Record<string, string> = {};
+  for (const [name, value] of Object.entries(input ?? {})) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string") variables[name] = value;
+    else if (typeof value === "number" || typeof value === "boolean") variables[name] = String(value);
+    else throw new InvalidArgumentError(`Template variable "${name}" must be text, a number or a boolean.`);
+  }
+  return variables;
 }
 
 export class TemplateService {
@@ -105,14 +128,20 @@ export class TemplateService {
     });
   }
 
-  async render(id: string, variables: Record<string, string> = {}): Promise<{ subject: string; body: string; isHtml: boolean; missingVariables: string[] }> {
+  async render(id: string, input: Record<string, unknown> = {}): Promise<{ subject: string; body: string; isHtml: boolean; missingVariables: string[] }> {
     const template = await this.get(id);
-    const missingVariables = template.variables.filter(
+    const variables = readTemplateVariables(input);
+    // From the text itself, not the list stored at creation: a template saved before the variable pattern was
+    // widened would not list {{imię}} or {{order.id}}, and they would be neither filled in nor reported.
+    const names = new Set([...extractTemplateVariables(template.subject), ...extractTemplateVariables(template.body)]);
+    const missingVariables = [...names].filter(
       (name) => !Object.prototype.hasOwnProperty.call(variables, name),
     );
     return {
+      // The subject is a mail header, not HTML. The body of an HTML template gets HTML-escaped values, so a
+      // value such as "<script>" cannot become markup in the mail.
       subject: renderTemplateText(template.subject, variables),
-      body: renderTemplateText(template.body, variables),
+      body: renderTemplateText(template.body, variables, { escapeHtml: template.isHtml }),
       isHtml: template.isHtml,
       missingVariables,
     };

@@ -152,3 +152,58 @@ test("a template store reopened against the same dataDir sees items persisted by
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+// ---- rendering details found in review -----------------------------------------------------------------------
+
+test("placeholders with accented letters, dots or dashes are variables too, not text that is silently left in the mail", async () => {
+  const { extractTemplateVariables, renderTemplateText } = await import("../dist/services/template-service.js");
+  assert.deepEqual(extractTemplateVariables("{{ré}} {{a-b}} {{a.b}} {{plain}}").sort(), ["a-b", "a.b", "plain", "ré"]);
+  assert.equal(renderTemplateText("Hi {{imię}}, {{a.b}}", { imię: "Łukasz", "a.b": "x" }), "Hi Łukasz, x");
+});
+
+test("a variable given as null or undefined counts as missing instead of being printed as the text 'null'", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "protonmail-template-null-"));
+  try {
+    const { TemplateService } = await import("../dist/services/template-service.js");
+    const service = new TemplateService(createConfig(dir));
+    const template = await service.create({ name: "n", subject: "Hello {{name}}", body: "Dear {{name}}, {{topic}}" });
+    const result = await service.render(template.id, { name: null, topic: undefined });
+    assert.deepEqual(result.missingVariables.sort(), ["name", "topic"]);
+    assert.equal(result.body, "Dear {{name}}, {{topic}}");
+    assert.doesNotMatch(result.body, /null|undefined/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("numbers and booleans are written as text, and an object or array is refused", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "protonmail-template-types-"));
+  try {
+    const { TemplateService } = await import("../dist/services/template-service.js");
+    const { InvalidArgumentError } = await import("../dist/utils/helpers.js");
+    const service = new TemplateService(createConfig(dir));
+    const template = await service.create({ name: "t", subject: "s", body: "n={{n}} b={{b}}" });
+    assert.equal((await service.render(template.id, { n: 42, b: true })).body, "n=42 b=true");
+    await assert.rejects(service.render(template.id, { n: { a: 1 }, b: "x" }), InvalidArgumentError);
+    await assert.rejects(service.render(template.id, { n: [1, 2], b: "x" }), InvalidArgumentError);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("in an HTML template the substituted values are HTML-escaped; the subject and a plain-text body are not", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "protonmail-template-html-"));
+  try {
+    const { TemplateService } = await import("../dist/services/template-service.js");
+    const service = new TemplateService(createConfig(dir));
+    const html = await service.create({ name: "h", subject: "Re: {{name}}", body: "<p>Hello {{name}}</p>", isHtml: true });
+    const evil = '<script>alert(1)</script> & "quotes"';
+    const rendered = await service.render(html.id, { name: evil });
+    assert.equal(rendered.body, "<p>Hello &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quotes&quot;</p>");
+    assert.equal(rendered.subject, `Re: ${evil}`, "a subject is a header, not HTML");
+    const plain = await service.create({ name: "p", subject: "s", body: "Hello {{name}}" });
+    assert.equal((await service.render(plain.id, { name: evil })).body, `Hello ${evil}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

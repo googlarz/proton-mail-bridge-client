@@ -216,3 +216,22 @@ test("count_messages still fails when every account fails", async () => {
     await assert.rejects(call("count_messages", { folder: "INBOX" }), /boom/);
   });
 });
+
+// Each account's list was cut to the requested top N BEFORE the accounts were merged, so a sender that is mid-table
+// in every account but first in total (10 messages in each of two accounts, behind 20 senders with 11) vanished.
+test("top_senders merges the accounts' full tables before taking the top N", async () => {
+  await withServer(async ({ call, primaryBundle, secondBundle }) => {
+    const table = (prefix) => [
+      ...Array.from({ length: 20 }, (_, i) => ({ address: `${prefix}${i}@x.example`, count: 11, direction: "received" })),
+      { address: "shared@x.example", count: 10, direction: "received" },
+    ];
+    for (const bundle of [primaryBundle, secondBundle]) {
+      const prefix = bundle === primaryBundle ? "a" : "b";
+      bundle.imapService.topSenders = async (input) => ({ folder: "INBOX", scanned: 21 * 11, senders: table(prefix).slice(0, input.limit ?? 20) });
+    }
+    const result = await call("top_senders", {});
+    assert.equal(result.senders[0].address, "shared@x.example", "20 messages in total beats 11");
+    assert.equal(result.senders[0].count, 20);
+    assert.equal(result.senders.length, 20);
+  });
+});

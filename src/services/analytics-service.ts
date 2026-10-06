@@ -57,7 +57,7 @@ export class AnalyticsService {
     };
   }
 
-  getEmailAnalytics(emails: EmailSummary[], ownerEmail?: string) {
+  getEmailAnalytics(emails: EmailSummary[], ownerEmail?: string, days = 30) {
     const deduped = dedupeEmails(emails);
     const hourCounts = new Map<number, number>();
     const senderCounts = new Map<string, number>();
@@ -104,7 +104,7 @@ export class AnalyticsService {
       .slice(0, 10)
       .map(([domain, count]) => ({ domain, count }));
 
-    const trends = this.getVolumeTrends(deduped, 30);
+    const trends = this.getVolumeTrends(deduped, days);
     const busiestDay = [...trends].sort((left, right) => right.count - left.count)[0];
 
     return {
