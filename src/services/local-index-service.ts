@@ -161,8 +161,24 @@ function escapeLike(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
+// Every searched column has a precomputed searchKey twin in message_keys, a table of only those keys
+// (written with the row, see writeKeys). A filter is a plain LIKE over that small table instead of a
+// JavaScript call per row, and it does not have to read the wide messages rows (bodies, attachments).
+const KEY_COLUMN: Record<string, string> = {
+  subject: "subject_key",
+  preview: "preview_key",
+  from_json: "from_key",
+  to_json: "to_key",
+  cc_json: "cc_key",
+  bcc_json: "bcc_key",
+  labels_json: "labels_key",
+  folder: "folder_key",
+};
+// Version of what message_keys stores; bump when searchKey changes so the table is rebuilt once.
+const MESSAGE_KEY_VERSION = "1";
+
 // WHERE fragment: any of `columns` contains `needle`, ignoring case, accents and spelling variants
-// (Müller/Mueller, see searchKey). FOLD() is the SQL function registered in ensureDb.
+// (Müller/Mueller, see searchKey).
 function foldedLike(columns: string[], needle: string): { sql: string; params: string[] } {
   const forms = searchNeedles(needle);
   if (forms.length === 0) return { sql: "(0)", params: [] }; // nothing searchable in the term: matches nothing
@@ -170,11 +186,13 @@ function foldedLike(columns: string[], needle: string): { sql: string; params: s
   const params: string[] = [];
   for (const form of forms) {
     for (const column of columns) {
-      parts.push(`FOLD(${column}) LIKE ? ESCAPE '\\'`);
+      const key = KEY_COLUMN[column];
+      if (!key) throw new Error(`No search key column for ${column}`);
+      parts.push(`${key} LIKE ? ESCAPE '\\'`);
       params.push(`%${escapeLike(form)}%`);
     }
   }
-  return { sql: `(${parts.join(" OR ")})`, params };
+  return { sql: `email_id IN (SELECT email_id FROM message_keys WHERE ${parts.join(" OR ")})`, params };
 }
 
 interface SnapshotLoadOptions {
@@ -1668,7 +1686,7 @@ export class LocalIndexService {
     }
     if (domainNeedle) {
       const needle = `%@${escapeLike(domainNeedle)}%`;
-      conditions.push(`(FOLD(from_json) LIKE ? ESCAPE '\\' OR FOLD(to_json) LIKE ? ESCAPE '\\' OR FOLD(cc_json) LIKE ? ESCAPE '\\')`);
+      conditions.push(`email_id IN (SELECT email_id FROM message_keys WHERE from_key LIKE ? ESCAPE '\\' OR to_key LIKE ? ESCAPE '\\' OR cc_key LIKE ? ESCAPE '\\')`);
       params.push(needle, needle, needle);
     }
 
@@ -1926,6 +1944,14 @@ export class LocalIndexService {
         is_automated = COALESCE(excluded.is_automated, messages.is_automated),
         delivered_to = COALESCE(excluded.delivered_to, messages.delivered_to)
       RETURNING preview, attachment_text
+    `);
+    const writeKeys = db.prepare(`
+      INSERT INTO message_keys (email_id, subject_key, preview_key, from_key, to_key, cc_key, bcc_key, labels_key, folder_key)
+      VALUES (@email_id, FOLD(@subject), FOLD(@preview), FOLD(@from_json), FOLD(@to_json), FOLD(@cc_json), FOLD(@bcc_json), FOLD(@labels_json), FOLD(@folder))
+      ON CONFLICT(email_id) DO UPDATE SET
+        subject_key = excluded.subject_key, preview_key = excluded.preview_key, from_key = excluded.from_key,
+        to_key = excluded.to_key, cc_key = excluded.cc_key, bcc_key = excluded.bcc_key,
+        labels_key = excluded.labels_key, folder_key = excluded.folder_key
     `);
     const upsertSyncState = db.prepare(`
       INSERT INTO sync_state (
@@ -2206,6 +2232,17 @@ export class LocalIndexService {
           delivered_to: email.deliveredTo ?? null,
         }) as { preview: string | null; attachment_text: string | null };
 
+        writeKeys.run({
+          email_id: email.id,
+          folder: email.folder,
+          subject: email.subject,
+          preview: persisted.preview,
+          from_json: JSON.stringify(email.from),
+          to_json: JSON.stringify(email.to),
+          cc_json: JSON.stringify(email.cc),
+          bcc_json: JSON.stringify(email.bcc),
+          labels_json: JSON.stringify(email.labels),
+        });
         deleteFts.run(email.id);
         insertFts.run(email.id, ...ftsColumns(email, persisted.preview ?? "", persisted.attachment_text ?? undefined));
       }
@@ -2276,6 +2313,20 @@ export class LocalIndexService {
       // proportionate.
       db.pragma("incremental_vacuum");
     }
+  }
+
+  // Fills message_keys for rows written before it existed (or by an older searchKey), once.
+  private backfillMessageKeys(db: Database.Database): void {
+    const stored = db.prepare(`SELECT value FROM metadata WHERE key = 'messageKeyVersion'`).get() as { value: string } | undefined;
+    if (stored?.value === MESSAGE_KEY_VERSION) return;
+    db.transaction(() => {
+      db.exec(`
+        INSERT OR REPLACE INTO message_keys (email_id, subject_key, preview_key, from_key, to_key, cc_key, bcc_key, labels_key, folder_key)
+        SELECT email_id, FOLD(subject), FOLD(preview), FOLD(from_json), FOLD(to_json), FOLD(cc_json), FOLD(bcc_json), FOLD(labels_json), FOLD(folder)
+        FROM messages
+      `);
+      db.prepare(`INSERT INTO metadata (key, value) VALUES ('messageKeyVersion', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(MESSAGE_KEY_VERSION);
+    })();
   }
 
   // Rebuilds messages_fts from the messages table when it was written by an older version (text stored
@@ -2407,7 +2458,15 @@ export class LocalIndexService {
         tokenize = 'porter unicode61'
       );
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS message_keys (
+        email_id TEXT PRIMARY KEY REFERENCES messages(email_id) ON DELETE CASCADE,
+        subject_key TEXT, preview_key TEXT, from_key TEXT, to_key TEXT,
+        cc_key TEXT, bcc_key TEXT, labels_key TEXT, folder_key TEXT
+      );
+    `);
     this.ensureMessagesColumns(db);
+    this.backfillMessageKeys(db);
   }
 
   private ensureMessagesColumns(db: Database.Database): void {
@@ -2539,7 +2598,7 @@ export class LocalIndexService {
       params.push(...like.params);
     }
     if (filters.senderDomain) {
-      conditions.push(`FOLD(from_json) LIKE ? ESCAPE '\\'`);
+      conditions.push(`email_id IN (SELECT email_id FROM message_keys WHERE from_key LIKE ? ESCAPE '\\')`);
       params.push(`%${escapeLike(foldSearchText(filters.senderDomain))}%`);
     }
     // from/to/messageId were accepted by search_indexed_emails but never

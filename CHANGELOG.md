@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.5.0] — 2026-10-06
+
+### Changed
+- **Filters in the local index are about 2-3x faster on a large mailbox.** Since 2.3.0 every `from`, `to`, `subject`, `label` and free-text filter called a JavaScript function on each row to fold accents and case, which made them 3-10x slower than before on very large mailboxes. The folded text is now computed once when a message is stored and kept in a small separate table (`message_keys`), and filters run a plain `LIKE` over it without reading the wide message rows. Measured on a copy of a real 57,000-message index: `subject` 59 to 18 ms, `from` 45 to 18 ms, `to` 68 to 36 ms; `label` (68 to 60 ms) and free-text `query` (34 ms) barely moved, and `get_threads` (about 700 ms) is not affected, because their time goes into building results, not into the filter.
+- The first start after the upgrade fills `message_keys` for existing messages once (about 1-3 seconds for 57,000 messages); results are the same as before. The table follows the messages: updated when a message changes, removed with it.
+
+### Tests
+- New tests for the key table (a changed subject, an index created before the table existed, removal) and for which link schemes survive sanitizing (only absolute `http`, `https` and `mailto`; relative, fragment-only, protocol-relative and `javascript:` hrefs lose the `href` and keep their text). The link behaviour was already in place since 2.3.2; the earlier note that relative links pass through was out of date.
+
+### Known limits
+- `nodemailer` stays on 10.0.14 (10.0.15 was a day old when this was cut).
+- One CLI test (`cli-exit-codes`) failed once on macOS CI with empty output and passed on the next run; the cause is not known.
+
 ## [2.4.1] — 2026-10-06
 
 ### Changed
