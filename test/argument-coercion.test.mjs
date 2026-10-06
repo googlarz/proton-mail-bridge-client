@@ -101,3 +101,21 @@ test("a boolean argument that cannot be read is an InvalidParams error, not a si
     );
   });
 });
+
+test("bulk_delete and bulk_move with an empty or misspelled match are InvalidParams errors that touch nothing", async () => {
+  await withServer(async (client, imapService) => {
+    let searched = 0;
+    imapService.getMailboxUidValidity = async () => "100";
+    imapService.withMailbox = async () => { searched += 1; return []; };
+    for (const [name, base] of [["bulk_delete", {}], ["bulk_move", { targetFolder: "Archive" }]]) {
+      for (const match of [{}, { sender: "a@b.c" }, { from: "" }]) {
+        await assert.rejects(
+          client.callTool({ name, arguments: { folder: "INBOX", match, ...base } }),
+          (error) => error instanceof McpError && error.code === -32602,
+          `${name} ${JSON.stringify(match)}`,
+        );
+      }
+    }
+    assert.equal(searched, 0, "the mailbox must not even be searched");
+  });
+});

@@ -53,6 +53,7 @@ import {
   isSelfAddress,
   lowerCaseAddress,
   InvalidArgumentError,
+  isPathInside,
   normalizeBoolean,
   normalizeLimit,
   optionalBoolean,
@@ -1694,7 +1695,7 @@ const TOOLS = [
   {
     name: "get_attachment_content",
     description: "Fetch metadata for a specific email attachment and optionally return its base64-encoded content inline. Use when you need to read or process attachment data in-memory. Set includeBase64:false (default) to retrieve metadata only without loading the full payload. Prefer save_attachment to write the file to disk instead.",
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: false },
     inputSchema: {
       type: "object",
       properties: {
@@ -2862,7 +2863,7 @@ export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: 
   const absTarget = pathJoin(absDir, saveTo);
   // A hardcoded "/" never matched on win32 (path.resolve/join produce
   // backslash-separated paths there), hence `sep`.
-  if (!absTarget.startsWith(absDir + sep) && absTarget !== absDir) {
+  if (!isPathInside(absDir, absTarget, sep)) {
     throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
   }
   // The allowed directory itself may be created. Then check, BEFORE creating anything below it, that the
@@ -2879,7 +2880,7 @@ export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: 
   } catch {
     throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
   }
-  if (!realProbe.startsWith(realDir + sep) && realProbe !== realDir) {
+  if (!isPathInside(realDir, realProbe, sep)) {
     throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
   }
   await mkd(pathResolve(absTarget, ".."), { recursive: true, mode: 0o700 });
@@ -2893,7 +2894,7 @@ export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: 
       throw error;
     }
   }
-  if (!realTarget.startsWith(realDir + sep) && realTarget !== realDir) {
+  if (!isPathInside(realDir, realTarget, sep)) {
     throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
   }
   await wf(absTarget, data, { mode: 0o600 });
@@ -6330,7 +6331,7 @@ export function createServer(
             // check against it — a match-only bulk_move has no ids that could
             // be stale, since match resolves directly against the live
             // mailbox each time.
-            const currentUidValidity = group.restIds ? await group.bundle.imapService.getMailboxUidValidity(folder) : undefined;
+            const currentUidValidity = await group.bundle.imapService.getMailboxUidValidity(folder);
             const notFoundEmailIds = getBulkNotFoundEmailIds(group.restIds, folder, currentUidValidity);
             // Resolve the match/emailIds set exactly once and reuse it for both
             // the preview and the real run — see resolveUidsForBulkOp's
@@ -6410,7 +6411,7 @@ export function createServer(
             // excluded and the uids it actually acts on can never disagree
             // about which generation was current. Only fetched when there are
             // ids to check against it (a match-only call has none).
-            const currentUidValidity = group.restIds ? await group.bundle.imapService.getMailboxUidValidity(folder) : undefined;
+            const currentUidValidity = await group.bundle.imapService.getMailboxUidValidity(folder);
             const notFoundEmailIds = getBulkNotFoundEmailIds(group.restIds, folder, currentUidValidity);
             // Resolve the match/emailIds set exactly once and reuse it for both
             // the preview and the real run — see resolveUidsForBulkOp's
@@ -6484,7 +6485,7 @@ export function createServer(
           for (const [slug, group] of groups) {
             // See the bulk_delete case above for why this is fetched once and
             // shared between notFound reporting and uid resolution.
-            const currentUidValidity = group.restIds ? await group.bundle.imapService.getMailboxUidValidity(folder) : undefined;
+            const currentUidValidity = await group.bundle.imapService.getMailboxUidValidity(folder);
             const notFoundEmailIds = getBulkNotFoundEmailIds(group.restIds, folder, currentUidValidity);
             // Resolve the match/emailIds set exactly once and reuse it for both
             // the preview and the real run — see resolveUidsForBulkOp's
@@ -6557,7 +6558,7 @@ export function createServer(
           for (const [slug, group] of groups) {
             // See the bulk_delete case above for why this is fetched once and
             // shared between notFound reporting and uid resolution.
-            const currentUidValidity = group.restIds ? await group.bundle.imapService.getMailboxUidValidity(folder) : undefined;
+            const currentUidValidity = await group.bundle.imapService.getMailboxUidValidity(folder);
             const notFoundEmailIds = getBulkNotFoundEmailIds(group.restIds, folder, currentUidValidity);
             // Resolve the match/emailIds set exactly once and reuse it for both
             // the preview and the real run — see resolveUidsForBulkOp's
@@ -8514,14 +8515,26 @@ export function createServer(
         {
           const rawEmailId = requireString(args, "emailId");
           const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          const saveTo = optionalString(args, "saveTo");
+          if (saveTo) {
+            // A save writes to disk: it needs the download directory, and the inline-size limit (which bounds
+            // what is returned in the reply) does not apply. Checked before the attachment is fetched.
+            const downloadDir = config.runtime.allowFileDownloadDir;
+            if (!downloadDir) {
+              throw new McpError(ErrorCode.InvalidParams, "PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR env var is not set.");
+            }
+            const saving = await bundle.imapService.getAttachmentContent(emailId, requireString(args, "attachmentId"), { forSave: true });
+            const buf = Buffer.from(saving.base64 ?? "", "base64");
+            const savedPath = await writeAttachmentToDownloadDir(downloadDir, saveTo, buf);
+            return createTextResult({ saved: true, path: savedPath, bytes: buf.length, filename: saving.attachment?.filename });
+          }
           const result = await bundle.imapService.getAttachmentContent(
             emailId,
             requireString(args, "attachmentId"),
             normalizeBoolean(args.includeBase64, false),
           );
           result.emailId = prefixedIdFor(bundle, result.emailId);
-          const saveTo = optionalString(args, "saveTo");
-          if (!saveTo && result.base64) {
+          if (result.base64) {
             const MAX_INLINE_BYTES = (config.runtime.maxInlineBytes ?? 40) * 1024;
             const decodedSize = Math.floor(result.base64.length * 0.75);
             if (decodedSize > MAX_INLINE_BYTES) {
@@ -8530,15 +8543,6 @@ export function createServer(
                 `Attachment is ~${Math.round(decodedSize / 1024)}KB decoded. Inline limit is ${config.runtime.maxInlineBytes ?? 40}KB. Set PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR and pass saveTo to write to disk instead, or increase the limit with PROTONMAIL_MAX_INLINE_BYTES.`,
               );
             }
-          }
-          if (saveTo && result.base64) {
-            const downloadDir = config.runtime.allowFileDownloadDir;
-            if (!downloadDir) {
-              throw new McpError(ErrorCode.InvalidParams, "PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR env var is not set.");
-            }
-            const buf = Buffer.from(result.base64, "base64");
-            const savedPath = await writeAttachmentToDownloadDir(downloadDir, saveTo, buf);
-            return createTextResult({ saved: true, path: savedPath, bytes: buf.length, filename: result.attachment?.filename });
           }
           return createTextResult(result, false, [attachmentSource(result.emailId, result.attachment)]);
         }
@@ -8568,7 +8572,7 @@ export function createServer(
             const absTarget = pathResolve(join(absDir, saveTo));
             // See the identical fix/comment in get_attachment_content above —
             // hardcoded "/" never matched a real subdirectory path on win32.
-            if (!absTarget.startsWith(absDir + pathSep) && absTarget !== absDir) {
+            if (!isPathInside(absDir, absTarget, pathSep)) {
               throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
             }
             resolvedPath = absTarget;

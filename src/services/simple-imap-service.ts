@@ -1,6 +1,6 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, open, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { ImapFlow, type FetchMessageObject, type ListResponse, type SearchObject } from "imapflow";
 import { simpleParser, type ParsedMail } from "mailparser";
 import type {
@@ -33,7 +33,11 @@ import {
   matchesNonAsciiCriteria,
   splitNonAsciiCriteria,
   nextDay,
+  InvalidArgumentError,
+  isPathInside,
   normalizeLimit,
+  optionalBoolean,
+  optionalNumber,
   parseDateInput,
   htmlToMarkdown,
   redactInlineData,
@@ -342,6 +346,44 @@ export function isVirtualMailView(entry: { path: string; specialUse?: string }):
 // UID order does not track date order (e.g. after a cross-provider import), so picking
 // the target subset by UID (slice(-limit)) can silently drop the newest messages. This
 // picks by INTERNALDATE instead. See GitHub issue #6.
+const BULK_MATCH_FIELDS = ["from", "subject", "text", "since", "before", "isRead", "isStarred", "sizeLarger", "sizeSmaller"] as const;
+
+// A bulk `match` selects messages to act on, so it must say what to select. A match with no usable criterion
+// ({}, a misspelled field, an empty string) used to fall back to IMAP "ALL" and resolve to every message in
+// the folder. Values arrive as the client sent them ("false", "1000"), so they are read here, not assumed.
+export function normalizeBulkMatch(match: BulkMatchCriteria, folder: string): SearchEmailsInput {
+  const raw = match as Record<string, unknown>;
+  const unknown = Object.keys(raw).filter((key) => !(BULK_MATCH_FIELDS as readonly string[]).includes(key) && raw[key] !== undefined);
+  if (unknown.length > 0) {
+    throw new InvalidArgumentError(`Unknown match field${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. Valid fields: ${BULK_MATCH_FIELDS.join(", ")}.`);
+  }
+  const text = (key: string): string | undefined => {
+    const value = raw[key];
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== "string") throw new InvalidArgumentError(`match.${key} must be a string.`);
+    return value.trim() || undefined;
+  };
+  const input: SearchEmailsInput = {
+    folder,
+    from: text("from"),
+    subject: text("subject"),
+    query: text("text"),
+    dateFrom: text("since"),
+    dateTo: text("before"),
+    isRead: optionalBoolean(raw.isRead),
+    isStarred: optionalBoolean(raw.isStarred),
+    sizeLarger: optionalNumber(raw.sizeLarger, 0, Number.MAX_SAFE_INTEGER),
+    sizeSmaller: optionalNumber(raw.sizeSmaller, 0, Number.MAX_SAFE_INTEGER),
+  };
+  const given = [input.from, input.subject, input.query, input.dateFrom, input.dateTo, input.isRead, input.isStarred, input.sizeLarger, input.sizeSmaller];
+  if (given.every((value) => value === undefined)) {
+    throw new InvalidArgumentError(
+      `match needs at least one criterion (${BULK_MATCH_FIELDS.join(", ")}); with none it would select every message in the folder.`,
+    );
+  }
+  return input;
+}
+
 export function pickNewestUids(dated: { uid: number; date: number }[], limit: number): number[] {
   return [...dated]
     .sort((a, b) => b.date - a.date)
@@ -1735,13 +1777,18 @@ export class SimpleIMAPService {
   }): Promise<{
     emailId: string;
     saved: AttachmentContentResult[];
+    failed: Array<{ id?: string; filename?: string; error: string }>;
     skipped: number;
   }> {
     const { parsed } = await this.getParsedMailDetail(input.emailId);
     const attachments = this.mapParsedAttachmentsWithContent(parsed);
     const saved: AttachmentContentResult[] = [];
+    const failed: Array<{ id?: string; filename?: string; error: string }> = [];
+    let firstError: unknown;
     let skipped = 0;
-    // Track resolved output paths to detect filename collisions within this batch
+    // Track resolved output paths to detect filename collisions within this batch. Compared in lower case:
+    // the default filesystems of macOS and Windows treat "Invoice.pdf" and "invoice.pdf" as one file, and
+    // the second would silently replace the first.
     const usedPaths = new Set<string>();
 
     for (const attachment of attachments) {
@@ -1775,7 +1822,7 @@ export class SimpleIMAPService {
         const sanitized = sanitizeFileName(attachment.filename, attachmentId);
         const base = join(resolve(input.outputPath), sanitized);
         // Deduplicate: if path already used, append numeric suffix (image.png → image (1).png)
-        if (!usedPaths.has(base)) {
+        if (!usedPaths.has(base.toLowerCase())) {
           targetPath = base;
         } else {
           const ext = sanitized.includes(".") ? sanitized.slice(sanitized.lastIndexOf(".")) : "";
@@ -1785,20 +1832,33 @@ export class SimpleIMAPService {
           do {
             candidate = join(resolve(input.outputPath), `${stem} (${counter})${ext}`);
             counter++;
-          } while (usedPaths.has(candidate));
+          } while (usedPaths.has(candidate.toLowerCase()));
           targetPath = candidate;
         }
-        usedPaths.add(targetPath);
+        usedPaths.add(targetPath.toLowerCase());
       } else {
         targetPath = input.outputPath;
       }
 
-      saved.push(await this.writeAttachmentToPath(input.emailId, attachment, targetPath));
+      // One attachment that cannot be written must not lose the ones already saved or still to come.
+      try {
+        saved.push(await this.writeAttachmentToPath(input.emailId, attachment, targetPath));
+      } catch (error) {
+        firstError ??= error;
+        failed.push({ id: attachment.id, filename: attachment.filename, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    // Nothing could be saved at all: that is a failure of the call, not an empty success. The first error is
+    // raised as it was (an account mismatch, a missing download directory...) so its meaning is kept.
+    if (saved.length === 0 && failed.length > 0) {
+      throw firstError;
     }
 
     return {
       emailId: input.emailId,
       saved,
+      failed,
       skipped,
     };
   }
@@ -1848,9 +1908,13 @@ export class SimpleIMAPService {
   async getAttachmentContent(
     emailId: string,
     attachmentId: string,
-    includeBase64 = false,
+    options: boolean | { includeBase64?: boolean; forSave?: boolean } = false,
   ): Promise<AttachmentContentResult> {
-    await this.assertAttachmentWithinInlineLimit(emailId, attachmentId);
+    const { includeBase64 = false, forSave = false } = typeof options === "boolean" ? { includeBase64: options } : options;
+    // The inline-size limit bounds what is put into the reply. A save writes to disk and puts nothing into it.
+    if (!forSave) {
+      await this.assertAttachmentWithinInlineLimit(emailId, attachmentId);
+    }
     const attachment = await this.getParsedAttachment(emailId, attachmentId);
     const base64 = attachment.content.toString("base64");
 
@@ -1869,8 +1933,8 @@ export class SimpleIMAPService {
         isCalendarInvite: attachment.isCalendarInvite,
         isSignature: attachment.isSignature,
       },
-      text: this.extractAttachmentText(attachment),
-      base64: includeBase64 ? base64 : undefined,
+      text: forSave ? undefined : this.extractAttachmentText(attachment),
+      base64: includeBase64 || forSave ? base64 : undefined,
     };
   }
 
@@ -2489,6 +2553,9 @@ export class SimpleIMAPService {
     const uidSet = uids.join(",");
     await this.withTimeout(
       this.withMailbox(folder, false, async (client) => {
+        // The UIDs above were listed under one lock and are deleted under another. If the folder was
+        // recreated in between, those numbers now belong to other messages.
+        this.assertMailboxUidValidity(client, folderUidValidity);
         await client.messageDelete(uidSet, { uid: true });
       }),
       BULK_ITEM_TIMEOUT_MS,
@@ -2577,21 +2644,13 @@ export class SimpleIMAPService {
     }
 
     // match path
-    const searchInput: SearchEmailsInput = {
-      folder,
-      from: match!.from,
-      subject: match!.subject,
-      query: match!.text,
-      dateFrom: match!.since,
-      dateTo: match!.before,
-      isRead: match!.isRead,
-      isStarred: match!.isStarred,
-      sizeLarger: match!.sizeLarger,
-      sizeSmaller: match!.sizeSmaller,
-    };
+    const searchInput = normalizeBulkMatch(match as BulkMatchCriteria, folder);
     const query = this.buildSearchQuery(searchInput);
     const search = () =>
       this.withMailbox(folder, true, async (client) => {
+        // The folder may have been recreated since the caller read its UIDVALIDITY: UIDs found now would
+        // not be the messages the caller saw. Refuse instead of acting on whatever has those numbers.
+        this.assertMailboxUidValidity(client, currentUidValidity);
         const found = await client.search(query, { uid: true });
         return Array.isArray(found) ? found : [];
       });
@@ -4264,18 +4323,22 @@ export class SimpleIMAPService {
     const { detail, parsed } = await this.getParsedMailDetail(emailId);
     const attachments = this.mapParsedAttachmentsWithContent(parsed);
 
-    const match = attachments.find(
-      (attachment) =>
-        attachment.id === attachmentId ||
-        attachment.filename === attachmentId ||
-        attachment.checksum === attachmentId,
+    // An id is exact. A checksum or a filename is a convenience, and a filename is not unique: two
+    // attachments can both be "image.png". Returning the first one silently would hand back the wrong file.
+    const byId = attachments.find((attachment) => attachment.id === attachmentId);
+    if (byId) return byId;
+    const candidates = attachments.filter(
+      (attachment) => attachment.checksum === attachmentId || attachment.filename === attachmentId,
     );
-
-    if (!match) {
+    if (candidates.length === 0) {
       throw new Error(`Attachment ${attachmentId} not found on email ${detail.id}`);
     }
-
-    return match;
+    if (candidates.length > 1) {
+      throw new Error(
+        `${candidates.length} attachments on email ${detail.id} match "${attachmentId}". Use one of these ids instead: ${candidates.map((candidate) => candidate.id ?? "(no id)").join(", ")}`,
+      );
+    }
+    return candidates[0];
   }
 
   private async assertAttachmentWithinInlineLimit(emailId: string, attachmentId: string): Promise<void> {
@@ -4571,39 +4634,36 @@ export class SimpleIMAPService {
   // passed. Returning the already-realpath'd path collapses that into the
   // single unavoidable race between this check and the actual write.
   private guardAttachmentOutputPath(outputPath: string): string {
-    const allowDir = process.env.PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR?.trim();
+    const allowDir = (this.config.runtime?.allowFileDownloadDir ?? process.env.PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR)?.trim();
     if (!allowDir) {
       throw new Error("outputPath requires PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR to be configured.");
     }
 
     const targetPath = resolve(outputPath);
     const allowedRealPath = realpathSync(resolve(allowDir));
-    let targetRealPath: string;
-    try {
-      targetRealPath = realpathSync(targetPath);
-    } catch (error) {
-      if (
-        error &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code?: string }).code === "ENOENT"
-      ) {
-        try {
-          targetRealPath = realpathSync(dirname(targetPath)) + sep + basename(targetPath);
-        } catch {
-          throw new Error(`Output directory does not exist: ${dirname(targetPath)}`);
-        }
-      } else {
-        throw error;
-      }
+    // Canonicalise the part of the target that exists (following symlinks) and keep the rest as written:
+    // a save into a directory that does not exist yet is fine as long as the deepest existing ancestor is
+    // inside the download directory. Checked before anything is created.
+    let existing = targetPath;
+    while (!existsSync(existing)) {
+      const parent = dirname(existing);
+      if (parent === existing) break;
+      existing = parent;
     }
+    let existingReal: string;
+    try {
+      existingReal = realpathSync(existing);
+    } catch {
+      throw new Error(`Output path cannot be resolved: ${targetPath}`);
+    }
+    const targetRealPath = existing === targetPath ? existingReal : join(existingReal, relative(existing, targetPath));
 
-    if (!targetRealPath.startsWith(`${allowedRealPath}${sep}`) && targetRealPath !== allowedRealPath) {
+    if (!isPathInside(allowedRealPath, targetRealPath)) {
       throw new Error("outputPath path escapes the allowed directory.");
     }
-
     return targetRealPath;
   }
+
 
   private async resolveAttachmentOutputPath(
     emailId: string,
@@ -4615,6 +4675,8 @@ export class SimpleIMAPService {
       return join(this.defaultAttachmentDir(), encodeURIComponent(emailId), filename);
     }
 
+    // Whether a directory was meant has to be read from the string as given: resolve() strips a trailing slash.
+    const wantsDirectory = /[\\/]$/.test(outputPath);
     const resolved = resolve(outputPath);
     try {
       const existing = await stat(resolved);
@@ -4633,7 +4695,7 @@ export class SimpleIMAPService {
       }
     }
 
-    if (resolved.endsWith("/") || resolved.endsWith("\\")) {
+    if (wantsDirectory) {
       const directoryTarget = join(resolved, filename);
       return this.guardAttachmentOutputPath(directoryTarget);
     }

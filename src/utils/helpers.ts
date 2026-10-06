@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { sep as pathSeparator } from "node:path";
 import type { MessageAddressObject, MessageStructureObject } from "imapflow";
 import TurndownService from "turndown";
 import type {
@@ -924,10 +925,49 @@ export function normalizeSubjectForThread(subject: string): string {
   return collapsed.replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/i, "").trim() || "(no subject)";
 }
 
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+// Well under the 255-byte limit of common filesystems, leaving room for a " (n)" suffix on a collision.
+const MAX_FILE_NAME_BYTES = 200;
+
+function cleanFileName(value: string): string {
+  return value
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/\.\./g, "_")
+    .trim()
+    .replace(/[. ]+$/g, "");
+}
+
+// A file name taken from untrusted mail made safe to create on any platform: no path separators or control
+// characters, no trailing dots or spaces (Windows drops them, so two names could collapse into one), no
+// Windows device names (CON, NUL, COM1...), never "." or "..", and short enough for the filesystem.
 export function sanitizeFileName(filename?: string, fallback = "attachment"): string {
-  let name = (filename || fallback).normalize('NFC');
-  const normalized = name.replace(/[\\/:*?"<>|]+/g, "_").replace(/\.\./g, '_').trim();
-  return normalized || fallback;
+  // "." and ".." (and a name of only dots and spaces) are directory references, not file names.
+  let name = /^[\s.]*$/.test(filename ?? "") ? "" : cleanFileName(filename ?? "");
+  if (!name) {
+    name = cleanFileName(fallback) || "attachment";
+  }
+  if (WINDOWS_RESERVED_NAME.test(name.split(".")[0])) {
+    name = `_${name}`;
+  }
+  if (Buffer.byteLength(name) > MAX_FILE_NAME_BYTES) {
+    const dot = name.lastIndexOf(".");
+    const extension = dot > 0 && Buffer.byteLength(name.slice(dot)) <= 16 ? name.slice(dot) : "";
+    let stem = Array.from(extension ? name.slice(0, dot) : name);
+    while (stem.length > 1 && Buffer.byteLength(stem.join("")) + Buffer.byteLength(extension) > MAX_FILE_NAME_BYTES) {
+      stem = stem.slice(0, -1);
+    }
+    name = `${stem.join("")}${extension}`;
+  }
+  return name;
+}
+
+// Whether `child` is `parent` or lies below it. Appending the separator to a parent that already ends in one
+// (a filesystem root: "/" or "C:\\") would give "//" and refuse every path.
+export function isPathInside(parent: string, child: string, separator: string = pathSeparator): boolean {
+  if (child === parent) return true;
+  return child.startsWith(parent.endsWith(separator) ? parent : parent + separator);
 }
 
 export function isTextLikeMimeType(mimeType?: string): boolean {
