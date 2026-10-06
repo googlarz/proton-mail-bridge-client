@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [2.2.2] — 2026-10-06
+
+### Changed
+- **Dependencies:** `@modelcontextprotocol/sdk` 1.31.0 → 1.32.0, `@types/sanitize-html` 2.16.1 → 2.16.2 and `@types/better-sqlite3` 7.6.13 → 9.6.0 (type definitions only). Checked on Node 24 with the full suite and a live read-only run against Bridge; no behaviour change.
+
 ## [2.2.1] — 2026-10-06
 
 ### Fixed
