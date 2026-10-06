@@ -713,7 +713,12 @@ const TOOLS = [
     name: "sync_folders",
     description: "Refresh the in-memory folder list from the IMAP server and return the updated list. Use when folders have been created, renamed, or deleted externally (e.g. via Proton webmail) and get_folders is returning stale data. Prefer get_folders for a read-only view that does not force a refresh.",
     annotations: { readOnlyHint: true },
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Account address or slug to act on. Defaults to the primary account." },
+      },
+    },
   },
   {
     name: "create_folder",
@@ -1396,7 +1401,7 @@ const TOOLS = [
     name: "run_background_sync",
     description: "Immediately trigger the configured background mailbox sync cycle outside its normal schedule and return its updated status. Use to force a sync when the index may be stale. Does nothing useful if PROTONMAIL_AUTO_SYNC is disabled. Prefer sync_emails for an on-demand, configurable sync with folder and depth options.",
     annotations: { destructiveHint: false },
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: { account: { type: "string", description: "Account address or slug to act on. Defaults to the primary account." }, } },
   },
   {
     name: "wait_for_mailbox_changes",
@@ -1405,6 +1410,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: { type: "string", description: "Account address or slug to act on. Defaults to the primary account." },
         folder: { type: "string", description: "Mailbox to watch during IDLE.", default: "INBOX" },
         timeoutSeconds: { type: "number", description: "Maximum watch duration in seconds.", default: 15 },
       },
@@ -1417,6 +1423,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: { type: "string", description: "Account address or slug to act on. Defaults to the primary account." },
         folder: { type: "string", description: "Folder to sync. Defaults to all folders." },
         timeBudgetSeconds: {
           type: "number",
@@ -6816,7 +6823,7 @@ export function createServer(
         }
 
         case "sync_folders":
-          return createTextResult(await imapService.syncFolders());
+          return createTextResult(await (resolveAccountArg(args) ?? primaryBundle).imapService.syncFolders());
 
         case "create_folder":
           ensureMailboxWriteAllowed(config.runtime);
@@ -7659,29 +7666,37 @@ export function createServer(
         }
 
         case "run_background_sync":
+        {
+          const target = resolveAccountArg(args) ?? primaryBundle;
           return createTextResult({
             checkedAt: new Date().toISOString(),
-            backgroundSync: await backgroundSyncService.runNow(),
-            index: await localIndexService.getStatus(),
+            backgroundSync: await target.backgroundSyncService.runNow(),
+            index: await target.localIndexService.getStatus(),
           });
 
+        }
+
         case "wait_for_mailbox_changes":
+        {
+          const target = resolveAccountArg(args) ?? primaryBundle;
           return createTextResult(
-            await imapService.waitForMailboxChanges({
+            await target.imapService.waitForMailboxChanges({
               folder: optionalString(args, "folder"),
               timeoutMs: normalizeLimit(args.timeoutSeconds, 15, 1, 300) * 1000,
             }),
           );
+        }
 
         case "sync_emails":
         {
+          const target = resolveAccountArg(args) ?? primaryBundle;
           const folder = optionalString(args, "folder");
           const full = optionalBoolean(args.full);
           const limitPerFolder = optionalInteger(args.limitPerFolder, 1, 50_000);
           const includeAttachmentText =
             optionalBoolean(args.includeAttachmentText);
 
-          // backgroundSyncService.runNow() always runs the *fixed* background-
+          // target.backgroundSyncService.runNow() always runs the *fixed* background-
           // sync config (autoSyncFolder/autoSyncFull/autoSyncLimitPerFolder —
           // typically just "INBOX,Sent", incremental, 100/folder) and ignores
           // any argument entirely. This tool's own schema advertises folder/
@@ -7702,15 +7717,15 @@ export function createServer(
             // 60s MCP client timeouts; a single folder in flight still runs to completion.
             const budgetMs = normalizeLimit(args.timeBudgetSeconds, 45, 1, 300) * 1000;
             const startedAtMs = Date.now();
-            const snapshot = await imapService.collectEmailsForIndex({
+            const snapshot = await target.imapService.collectEmailsForIndex({
               folder,
               full,
               limitPerFolder,
               includeAttachmentText,
-              checkpoints: await localIndexService.getSyncCheckpointMap(),
+              checkpoints: await target.localIndexService.getSyncCheckpointMap(),
               deadlineAt: startedAtMs + budgetMs,
               onFolderCollected: async (batch) => {
-                await localIndexService.recordSnapshot({
+                await target.localIndexService.recordSnapshot({
                   folders: [],
                   emails: batch.emails,
                   syncedAt: batch.checkpoint.lastSyncAt ?? new Date().toISOString(),
@@ -7720,7 +7735,7 @@ export function createServer(
             });
             // Final commit carries the complete folder list (folder counts, pruning of folders
             // deleted server-side) — no messages, those were committed per folder above.
-            const indexStatus = await localIndexService.recordSnapshot({
+            const indexStatus = await target.localIndexService.recordSnapshot({
               folders: snapshot.folders,
               folderListComplete: true,
               emails: [],
@@ -7764,8 +7779,8 @@ export function createServer(
             });
           }
 
-          const syncStatus = await backgroundSyncService.runNow("sync_emails");
-          const indexStatus = await localIndexService.getStatus();
+          const syncStatus = await target.backgroundSyncService.runNow("sync_emails");
+          const indexStatus = await target.localIndexService.getStatus();
           return createTextResult({
             checkedAt: new Date().toISOString(),
             backgroundSync: syncStatus,
