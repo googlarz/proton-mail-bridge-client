@@ -247,15 +247,36 @@ export function redactInlineData(value?: string): string | undefined {
   return value.replace(DATA_URI, (match) => (match.startsWith("[") && match.endsWith("]") ? "[image]" : "[data]"));
 }
 
+// Replaces every <tag ...>...</tag> block with a space. The regex form (`<tag[\s\S]*?</tag>`) restarts a
+// scan to the end of the text at every unclosed `<tag`, which is quadratic on hostile input; this walks
+// forward once and stops at the first opening tag that has no closing tag after it.
+function removeHtmlBlocks(value: string, tag: string): string {
+  const open = new RegExp(`<${tag}`, "gi");
+  const close = new RegExp(`</${tag}>`, "gi");
+  let out = "";
+  let position = 0;
+  for (;;) {
+    open.lastIndex = position;
+    const start = open.exec(value);
+    if (!start) break;
+    close.lastIndex = start.index;
+    const end = close.exec(value);
+    if (!end) break;
+    out += `${value.slice(position, start.index)} `;
+    position = end.index + end[0].length;
+  }
+  return out + value.slice(position);
+}
+
 export function stripHtmlToText(value?: string): string | undefined {
   if (!value) {
     return undefined;
   }
 
-  const withoutTags = value
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+  // `[^<>]*` (not `[^>]+`): a tag cannot contain another `<`, so an unclosed `<` stops at the next one
+  // instead of scanning to the end of the text.
+  const withoutTags = removeHtmlBlocks(removeHtmlBlocks(value, "style"), "script")
+    .replace(/<[^<>]*>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
@@ -286,6 +307,26 @@ function getMarkdownConverter(): TurndownService {
   return markdownConverter;
 }
 
+const MARKDOWN_INPUT_LIMIT = 300_000;
+const MARKDOWN_DEPTH_LIMIT = 400;
+const VOID_HTML_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+
+// True when more than `limit` elements are open at the same time. One linear pass over the tags.
+function exceedsHtmlDepth(html: string, limit: number): boolean {
+  const tag = /<(\/?)([a-z][a-z0-9-]*)[^<>]*?(\/?)>/gi;
+  let depth = 0;
+  for (let match = tag.exec(html); match; match = tag.exec(html)) {
+    const name = match[2].toLowerCase();
+    if (VOID_HTML_TAGS.has(name) || match[3] === "/") continue;
+    if (match[1] === "/") {
+      depth = Math.max(0, depth - 1);
+    } else if (++depth > limit) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Structure-preserving alternative to stripHtmlToText, for HTML-only emails
 // (no text/plain alternative part) — this is the fallback path in
 // getParsedMailDetail, not a replacement for a sender's own authored plain
@@ -297,9 +338,17 @@ export function htmlToMarkdown(value?: string): string | undefined {
     return undefined;
   }
 
+  // The output is capped at 10,000 characters below, so a very large message needs only its start.
+  // Markup nested thousands deep without closing is a hostile pattern (turndown's work grows with the
+  // square of it); real mail nests tens of levels, so fall back to the linear text stripper.
+  const html = value.length > MARKDOWN_INPUT_LIMIT ? value.slice(0, MARKDOWN_INPUT_LIMIT) : value;
+  if (exceedsHtmlDepth(html, MARKDOWN_DEPTH_LIMIT)) {
+    return stripHtmlToText(html);
+  }
+
   let markdown: string;
   try {
-    markdown = getMarkdownConverter().turndown(value);
+    markdown = getMarkdownConverter().turndown(html);
   } catch {
     // Malformed HTML turndown can't parse — fall back to the plain-text
     // stripper rather than surfacing an error for what's still readable mail.
@@ -550,10 +599,14 @@ export function searchKey(value: string): string {
 }
 
 // What a search term is looked for as: one spelling, or both when the term has such letters.
+// Empty when the term has nothing searchable in it.
 export function searchNeedles(value: string): string[] {
   const folded = foldSearchText(value);
   const spelled = spelledOutText(value);
-  return spelled !== undefined && spelled !== folded ? [folded, spelled] : [folded];
+  const forms = spelled !== undefined && spelled !== folded ? [folded, spelled] : [folded];
+  // A term made only of combining marks folds to "", which would "contain-match" every text. It has no
+  // searchable content, so it matches nothing.
+  return forms.filter((form) => form !== "");
 }
 
 // Accent-, case- and spelling-insensitive "contains".

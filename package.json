@@ -1,6 +1,6 @@
 {
   "name": "proton-mail-bridge-client",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "description": "Proton Mail Bridge Client — full-featured CLI and Claude Desktop MCP for Proton Mail via Proton Bridge. Read, search, send, draft, archive, manage folders, and more.",
   "mcpName": "io.github.googlarz/proton-mail-bridge-client",
   "type": "module",
@@ -35,7 +35,8 @@
     "clean": "rm -rf dist",
     "ci": "npm run lint && npm test",
     "pack:check": "npm pack --dry-run",
-    "release:check": "npm run lint && npm test && npm run pack:check",
+    "smoke:pack": "node scripts/pack-smoke.mjs",
+    "release:check": "npm run lint && npm test && npm run pack:check && npm run smoke:pack",
     "package:mcpb": "node scripts/build-mcpb.mjs",
     "version": "node scripts/sync-versions.mjs"
   },

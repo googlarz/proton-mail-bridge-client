@@ -128,3 +128,51 @@ test("plain ue/oe spelling is not widened in the filters: Dueck is not found as 
     assert.deepEqual(ids(await service.search({ from: "duck", limit: 10 })), []);
   });
 });
+
+test("a filter that contains only combining marks matches nothing, it does not match every message", async () => {
+  await withIndex(async (service) => {
+    assert.deepEqual(ids(await service.search({ subject: "\u0301", limit: 10 })), []);
+    assert.deepEqual(ids(await service.search({ from: "\u0301", limit: 10 })), []);
+    assert.deepEqual(ids(await service.search({ to: "\u0301", limit: 10 })), []);
+  });
+});
+
+test("find_document_threads and search ranking use the same folding as the filters", async () => {
+  await withIndex(async (service) => {
+    const found = await service.findDocumentThreads({ category: "document", query: "lodz" });
+    assert.equal(found.threads.length, 1);
+    assert.match(found.threads[0].documents[0].filename, /Łódź/);
+    assert.equal((await service.findDocumentThreads({ category: "document", query: "krakow" })).threads.length, 0);
+  });
+});
+
+test("label filters are exact: Work does not match Network, in either spelling of the case", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-label-exact-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+  try {
+    await service.recordSnapshot({
+      syncedAt: "2026-03-25T10:00:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 2, unseen: 2 }],
+      folderStats: [{ folder: "INBOX", fetched: 2, total: 2, strategy: "recent" }],
+      emails: [
+        mail(1, { subject: "one", from: { name: "A", address: "a@example.com" }, labels: ["Labels/Work"] }),
+        mail(2, { subject: "two", from: { name: "B", address: "b@example.com" }, labels: ["Labels/Network"] }),
+      ],
+    });
+    assert.deepEqual(ids(await service.search({ label: "Work", limit: 10 })), ["INBOX::1"]);
+    assert.deepEqual(ids(await service.search({ label: "work", limit: 10 })), ["INBOX::1"]);
+    assert.deepEqual(ids(await service.search({ label: "Network", limit: 10 })), ["INBOX::2"]);
+  } finally {
+    await service.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("senderDomain matches regardless of case, and FOLD(NULL) stays NULL", async () => {
+  await withIndex(async (service) => {
+    assert.deepEqual(ids(await service.search({ senderDomain: "FIRMA.CZ", limit: 10 })), ["INBOX::1"]);
+    const db = await service.ensureDb();
+    assert.equal(db.prepare("SELECT FOLD(NULL) AS v").get().v, null);
+    assert.equal(db.prepare("SELECT FOLD('Łódź') AS v").get().v, "lodz");
+  });
+});

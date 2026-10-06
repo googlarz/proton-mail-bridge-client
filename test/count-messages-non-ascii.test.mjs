@@ -30,33 +30,43 @@ function rfc822(m) {
   return Buffer.from(`From: ${m.name} <${m.addr}>\r\nSubject: ${m.subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${m.body}\r\n`);
 }
 
-function createService({ total = MESSAGES } = {}) {
+function createService({ total = MESSAGES, folders } = {}) {
   const service = new SimpleIMAPService(createConfig());
   const sent = { queries: [], fetched: 0 };
-  const client = {
-    mailbox: { path: "INBOX", exists: total.length },
-    search: async (query) => {
-      sent.queries.push(query);
-      const text = JSON.stringify(query);
-      if (/[^\x00-\x7f]/.test(text)) return []; // Bridge: non-ASCII never matches
-      const needle = (query.from ?? query.subject ?? query.body ?? "").toString().toLowerCase();
-      return total.filter((m) => !needle || `${m.name} ${m.addr} ${m.subject} ${m.body}`.toLowerCase().includes(needle)).map((m) => m.uid);
-    },
-    async *fetch(uids) {
-      for (const uid of uids) {
-        const m = total.find((x) => x.uid === uid);
-        if (!m) continue;
-        sent.fetched += 1;
-        const [mailbox, host] = m.addr.split("@");
-        yield {
-          uid, seq: uid,
-          envelope: { subject: m.subject, from: [{ name: m.name, address: m.addr, mailbox, host }], to: [], cc: [], bcc: [], replyTo: [] },
-          internalDate: new Date(Date.UTC(2026, 0, uid)), flags: new Set(), labels: new Set(), bodyStructure: {}, source: rfc822(m),
-        };
-      }
-    },
+  // `folders` maps a folder path to its messages; without it everything lives in INBOX.
+  const byFolder = folders ?? { INBOX: total };
+  const clientFor = (folder) => {
+    const list = byFolder[folder] ?? [];
+    return {
+      mailbox: { path: folder, exists: list.length },
+      search: async (query) => {
+        sent.queries.push(query);
+        const text = JSON.stringify(query);
+        if (/[^\x00-\x7f]/.test(text)) return []; // Bridge: non-ASCII never matches
+        const needle = (query.from ?? query.subject ?? query.body ?? "").toString().toLowerCase();
+        return list.filter((m) => !needle || `${m.name} ${m.addr} ${m.subject} ${m.body}`.toLowerCase().includes(needle)).map((m) => m.uid);
+      },
+      async *fetch(uids, query) {
+        for (const uid of uids) {
+          const m = list.find((x) => x.uid === uid);
+          if (!m) continue;
+          sent.fetched += 1;
+          const [mailbox, host] = m.addr.split("@");
+          const when = m.date ?? new Date(Date.UTC(2026, 0, uid));
+          yield {
+            uid, seq: uid,
+            envelope: { subject: m.subject, from: [{ name: m.name, address: m.addr, mailbox, host }], to: [], cc: [], bcc: [], replyTo: [] },
+            internalDate: when, flags: new Set(), labels: new Set(),
+            bodyStructure: m.attachment ? { disposition: "attachment", parameters: { filename: m.attachment } } : {},
+            // Like a real server: the message source only comes back when the fetch asks for it.
+            ...(query?.source ? { source: rfc822(m) } : {}),
+          };
+        }
+      },
+    };
   };
-  service.withMailbox = async (folder, _ro, action) => action(client);
+  service.withMailbox = async (folder, _ro, action) => action(clientFor(folder));
+  service.getFolderStructure = async () => Object.keys(byFolder).map((path) => ({ path, name: path, flags: [], specialUse: null }));
   return { service, sent };
 }
 
@@ -120,4 +130,33 @@ test("a plain ASCII query is sent to Bridge exactly as typed (no widening to uml
   await service.countMessages({ folder: "INBOX", from: "Mueller" });
   assert.ok(sent.queries.some((q) => q.from === "Mueller"));
   assert.equal(sent.fetched, 0, "an ASCII query still needs no local verification");
+});
+
+test("when more than 500 candidates match, count checks the newest by DATE, like search_emails, not the highest UIDs", async () => {
+  // After an import or a move, UID order does not follow date order. uids 1-100 are the newest mail and the
+  // only real matches; uids 101-600 are older and only share the ASCII narrowing ("Pelcov").
+  const matching = Array.from({ length: 100 }, (_, i) => ({ uid: i + 1, name: "Jana Pelcová", addr: `p${i}@firma.cz`, subject: "x", body: "y", date: new Date(Date.UTC(2026, 5, 1, 0, i)) }));
+  const others = Array.from({ length: 500 }, (_, i) => ({ uid: i + 101, name: "Pelcovx Other", addr: `o${i}@firma.cz`, subject: "x", body: "y", date: new Date(Date.UTC(2025, 0, 1, 0, i)) }));
+  const { service } = createService({ total: [...matching, ...others] });
+  const counted = await service.countMessages({ folder: "INBOX", from: "Pelcová" });
+  const searched = await service.searchEmails({ folder: "INBOX", limit: 500, from: "Pelcová" });
+  assert.equal(searched.emails.length, 100);
+  assert.equal(counted.count, 100, "the same 100 messages search_emails finds");
+  assert.equal(counted.approximate, true);
+});
+
+test("count_messages with a label that is a folder counts that folder, as search_emails does", async () => {
+  const folders = {
+    INBOX: [{ uid: 1, name: "A", addr: "a@x.com", subject: "inbox mail", body: "" }],
+    "Labels/Newsletters": [
+      { uid: 1, name: "N", addr: "n@x.com", subject: "news one", body: "" },
+      { uid: 2, name: "N", addr: "n@x.com", subject: "news two", body: "" },
+    ],
+  };
+  const { service } = createService({ folders });
+  const counted = await service.countMessages({ label: "Newsletters" });
+  assert.equal(counted.count, 2);
+  const searched = await service.searchEmails({ limit: 50, label: "Newsletters" });
+  assert.equal(searched.emails.length, 2);
+  assert.equal((await service.countMessages({ label: "NoSuchLabel" })).count, 0);
 });

@@ -49,3 +49,20 @@ test("a multi-word term matches as a whole in either spelling", () => {
   assert.ok(searchIncludes("Jana Müller", "jana muller"));
   assert.equal(searchIncludes("Jana Müller", "muller jana"), false);
 });
+
+test("a term with nothing searchable in it (only combining marks) matches nothing instead of everything", () => {
+  assert.deepEqual(searchNeedles("\u0301"), []);
+  assert.equal(searchIncludes("abc", "\u0301"), false);
+  assert.equal(searchIncludes("", "\u0301"), false);
+  assert.deepEqual(searchNeedles("e\u0301"), ["e"], "a real letter with an accent still folds to the letter");
+});
+
+test("only ä, ö, ü, ø and å get a spelled-out form; other accented letters just fold", () => {
+  for (const letter of ["é", "ß", "ł", "ç", "ñ", "ć", "æ", "œ", "ā"]) {
+    assert.equal(searchKey(letter).includes("\n"), false, `${letter} -> ${JSON.stringify(searchKey(letter))}`);
+    assert.equal(searchNeedles(letter).length, 1, letter);
+  }
+  for (const letter of ["ä", "ö", "ü", "ø", "å"]) {
+    assert.equal(searchNeedles(letter).length, 2, letter);
+  }
+});

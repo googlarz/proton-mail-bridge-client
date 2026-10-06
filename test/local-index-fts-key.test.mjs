@@ -181,3 +181,38 @@ test("an empty new index just records the version", async () => {
     }
   });
 });
+
+test("a rebuild of more than one batch (500 rows) with gaps in the row ids converts every message", async () => {
+  await withDataDir(async (dataDir) => {
+    let service = new LocalIndexService(createConfig(dataDir));
+    const many = Array.from({ length: 1230 }, (_, i) => mail(i + 1, { subject: `Bulk ${i + 1}`, preview: i % 2 ? "Łódź" : "plain" }));
+    await service.recordSnapshot({
+      syncedAt: "2026-03-25T10:00:00.000Z",
+      folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1230, unseen: 1230 }],
+      folderStats: [{ folder: "INBOX", fetched: 1230, total: 1230, strategy: "recent" }],
+      emails: many,
+    });
+    await service.close();
+
+    const raw = new Database(join(dataDir, "mail-index.sqlite"));
+    raw.exec(`DELETE FROM messages WHERE uid % 7 = 0`); // leaves gaps in the row ids
+    const remaining = raw.prepare(`SELECT COUNT(*) c FROM messages`).get().c;
+    raw.exec(`DELETE FROM metadata WHERE key = 'ftsKeyVersion'; DELETE FROM messages_fts;`);
+    raw.close();
+
+    service = new LocalIndexService(createConfig(dataDir));
+    try {
+      await service.getStatus();
+    } finally {
+      await service.close();
+    }
+    const check = new Database(join(dataDir, "mail-index.sqlite"));
+    try {
+      assert.ok(remaining > 1000 && remaining < 1230);
+      assert.equal(check.prepare(`SELECT COUNT(*) c FROM messages_fts`).get().c, remaining);
+      assert.equal(check.prepare(`SELECT COUNT(DISTINCT email_id) c FROM messages_fts`).get().c, remaining, "no message indexed twice");
+    } finally {
+      check.close();
+    }
+  });
+});

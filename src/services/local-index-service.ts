@@ -162,9 +162,11 @@ function escapeLike(value: string): string {
 // WHERE fragment: any of `columns` contains `needle`, ignoring case, accents and spelling variants
 // (Müller/Mueller, see searchKey). FOLD() is the SQL function registered in ensureDb.
 function foldedLike(columns: string[], needle: string): { sql: string; params: string[] } {
+  const forms = searchNeedles(needle);
+  if (forms.length === 0) return { sql: "(0)", params: [] }; // nothing searchable in the term: matches nothing
   const parts: string[] = [];
   const params: string[] = [];
-  for (const form of searchNeedles(needle)) {
+  for (const form of forms) {
     for (const column of columns) {
       parts.push(`FOLD(${column}) LIKE ? ESCAPE '\\'`);
       params.push(`%${escapeLike(form)}%`);
@@ -238,7 +240,7 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   const normalizedFilters: SearchEmailsInput = {
     ...filters,
     query: parsedQuery.residualTerms.join(" ") || undefined,
-    senderDomain: filters.senderDomain || parsedQuery.senderDomain,
+    senderDomain: (filters.senderDomain || parsedQuery.senderDomain)?.toLowerCase(),
     label: filters.label || parsedQuery.label,
     from: filters.from || parsedQuery.from,
     to: filters.to || parsedQuery.to,
@@ -593,6 +595,13 @@ function safeJsonParse<T>(value: string | null, fallback: T): T {
   }
 }
 
+// A JSON column that holds valid JSON of the wrong shape (null, {}, a number) must read as an empty
+// list, not as a value that makes every later `[...x]` or `.map` throw.
+function safeJsonArray<T>(value: string | null): T[] {
+  const parsed = safeJsonParse<unknown>(value, []);
+  return Array.isArray(parsed) ? (parsed as T[]) : [];
+}
+
 // The six searchable columns of messages_fts, in table order after email_id, as their searchKey.
 function ftsColumns(email: EmailSummary, preview: string, attachmentText: string | undefined): string[] {
   const parts = emailToSearchParts({ ...email, attachmentText });
@@ -639,17 +648,17 @@ function fallbackThreadKey(message: EmailSummary, ownerEmail?: string): string {
 
 function searchRelevanceScore(email: EmailSummary, filters: SearchEmailsInput): number {
   const parsedQuery = parseSearchQuery(filters.query);
-  const residual = parsedQuery.residualTerms.join(" ").toLowerCase();
+  const residual = parsedQuery.residualTerms.join(" ");
   const fullParticipants = [...email.from, ...email.to, ...email.cc, ...email.bcc]
-    .map((value) => `${value.name ?? ""} ${value.address ?? ""}`.trim().toLowerCase())
+    .map((value) => `${value.name ?? ""} ${value.address ?? ""}`.trim())
     .join("\n");
   let score = 0;
 
   if (residual) {
-    if (email.subject.toLowerCase().includes(residual)) score += 12;
-    if ((email.preview || "").toLowerCase().includes(residual)) score += 8;
-    if ((email.attachmentText || "").toLowerCase().includes(residual)) score += 5;
-    if (fullParticipants.includes(residual)) score += 6;
+    if (searchIncludes(email.subject, residual)) score += 12;
+    if (searchIncludes(email.preview || "", residual)) score += 8;
+    if (searchIncludes(email.attachmentText || "", residual)) score += 5;
+    if (searchIncludes(fullParticipants, residual)) score += 6;
   }
   if ((filters.senderDomain || parsedQuery.senderDomain) && email.from.some((entry) => extractDomain(entry.address || "") === (filters.senderDomain || parsedQuery.senderDomain))) {
     score += 4;
@@ -785,7 +794,7 @@ export class LocalIndexService {
     const normalizedFilters: SearchEmailsInput = {
       ...filters,
       query: parsedQuery.residualTerms.join(" ") || undefined,
-      senderDomain: filters.senderDomain || parsedQuery.senderDomain,
+      senderDomain: (filters.senderDomain || parsedQuery.senderDomain)?.toLowerCase(),
       label: filters.label || parsedQuery.label,
       from: filters.from || parsedQuery.from,
       to: filters.to || parsedQuery.to,
@@ -1578,10 +1587,8 @@ export class LocalIndexService {
         const haystack = [
           thread.subject,
           ...thread.documents.map((document) => `${document.filename || ""} ${document.subject}`),
-        ]
-          .join("\n")
-          .toLowerCase();
-        return haystack.includes(input.query.toLowerCase());
+        ].join("\n");
+        return searchIncludes(haystack, input.query);
       })
       .sort((left, right) => {
         if (right.documents.length !== left.documents.length) {
@@ -2250,16 +2257,30 @@ export class LocalIndexService {
     db.transaction(() => {
       db.exec(`DELETE FROM messages_fts`);
       let after = 0;
+      let skipped = 0;
       for (;;) {
         const rows = nextBatch.all(after) as Array<MessageRow & { _rowid: number }>;
         if (rows.length === 0) break;
         for (const row of rows) {
-          const email = this.rowToEmailSummary(row);
-          insertFts.run(email.id, ...ftsColumns(email, row.preview ?? "", row.attachment_text ?? undefined));
+          // One unreadable row must not stop the rebuild: it would repeat, and fail, on every start.
+          // That message just has no full-text entry until it is synced again.
+          try {
+            const email = this.rowToEmailSummary(row);
+            insertFts.run(email.id, ...ftsColumns(email, row.preview ?? "", row.attachment_text ?? undefined));
+          } catch (error) {
+            skipped += 1;
+            this.log.warn("Skipped a message while rebuilding the full-text index", "LocalIndexService", {
+              emailId: row.email_id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
         after = rows[rows.length - 1]._rowid;
       }
       db.prepare(`INSERT INTO metadata (key, value) VALUES ('ftsKeyVersion', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(FTS_KEY_VERSION);
+      if (skipped > 0) {
+        this.log.warn(`${skipped} message(s) were left out of the full-text index`, "LocalIndexService");
+      }
     })();
   }
 
@@ -2913,25 +2934,25 @@ export class LocalIndexService {
       seq: row.seq,
       messageId: row.message_id ?? undefined,
       inReplyTo: row.in_reply_to ?? undefined,
-      references: safeJsonParse(row.references_json, []),
+      references: safeJsonArray(row.references_json),
       threadId: row.thread_id ?? undefined,
       subject: row.subject,
-      from: safeJsonParse(row.from_json, []),
-      to: safeJsonParse(row.to_json, []),
-      cc: safeJsonParse(row.cc_json, []),
-      bcc: safeJsonParse(row.bcc_json, []),
-      replyTo: safeJsonParse(row.reply_to_json, []),
+      from: safeJsonArray(row.from_json),
+      to: safeJsonArray(row.to_json),
+      cc: safeJsonArray(row.cc_json),
+      bcc: safeJsonArray(row.bcc_json),
+      replyTo: safeJsonArray(row.reply_to_json),
       date: row.date ?? undefined,
       internalDate: row.internal_date ?? undefined,
       isRead: Boolean(row.is_read),
       isStarred: Boolean(row.is_starred),
-      flags: safeJsonParse(row.flags_json, []),
+      flags: safeJsonArray(row.flags_json),
       size: row.size ?? undefined,
       preview: row.preview ?? undefined,
       hasAttachments: Boolean(row.has_attachments),
-      attachments: safeJsonParse(row.attachments_json, []),
+      attachments: safeJsonArray(row.attachments_json),
       attachmentText: row.attachment_text ?? undefined,
-      labels: safeJsonParse(row.labels_json, []),
+      labels: safeJsonArray(row.labels_json),
       isAutomated: row.is_automated === null || row.is_automated === undefined ? undefined : Boolean(row.is_automated),
       deliveredTo: row.delivered_to ?? undefined,
     };

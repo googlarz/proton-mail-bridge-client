@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat, symlink, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, stat, symlink, mkdir, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeAttachmentToDownloadDir } from "../dist/index.js";
@@ -54,5 +54,25 @@ test("traversal and a symlink pointing outside the download dir are still refuse
     await symlink(outside, join(allowed, "escape"));
     await assert.rejects(writeAttachmentToDownloadDir(allowed, "../outside/x.txt", Buffer.from("x")), /escapes/);
     await assert.rejects(writeAttachmentToDownloadDir(allowed, "escape/x.txt", Buffer.from("x")), /escapes/);
+  });
+});
+
+test("a refused save does not create directories outside the download dir first", async () => {
+  await withDir(async (dir) => {
+    const allowed = join(dir, "allowed");
+    const outside = join(dir, "outside");
+    await mkdir(allowed);
+    await mkdir(outside);
+    await symlink(outside, join(allowed, "link"));
+    await assert.rejects(writeAttachmentToDownloadDir(allowed, "link/newdir/deeper/x.txt", Buffer.from("x")), /escapes/);
+    assert.deepEqual(await readdir(outside), [], "nothing may be created outside the allowed directory");
+  });
+});
+
+test("a save into a not-yet-existing subdirectory of the download dir still works", async () => {
+  await withDir(async (dir) => {
+    const allowed = join(dir, "allowed");
+    const target = await writeAttachmentToDownloadDir(allowed, "a/b/c.txt", Buffer.from("ok"));
+    assert.equal(target, join(allowed, "a", "b", "c.txt"));
   });
 });

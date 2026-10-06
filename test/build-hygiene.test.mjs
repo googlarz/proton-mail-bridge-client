@@ -106,3 +106,74 @@ test("every package the source imports is a runtime dependency, not a devDepende
     assert.ok(pkg.dependencies?.[name], `${name} is imported by src/ but is not in "dependencies"`);
   }
 });
+
+test(".dockerignore does not exclude what the image build compiles", async () => {
+  // The Dockerfile copies the context and runs `npm run build`, which compiles src/ with tsconfig.json.
+  // Ignoring src made the build fail with "No inputs were found in config file".
+  const ignored = (await read(".dockerignore")).split(/\r?\n/).map((line) => line.trim().replace(/\/$/, ""));
+  for (const needed of ["src", "tsconfig.json", "package.json", "package-lock.json"]) {
+    assert.equal(ignored.includes(needed), false, `${needed} must not be in .dockerignore`);
+  }
+});
+
+test("the publish workflow refuses a tag that does not match the package version", async () => {
+  const publish = await read(".github/workflows/publish.yml");
+  assert.match(publish, /github\.ref_name/);
+  assert.match(publish, /package\.json/);
+  assert.match(publish, /mcpb\/manifest\.json/);
+  // The check must run before the publish step.
+  assert.ok(publish.indexOf("name: Tag must match the package version") < publish.indexOf("run: npm publish"));
+  assert.doesNotMatch(publish, /npm install -g npm@latest/, "the privileged job must not float to a new npm major");
+});
+
+test("the tool count stated in the bundle manifest and README is the real number of tools", async () => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { createServer } = await import("../dist/index.js");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(join(tmpdir(), "tool-count-"));
+  const account = {
+    address: "o@example.com", slug: "o-example-com", dataDir: dir,
+    imap: { host: "127.0.0.1", port: 1143, secure: false, username: "o@example.com", password: "x" },
+    smtp: { host: "127.0.0.1", port: 1025, secure: false, username: "o@example.com", password: "x" },
+  };
+  const config = {
+    smtp: account.smtp, imap: account.imap, dataDir: dir, debug: false, cacheEnabled: true, analyticsEnabled: true, autoSync: false, syncInterval: 5,
+    runtime: { readOnly: false, allowSend: true, allowRemoteDraftSync: true, allowedActions: [], startupSync: false, autoSyncFolder: "INBOX", autoSyncFull: false,
+      autoSyncLimitPerFolder: 25, idleWatchEnabled: false, idleMaxSeconds: 30, confirmDestructive: false, allowEmptyFolder: false, restrictOutboundToSelf: false,
+      maxInlineBytes: 40960, opDelayMs: 0, sendDelaySeconds: 0 },
+    accounts: [account],
+  };
+  const { server } = createServer(config, { startBackgroundSync: false });
+  const client = new Client({ name: "test", version: "0" });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(st), client.connect(ct)]);
+  try {
+    const actual = (await client.listTools()).tools.length;
+    const manifest = JSON.parse(await read("mcpb/manifest.json")).long_description;
+    assert.equal(Number(/(\d+) tools/.exec(manifest)?.[1]), actual, "mcpb/manifest.json long_description");
+    const readme = await read("README.md");
+    for (const m of readme.matchAll(/every one of the (\d+) tools/g)) {
+      assert.equal(Number(m[1]), actual, "README.md");
+    }
+  } finally {
+    await client.close();
+    await server.close();
+    const { closeTrackedIndexes } = await import("./helpers/close-indexes.mjs");
+    await closeTrackedIndexes();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("CI and release:check run the pack smoke test that installs the packed tarball", async () => {
+  // The suite runs against the repo's node_modules, so it cannot notice a dependency missing from the
+  // published package (2.2.0). scripts/pack-smoke.mjs installs the tarball into an empty project.
+  const pkg = JSON.parse(await read("package.json"));
+  assert.equal(pkg.scripts["smoke:pack"], "node scripts/pack-smoke.mjs");
+  assert.match(pkg.scripts["release:check"], /smoke:pack/);
+  assert.match(await read(".github/workflows/ci.yml"), /npm run smoke:pack/);
+  const script = await read("scripts/pack-smoke.mjs");
+  assert.match(script, /--omit=dev/, "installs production dependencies only");
+  assert.match(script, /get_index_status/, "opens the local SQLite index (native better-sqlite3)");
+});

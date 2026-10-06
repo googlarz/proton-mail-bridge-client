@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ProtonMailConfig, SnoozeRecord } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { isProcessAlive, withFileLock } from "../utils/file-lock.js";
 import { parseEmailId } from "../utils/helpers.js";
+import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { SimpleIMAPService } from "./simple-imap-service.js";
@@ -457,18 +457,10 @@ export class SnoozeService {
       const parsed = JSON.parse(raw) as SnoozeFile;
       return { ...createEmptyStore(), ...parsed };
     } catch (error) {
-      if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
+      if (isFileNotFound(error)) {
         return createEmptyStore();
       }
-
-      const corruptPath = `${this.storePath}.corrupt`;
-      try {
-        copyFileSync(this.storePath, corruptPath);
-        this.log.error(`Corrupted snoozed.json backed up to ${corruptPath} — recreating empty store`, "SnoozeService", error);
-      } catch (backupError) {
-        this.log.error("Failed to back up corrupted snoozed.json — recreating empty store without backup", "SnoozeService", { parseError: error, backupError });
-      }
-
+      setAsideCorruptStore(this.storePath, error, this.log, "SnoozeService");
       return createEmptyStore();
     }
   }

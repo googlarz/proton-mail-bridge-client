@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DeliveryQueueKind, DeliveryQueueRecord, ProtonMailConfig, SendEmailInput } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { isProcessAlive, withFileLock } from "../utils/file-lock.js";
 import { ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
+import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { withTimeout } from "../utils/helpers.js";
 import { SMTPService } from "./smtp-service.js";
@@ -64,12 +64,16 @@ export class DeliveryQueueService {
   private draftStore?: DraftStoreService;
   private draftStoreResolver?: (slug: string) => DraftStoreService | undefined;
 
+  private readonly sendTimeoutMs: number;
+
   constructor(
     private readonly config: ProtonMailConfig,
     private readonly smtpService: SMTPService,
     private readonly log: Logger = logger,
+    options: { sendTimeoutMs?: number } = {},
   ) {
     this.queuePath = join(this.config.dataDir, "delivery-queue.json");
+    this.sendTimeoutMs = options.sendTimeoutMs ?? SEND_ITEM_TIMEOUT_MS;
   }
 
   setDraftStore(draftStore: DraftStoreService): void {
@@ -306,8 +310,8 @@ export class DeliveryQueueService {
         // wouldn't even reach later dueIds until the current send resolved.
         const result = await withTimeout(
           this.smtpService.sendEmail(claimed.payload),
-          SEND_ITEM_TIMEOUT_MS,
-          `Timed out after ${SEND_ITEM_TIMEOUT_MS}ms sending queued item ${id}`,
+          this.sendTimeoutMs,
+          `Timed out after ${this.sendTimeoutMs}ms sending queued item ${id}`,
         );
         delivered = true;
         sent += 1;
@@ -388,13 +392,17 @@ export class DeliveryQueueService {
           }
         }
       } catch (error) {
-        // SMTP failed (or timed out) after the draft claim succeeded above —
-        // revert it so the draft isn't stuck in "sending" forever, exactly
-        // like send_draft's own catch handler does for the same failure.
-        if (claimedDraft && !delivered) {
+        const rawMessage = error instanceof Error ? error.message : String(error);
+        const timedOut = rawMessage.startsWith("Timed out after");
+        // SMTP failed after the draft claim succeeded above — revert it so the draft isn't stuck in
+        // "sending" forever, exactly like send_draft's own catch handler does for the same failure.
+        // NOT after a timeout: the SMTP call cannot be cancelled and may still deliver, so the outcome
+        // is unknown. Reverting would make the draft sendable again and a later send_draft could
+        // deliver it twice. It stays locked in "sending" (listed as active, can be deleted) until the
+        // user has checked the Sent folder.
+        if (claimedDraft && !delivered && !timedOut) {
           await draftStore!.revertSending(claimedDraft.id);
         }
-        const rawMessage = error instanceof Error ? error.message : String(error);
         // withTimeout() races the send against a timer — it can't actually
         // cancel sendMail() (SMTP over a network socket has no cancellation
         // hook), so the real send keeps running in the background after the
@@ -403,8 +411,8 @@ export class DeliveryQueueService {
         // true outcome is exactly as unknown as recoverInterruptedSends'
         // restart-recovery case (see its comment) — say so explicitly
         // instead of implying delivery didn't happen.
-        const message = rawMessage.startsWith("Timed out after")
-          ? `${rawMessage} — delivery outcome is unknown, the send may still complete in the background. Check the mailbox's Sent folder to confirm before resending.`
+        const message = timedOut
+          ? `${rawMessage} — delivery outcome is unknown, the send may still complete in the background. Check the mailbox's Sent folder to confirm before resending.${claimedDraft ? " The source draft is left locked in \"sending\" so it cannot be sent twice; delete it, or recreate it, once you have checked." : ""}`
           : rawMessage;
         this.log.warn("Delivery queue item failed to send", "DeliveryQueueService", { id, error });
         await this.withLock(async () => {
@@ -547,18 +555,10 @@ export class DeliveryQueueService {
       const parsed = JSON.parse(raw) as DeliveryQueueFile;
       return { ...createEmptyStore(), ...parsed };
     } catch (error) {
-      if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
+      if (isFileNotFound(error)) {
         return createEmptyStore();
       }
-
-      const corruptPath = `${this.queuePath}.corrupt`;
-      try {
-        copyFileSync(this.queuePath, corruptPath);
-        this.log.error(`Corrupted delivery-queue.json backed up to ${corruptPath} — recreating empty store`, "DeliveryQueueService", error);
-      } catch (backupError) {
-        this.log.error("Failed to back up corrupted delivery-queue.json — recreating empty store without backup", "DeliveryQueueService", { parseError: error, backupError });
-      }
-
+      setAsideCorruptStore(this.queuePath, error, this.log, "DeliveryQueueService");
       return createEmptyStore();
     }
   }

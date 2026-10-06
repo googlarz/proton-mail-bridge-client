@@ -2302,7 +2302,27 @@ export class SimpleIMAPService {
     count: number;
     approximate?: true;
   }> {
-    const folder = input.folder ?? "INBOX";
+    // A label that names real folder(s) (Proton: "Newsletters" = Labels/Newsletters) is answered by
+    // counting those folders, exactly as searchEmails does: every message in them has the label, and
+    // Bridge never reports labels on the messages themselves.
+    const labelFolders = await this.resolveLabelFolders(input);
+    const folders = labelFolders ?? [input.folder ?? "INBOX"];
+    let count = 0;
+    let approximate = false;
+    for (const folder of folders) {
+      const counted = await this.countInFolder(folder, input, labelFolders !== undefined);
+      count += counted.count;
+      approximate = approximate || counted.approximate;
+    }
+    const folder = labelFolders ? labelFolders.join(", ") || input.folder || "INBOX" : folders[0];
+    return approximate ? { folder, count, approximate: true } : { folder, count };
+  }
+
+  private async countInFolder(
+    folder: string,
+    input: SearchEmailsInput,
+    labelIsFolder: boolean,
+  ): Promise<{ count: number; approximate: boolean }> {
     // Bridge cannot match non-ASCII values: send a narrowed ASCII query and verify locally,
     // exactly as searchEmails does, so the two agree.
     const { imapInput, criteria: nonAsciiCriteria } = splitNonAsciiCriteria(input);
@@ -2313,7 +2333,7 @@ export class SimpleIMAPService {
     const hasLocalOnlyFilters =
       typeof input.hasAttachment === "boolean" ||
       Boolean(input.threadId) ||
-      Boolean(input.label) ||
+      (Boolean(input.label) && !labelIsFolder) ||
       Boolean(input.attachmentName) ||
       Boolean(input.senderDomain) ||
       Boolean(input.mailboxRole);
@@ -2325,9 +2345,14 @@ export class SimpleIMAPService {
       if ((!hasLocalOnlyFilters && !nonAsciiCriteria) || uids.length === 0) {
         return uids.length;
       }
-      // The narrowed query can be broad; check only the newest candidates and say so.
+      // The narrowed query can be broad; check only the newest candidates (by date, which is what
+      // searchEmails ranks by: UID order does not follow date order after an import) and say so.
       if (nonAsciiCriteria && uids.length > NON_ASCII_SCAN_CAP) {
-        uids = [...uids].sort((a, b) => b - a).slice(0, NON_ASCII_SCAN_CAP);
+        const dated: { uid: number; date: number }[] = [];
+        for await (const message of client.fetch(uids, FETCH_INDEX_QUERY, { uid: true })) {
+          dated.push({ uid: message.uid, date: new Date(message.internalDate ?? 0).getTime() });
+        }
+        uids = pickNewestUids(dated, NON_ASCII_SCAN_CAP);
         approximate = true;
       }
       // A non-ASCII free-text query is verified against the body, so it needs the source too.
@@ -2350,7 +2375,7 @@ export class SimpleIMAPService {
       return matched;
     });
 
-    return approximate ? { folder, count, approximate: true } : { folder, count };
+    return { count, approximate };
   }
 
   async getFolderStats(folder?: string): Promise<{

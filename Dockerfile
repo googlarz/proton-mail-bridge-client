@@ -4,13 +4,11 @@ WORKDIR /app
 
 COPY package*.json ./
 # --ignore-scripts skips package.json's own "prepare" (npm run build), which
-# would fail here anyway since src/ isn't copied in yet — but it also skips
-# better-sqlite3's install script, the one that actually builds its native
-# binding. Left unfixed, the container has no working sqlite3 binding at all
-# and crashes as soon as anything touches the local index (LocalIndexService
-# is instantiated unconditionally at startup). Same fix already used in
-# install-claude-desktop.ts's installRuntimeDependencies for the identical
-# problem: rebuild just this one native package explicitly.
+# would fail here anyway since src/ isn't copied in yet. better-sqlite3 13 ships
+# prebuilt binaries for linux x64/arm64 (glibc and musl) and has no install
+# script, so the explicit rebuild is only a safety net, as in
+# install-claude-desktop.ts's installRuntimeDependencies.
+# src/ must stay out of .dockerignore: the build below compiles it.
 RUN npm ci --ignore-scripts && npm rebuild better-sqlite3
 
 COPY . .

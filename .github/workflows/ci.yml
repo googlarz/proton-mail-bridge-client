@@ -46,3 +46,9 @@ jobs:
 
       - name: Run test suite
         run: npm test
+
+      # Packs the project, installs the tarball into an empty project (production dependencies only)
+      # and starts the installed server and CLI. The test suite above runs against the repo's own
+      # node_modules, so it cannot see a dependency that is missing from the published package.
+      - name: Pack smoke test
+        run: npm run smoke:pack

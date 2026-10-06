@@ -319,7 +319,11 @@ export class SMTPService {
       // request, but only raster image types are accepted (no svg/html payloads).
       transformTags: {
         img: (tagName, attribs) => {
-          const src = attribs.src ?? "";
+          // Check what a browser will load, not the raw attribute: it ignores leading/trailing control
+          // characters and spaces in a URL and tabs/newlines anywhere in it, so " data:image/svg+xml,..."
+          // or "da\nta:..." would otherwise skip the checks below (and the scheme check after this).
+          const src = (attribs.src ?? "").replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+          if (attribs.src !== undefined) attribs.src = src;
           if (/^data:/i.test(src)) {
             if (!DATA_IMAGE_SRC.test(src)) {
               delete attribs.src;
@@ -362,7 +366,9 @@ export class SMTPService {
     // login identity. Only validated for shape here; an address not on the account is
     // rejected by Proton at send time, same as it would be from any other mail client.
     const fromAddress = input.from && isValidEmail(input.from) ? input.from : this.config.smtp.username;
-    const fromName = input.fromName ? sanitizeHeader(input.fromName).replace(/"/g, "") : undefined;
+    // Inside the quoted display name a backslash would escape the closing quote and let the rest of the
+    // header out of it, so both characters are dropped.
+    const fromName = input.fromName ? sanitizeHeader(input.fromName).replace(/["\\]/g, "") : undefined;
     const subject = sanitizeHeader(input.subject);
     const replyTo = input.replyTo ? sanitizeHeader(input.replyTo) : undefined;
     const messageId = input.messageId

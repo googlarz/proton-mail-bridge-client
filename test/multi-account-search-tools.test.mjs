@@ -186,3 +186,33 @@ test("search_emails on a single-account server keeps the service's own hasMore",
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("count_messages reports approximate when any account's count is approximate", async () => {
+  await withServer(async ({ call, primaryBundle, secondBundle }) => {
+    primaryBundle.imapService.countMessages = async () => ({ folder: "INBOX", count: 7, approximate: true });
+    secondBundle.imapService.countMessages = async () => ({ folder: "INBOX", count: 3 });
+    const result = await call("count_messages", { folder: "INBOX" });
+    assert.equal(result.count, 10);
+    assert.equal(result.approximate, true);
+  });
+});
+
+test("count_messages returns the other accounts' counts when one account fails, and says which failed", async () => {
+  await withServer(async ({ call, primaryBundle, secondBundle, secondarySlug }) => {
+    primaryBundle.imapService.countMessages = async () => ({ folder: "Labels/X", count: 4 });
+    secondBundle.imapService.countMessages = async () => { throw new Error("Mailbox does not exist"); };
+    const result = await call("count_messages", { folder: "Labels/X" });
+    assert.equal(result.count, 4);
+    assert.equal(result.failedAccounts.length, 1);
+    assert.equal(result.failedAccounts[0].account, secondarySlug);
+    assert.match(result.failedAccounts[0].error, /does not exist/);
+  });
+});
+
+test("count_messages still fails when every account fails", async () => {
+  await withServer(async ({ call, primaryBundle, secondBundle }) => {
+    primaryBundle.imapService.countMessages = async () => { throw new Error("boom"); };
+    secondBundle.imapService.countMessages = async () => { throw new Error("boom too"); };
+    await assert.rejects(call("count_messages", { folder: "INBOX" }), /boom/);
+  });
+});

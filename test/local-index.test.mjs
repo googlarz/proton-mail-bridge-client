@@ -2814,3 +2814,28 @@ test("getFreshness agrees with getStatus on message count and staleness, without
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("getFreshness: exactly at the stale threshold is not stale, one minute past it is", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-freshness-boundary-"));
+  const service = new LocalIndexService(createConfig(dataDir));
+  const snapshotAt = (minutesAgo) => ({
+    syncedAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+    folders: [{ path: "INBOX", name: "INBOX", delimiter: "/", specialUse: "\\Inbox", listed: true, subscribed: true, flags: [], messages: 1, unseen: 0 }],
+    folderStats: [{ folder: "INBOX", fetched: 1, total: 1, strategy: "recent" }],
+    emails: [{
+      id: "INBOX::1", folder: "INBOX", uid: 1, seq: 1, messageId: "<b@example.com>", subject: "S",
+      from: [{ address: "a@example.com" }], to: [{ address: "owner@example.com" }], cc: [], bcc: [], replyTo: [],
+      date: "2026-03-25T09:00:00.000Z", internalDate: "2026-03-25T09:00:00.000Z", isRead: true, isStarred: false,
+      flags: [], preview: "x", hasAttachments: false, attachments: [], labels: [],
+    }],
+  });
+  try {
+    await service.recordSnapshot(snapshotAt(60));
+    assert.equal((await service.getFreshness()).isStale, false, "60 minutes old is not stale");
+    await service.recordSnapshot(snapshotAt(61));
+    assert.equal((await service.getFreshness()).isStale, true, "61 minutes old is stale");
+  } finally {
+    await service.close();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

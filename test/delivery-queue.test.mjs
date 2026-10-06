@@ -531,3 +531,49 @@ test("a failure to persist 'sent' after confirmed SMTP delivery never reverts th
     assert.equal(after.status, "sent");
   });
 });
+
+// A scheduled send that times out has an UNKNOWN outcome: the SMTP call keeps running after the
+// timer wins and may still deliver. Reverting the draft to "draft" made it sendable again, so a later
+// send_draft could deliver it twice. It must stay locked in "sending" instead.
+test("a timed-out scheduled send leaves its draft locked, so it cannot be sent a second time", async () => {
+  await withTempDir(async (dataDir) => {
+    const store = new DraftStoreService(createConfig(dataDir));
+    const draft = await store.createDraft({ to: ["x@example.com"], subject: "S", body: "b" });
+    let delivered = 0;
+    const smtp = {
+      async sendEmail(payload) {
+        await new Promise((resolve) => setTimeout(resolve, 250)); // slower than the 40 ms limit below
+        delivered += 1;
+        return { messageId: "<late@example.com>", accepted: payload.to, rejected: [] };
+      },
+    };
+    const queue = new DeliveryQueueService(createConfig(dataDir), smtp, undefined, { sendTimeoutMs: 40 });
+    queue.setDraftStore(store);
+    const queued = await queue.enqueue({ to: ["x@example.com"], subject: "S", body: "b" }, pastSendAt(), "scheduled_send", draft.id);
+
+    const result = await queue.checkDue();
+    assert.equal(result.failed, 1);
+
+    const record = (await queue.list()).find((item) => item.id === queued.id);
+    assert.equal(record.status, "failed");
+    assert.match(record.failureReason, /outcome is unknown/);
+    assert.match(record.failureReason, /draft.*locked|locked.*draft/i);
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal(delivered, 1, "the send did complete in the background");
+    assert.equal((await store.getDraft(draft.id)).status, "sending", "the draft stays locked");
+    await assert.rejects(store.claimForSending(draft.id), "a later send_draft must not be able to claim it");
+  });
+});
+
+test("a send that fails outright (not a timeout) still returns its draft to 'draft'", async () => {
+  await withTempDir(async (dataDir) => {
+    const store = new DraftStoreService(createConfig(dataDir));
+    const draft = await store.createDraft({ to: ["x@example.com"], subject: "S", body: "b" });
+    const queue = new DeliveryQueueService(createConfig(dataDir), fakeSmtp("fail"));
+    queue.setDraftStore(store);
+    await queue.enqueue({ to: ["x@example.com"], subject: "S", body: "b" }, pastSendAt(), "scheduled_send", draft.id);
+    await queue.checkDue();
+    assert.equal((await store.getDraft(draft.id)).status, "draft");
+  });
+});

@@ -986,7 +986,7 @@ const TOOLS = [
   },
   {
     name: "count_messages",
-    description: "Count messages matching search criteria. Plain IMAP criteria are answered by the server without fetching messages; non-ASCII values (accented letters, ł, ß) and local-only filters (hasAttachment, senderDomain, label, threadId) are checked locally, and the result carries approximate: true when only the newest 500 candidates could be checked. Use to preview how many results a search would return before running it. Prefer folder_stats for a simple unread/total count on one folder without filters.",
+    description: "Count messages matching search criteria. Plain IMAP criteria are answered by the server without fetching messages; non-ASCII values (accented letters, ł, ß) and local-only filters (hasAttachment, senderDomain, threadId, attachmentName, mailboxRole) are checked locally, and the result carries approximate: true when only the newest 500 candidates could be checked. A label that names a folder (Proton: Labels/<name>) counts that folder, as search_emails does. Across several accounts the counts are summed and an account that fails (for example one without that folder) is listed in failedAccounts instead of failing the whole call. Use to preview how many results a search would return before running it. Prefer folder_stats for a simple unread/total count on one folder without filters.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -2327,7 +2327,9 @@ export function formatQuoteDate(value: string): string {
 // (a broken-image box) and copies its base64 into every reply, and a cid: image refers to a part
 // that is not attached here. Replace each with its alt text, or nothing.
 export function stripUnshippableImages(html: string): string {
-  return html.replace(/<img\b[^>]*>/gi, (tag) => {
+  // A tag is a run of non-quote characters and quoted strings, so a ">" inside alt="a>b" does not end
+  // it and an unclosed "<img" stops at the next "<" instead of scanning to the end of the text.
+  return html.replace(/<img\b(?:[^<>"']|"[^"]*"|'[^']*')*>/gi, (tag) => {
     const src = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(tag);
     const value = (src?.[1] ?? src?.[2] ?? src?.[3] ?? "").trim().toLowerCase();
     if (!value.startsWith("data:") && !value.startsWith("cid:")) return tag;
@@ -2335,6 +2337,14 @@ export function stripUnshippableImages(html: string): string {
     const text = (alt?.[1] ?? alt?.[2] ?? "").trim();
     return text ? `[${text}]` : "";
   });
+}
+
+// References for a reply: the original's own chain followed by the original's Message-ID (RFC 5322),
+// so mail clients that thread by References keep the whole conversation together.
+function replyReferences(detail: EmailDetail): string[] | undefined {
+  const chain = [...(detail.references ?? []), detail.messageId].filter((id): id is string => Boolean(id));
+  const unique = [...new Set(chain)];
+  return unique.length > 0 ? unique : undefined;
 }
 
 function buildReplyText(detail: EmailDetail, body: string): string {
@@ -2842,7 +2852,7 @@ function parseResourceUri(uri: string): ParsedResourceUri {
 // created here are owner-only (0700) and the file is 0600, existing files included.
 export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: string, data: Buffer): Promise<string> {
   const { resolve: pathResolve, join: pathJoin, dirname, basename, sep } = await import("node:path");
-  const { realpathSync } = await import("node:fs");
+  const { realpathSync, existsSync } = await import("node:fs");
   const { writeFile: wf, mkdir: mkd, chmod: chm } = await import("node:fs/promises");
   const absDir = pathResolve(downloadDir);
   const absTarget = pathJoin(absDir, saveTo);
@@ -2851,8 +2861,24 @@ export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: 
   if (!absTarget.startsWith(absDir + sep) && absTarget !== absDir) {
     throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
   }
-  await mkd(pathResolve(absTarget, ".."), { recursive: true, mode: 0o700 });
+  // The allowed directory itself may be created. Then check, BEFORE creating anything below it, that the
+  // deepest directory that already exists on the way to the target really is inside it: otherwise a
+  // symlink in the allowed dir could make mkdir create new directories outside it before the final
+  // containment check below refuses the save.
+  await mkd(absDir, { recursive: true, mode: 0o700 });
   const realDir = realpathSync(absDir);
+  let probe = pathResolve(absTarget, "..");
+  while (!existsSync(probe)) probe = dirname(probe);
+  let realProbe: string;
+  try {
+    realProbe = realpathSync(probe);
+  } catch {
+    throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
+  }
+  if (!realProbe.startsWith(realDir + sep) && realProbe !== realDir) {
+    throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
+  }
+  await mkd(pathResolve(absTarget, ".."), { recursive: true, mode: 0o700 });
   let realTarget: string;
   try {
     realTarget = realpathSync(absTarget);
@@ -4654,7 +4680,11 @@ export function createServer(
           // Signature goes right after the user's own reply text, before the
           // quoted original — not at the very end, after the quote.
           const signedReply = applySignature(body, htmlBody, normalizeBoolean(args.appendSignature, true), isHtml);
-          const replyBody = includeQuoteReply ? buildReplyText(detail, signedReply.body) : signedReply.body;
+          // With isHtml the body is HTML source, so the quoted original (untrusted text) must be HTML-escaped
+          // by the HTML builder, not appended as raw plain text.
+          const replyBody = includeQuoteReply
+            ? (isHtml ? buildReplyHtml(detail, signedReply.body) : buildReplyText(detail, signedReply.body))
+            : signedReply.body;
           // A separate htmlBody (the markdown-rendered case) needs the SAME quoted
           // original merged in — see buildReplyHtml's comment for why this was
           // previously missing entirely from the html part.
@@ -4682,7 +4712,7 @@ export function createServer(
               from: fromReply,
               sanitizeHtml: sanitizeHtmlReply,
               inReplyTo: detail.messageId,
-              references: detail.messageId ? [detail.messageId] : undefined,
+              references: replyReferences(detail),
               attachments,
               // Already applied above, before quote-wrapping.
               appendSignature: false,
@@ -4763,7 +4793,9 @@ export function createServer(
           // Signature goes right after the user's own reply text, before the
           // quoted original — not at the very end, after the quote.
           const signedReplyRa = applySignature(bodyRa, htmlBodyRa, normalizeBoolean(args.appendSignature, true), isHtmlRa);
-          const replyBodyRa = includeQuoteRa ? buildReplyText(detailRa, signedReplyRa.body) : signedReplyRa.body;
+          const replyBodyRa = includeQuoteRa
+            ? (isHtmlRa ? buildReplyHtml(detailRa, signedReplyRa.body) : buildReplyText(detailRa, signedReplyRa.body))
+            : signedReplyRa.body;
           // Same fix as reply_to_email — see buildReplyHtml's comment.
           const replyHtmlBodyRa = includeQuoteRa && signedReplyRa.htmlBody !== undefined
             ? buildReplyHtml(detailRa, signedReplyRa.htmlBody)
@@ -4899,7 +4931,7 @@ export function createServer(
               cc,
               bcc,
               subject: prefixedSubject(detail.subject, "Fwd:"),
-              body: buildForwardText(detail, signedFwd.body),
+              body: isHtml ? buildForwardHtml(detail, signedFwd.body) : buildForwardText(detail, signedFwd.body),
               isHtml,
               htmlBody: forwardHtmlBody,
               fromName: fromNameFwd,
@@ -5096,7 +5128,7 @@ export function createServer(
               // sender instead of the alias the caller asked for.
               from: optionalString(args, "from"),
               inReplyTo: detail.messageId,
-              references: detail.messageId ? [detail.messageId] : undefined,
+              references: replyReferences(detail),
               attachments,
               sourceEmailId: detail.id,
               sourceMessageId: detail.messageId,
@@ -6180,16 +6212,28 @@ export function createServer(
           // Merge strategy: count in every account's mailbox and sum — folder is
           // reported from the request (all accounts are counted against the same
           // folder name), with a per-account breakdown alongside the total.
-          const perAccount = await Promise.all(
+          // One account lacking the folder or label (or unreachable) must not fail the whole count, as in
+          // search_emails: report it and return the rest. Every account failing still throws.
+          const settled = await Promise.allSettled(
             accountManager.all().map(async (bundle) => ({
               slug: bundle.account.slug,
               ...(await bundle.imapService.countMessages(countInput)),
             })),
           );
+          const perAccount = settled.flatMap((entry) => (entry.status === "fulfilled" ? [entry.value] : []));
+          if (perAccount.length === 0) {
+            throw (settled[0] as PromiseRejectedResult).reason;
+          }
+          const failedAccounts = settled.flatMap((entry, index) =>
+            entry.status === "rejected"
+              ? [{ account: accountManager.all()[index].account.slug, error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }]
+              : [],
+          );
           return createTextResult({
             folder: countInput.folder ?? "INBOX",
             count: perAccount.reduce((sum, entry) => sum + entry.count, 0),
             ...(perAccount.some((entry) => entry.approximate) ? { approximate: true } : {}),
+            ...(failedAccounts.length > 0 ? { failedAccounts } : {}),
             byAccount: perAccount,
           });
         }
@@ -8302,7 +8346,7 @@ export function createServer(
               // Same fix as create_reply_draft — see its comment.
               from: optionalString(args, "from"),
               inReplyTo: detail.messageId,
-              references: detail.messageId ? [detail.messageId] : undefined,
+              references: replyReferences(detail),
               attachments,
               sourceEmailId: detail.id,
               sourceMessageId: detail.messageId,

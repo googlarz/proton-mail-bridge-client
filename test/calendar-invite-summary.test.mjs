@@ -54,3 +54,12 @@ test("summarizeCalendarText still summarizes a bare VEVENT-less snippet", () => 
   const summary = summarizeCalendarText("SUMMARY:Standup\nDTSTART:20261013T090000Z\n");
   assert.equal(summary, "Standup | Starts 20261013T090000Z");
 });
+
+test("with several VEVENTs the first one is summarized, not a mix of them", () => {
+  const ics = [
+    "BEGIN:VCALENDAR", "BEGIN:VEVENT", "SUMMARY:First", "DTSTART:20261012T170000Z", "END:VEVENT",
+    "BEGIN:VEVENT", "SUMMARY:Second", "DTSTART:20261013T090000Z", "DTEND:20261013T100000Z", "LOCATION:Elsewhere", "END:VEVENT",
+    "END:VCALENDAR",
+  ].join("\r\n");
+  assert.equal(summarizeCalendarText(ics), "First | Starts 20261012T170000Z");
+});

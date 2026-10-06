@@ -91,3 +91,11 @@ test("countMessages agrees with searchEmails for the same local-only filters", a
     assert.equal(counted.count, searched.emails.length, JSON.stringify(filters));
   }
 });
+
+test("countMessages applies attachmentName and mailboxRole too", async () => {
+  const service = createService();
+  assert.equal((await service.countMessages({ folder: "INBOX", attachmentName: "f.pdf" })).count, 2);
+  assert.equal((await service.countMessages({ folder: "INBOX", attachmentName: "nothing-like-this" })).count, 0);
+  assert.equal((await service.countMessages({ folder: "INBOX", mailboxRole: "inbox" })).count, 5);
+  assert.equal((await service.countMessages({ folder: "INBOX", mailboxRole: "trash" })).count, 0);
+});

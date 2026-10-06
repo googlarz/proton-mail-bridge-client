@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here.
 
+## [2.3.2] — 2026-10-06
+
+Fixes from an independent review of everything changed since 2.1.47. Each has a test that fails without the fix.
+
+### Fixed
+- **One damaged row could make the whole local index unusable (introduced in 2.3.0).** If a stored message had valid JSON of the wrong shape in a list column (`null`, `{}`, a number), the one-time full-text rebuild threw, never recorded that it had finished, and failed again on every start, taking search, status and sync down until `clear_index`. List columns now always read as lists, and a row that still cannot be converted is skipped and logged instead of stopping the rebuild.
+- **Hostile HTML in an incoming mail could freeze the server for seconds to minutes.** Three patterns grew with the square of the input: stripping tags and `<style>`/`<script>` blocks from HTML, converting HTML-only mail to Markdown (deeply nested unclosed markup), and removing images when replying or forwarding. A 1 MB message of repeated `<a ` or `<img ` now takes milliseconds. HTML-only mail is converted from at most its first 300 KB (the result was already capped at 10,000 characters) and markup nested more than 400 deep falls back to plain text. A stray `<` in text no longer swallows the words up to the next tag.
+- **The HTML sanitizer's image limits could be bypassed with a leading space.** `src=" data:image/svg+xml,..."` (or a tab, newline or control character, or `da<newline>ta:`) skipped the raster-only and 512 KB checks, so multi-megabyte or SVG data images went out. The value is now read the way a browser reads it before it is checked.
+- **The scheduled-send queue, snooze and template stores could lose data on a read error**, the same defect fixed for drafts in 2.1.48. Only a file that is not valid JSON is set aside (as `<file>.corrupt`, never over an earlier backup, and if the backup cannot be written the read fails and the file is left alone); any other error (permissions, I/O) is raised instead of starting an empty store that the next save would write over the real data. All four stores share one implementation.
+- **A scheduled send that timed out made its draft sendable again** although the message may still have been delivered, so a later `send_draft` could send it twice. After a timeout the draft stays locked in `sending` (listed as active, can be deleted) and the failure note says so.
+- **`count_messages`** now checks the newest 500 candidates by date, as `search_emails` does (it used the highest UIDs, so after an import it could report 0 where a search finds 100), counts a label that is a folder (`Labels/<name>`) the way `search_emails` does instead of scanning only INBOX, and returns the other accounts' counts with `failedAccounts` when one account has no such folder instead of failing outright.
+- **Replies and forwards with `isHtml: true` put the quoted original into the HTML unescaped**, so a sender name like `Bob <b>` formatted the rest of the message, `a<b and c>d` lost text, and a link inside the original became a live link in your reply. The quote is now escaped, as it already was for drafts and Markdown replies. Replies also carry the original's whole `References` chain, not just its Message-ID, so threads stay together in clients that thread by `References`.
+- `update_draft` refuses a draft that has already been sent (it used to rewrite it and mark the new text as sent). A display name ending in a backslash can no longer break out of the quoted `From` name. A `senderDomain` filter in capital letters (`FIRMA.CZ`) matched nothing in the local index. `find_document_threads` and the relevance ranking now fold accents like the filters do. A filter made only of combining marks matches nothing instead of everything. A rejected attachment save no longer creates directories outside the download directory before refusing.
+
+### Changed
+- **Release safety:** a new pack smoke test (`npm run smoke:pack`, run in CI on Ubuntu, macOS and Windows and in `release:check`) installs the packed tarball into an empty project with production dependencies only, then starts the installed server and CLI, lists the tools and opens the local index. The test suite runs against the repo's own `node_modules`, so it could not see the missing dependency that broke 2.2.0; this does, and fails on that exact error.
+- The publish workflow refuses a tag that does not match the `package.json`, bundle manifest and `server.json` versions, and pins npm to the 11.x line in the job that holds the publishing credential.
+- The Docker image can build again: `.dockerignore` excluded `src/`, so `npm run build` had nothing to compile. The bundle manifest says 96 tools (it said 95), and a test keeps it and the README in step with the real count.
+
+### Known issues, not fixed in this release
+- A lock file left by a crashed process can be taken over by two waiters at once, which can lose an update in one of the JSON stores. Only after a crash, with two server processes sharing a data directory.
+- `install:claude-desktop` replaces the live runtime in place and has no rollback if `npm ci` fails halfway.
+- The JSON stores write through a temporary file and a rename but do not `fsync`, so a power loss can leave an empty file (it is then set aside as corrupt).
+- `save_attachment`, `save_attachments` and `export_email` called without an output path write under the server's own data directory without needing `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR`. `create_folder`, `create_label` and `import_email` are not governed by `PROTONMAIL_ALLOWED_ACTIONS` (they are blocked by read-only mode).
+- Filters in the local index are about 3-10x slower than before 2.3.0 on very large mailboxes (the `FOLD()` function runs per row). The sanitizer keeps relative links (`href="/x"`). The Homebrew formula under `homebrew/` is from version 1.11.1 and invalid.
+
 ## [2.3.1] — 2026-10-06
 
 ### Changed

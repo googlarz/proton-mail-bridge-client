@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -12,6 +11,7 @@ import type {
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { extractDomain } from "../utils/helpers.js";
+import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 
 interface DraftStoreFile {
@@ -208,6 +208,11 @@ export class DraftStoreService {
         throw new Error(
           `Draft ${id} is being sent right now — wait for the send to finish (or fail) before editing it.`,
         );
+      }
+      // An edit now would leave status "sent" on text that was never delivered (and update_draft would
+      // upload it to the Drafts folder). Create a new draft to send something else.
+      if (existing.status === "sent") {
+        throw new Error(`Draft ${id} has already been sent and can no longer be edited — create a new draft instead.`);
       }
 
       const updatedAt = new Date().toISOString();
@@ -511,40 +516,13 @@ export class DraftStoreService {
         drafts,
       };
     } catch (error) {
-      if (
-        error &&
-        typeof error === "object" &&
-        "code" in error &&
-        (error as { code?: string }).code === "ENOENT"
-      ) {
+      if (isFileNotFound(error)) {
         return createEmptyStore();
       }
 
-      // Only a parse failure means the file is corrupt. Any other read error
-      // (EACCES, EIO, EMFILE...) says nothing about the contents, so returning an
-      // empty store would let the next save() overwrite every existing draft.
-      if (!(error instanceof SyntaxError)) {
-        throw error;
-      }
-
-      // GAP-09: JSON parse failure means the file is corrupted. Back it up so the
-      // user can attempt manual recovery, then recreate an empty store.
-      const corruptPath = `${this.draftPath}.corrupt`;
-      try {
-        copyFileSync(this.draftPath, corruptPath);
-        this.log.error(
-          `Corrupted drafts.json backed up to ${corruptPath} — recreating empty store`,
-          "DraftStoreService",
-          error,
-        );
-      } catch (backupError) {
-        this.log.error(
-          "Failed to back up corrupted drafts.json — recreating empty store without backup",
-          "DraftStoreService",
-          { parseError: error, backupError },
-        );
-      }
-
+      // GAP-09: only a JSON parse failure means the file is corrupt; it is backed up for manual
+      // recovery. Any other read error is rethrown so the next save() cannot overwrite real drafts.
+      setAsideCorruptStore(this.draftPath, error, this.log, "DraftStoreService");
       return createEmptyStore();
     }
   }

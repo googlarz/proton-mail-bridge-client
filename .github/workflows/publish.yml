@@ -21,12 +21,25 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
+      # The tag is what users and the GitHub release see; npm publishes package.json's version. If they
+      # differ (a tag pushed on the wrong commit), publishing would put a different version on npm than
+      # the tag says, or fail confusingly. The bundle manifest and server.json must agree as well.
+      - name: Tag must match the package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          test "$TAG" = "v$version" || { echo "tag $TAG does not match package.json version $version"; exit 1; }
+          test "$(node -p "require('./mcpb/manifest.json').version")" = "$version" || { echo "mcpb/manifest.json version differs"; exit 1; }
+          test "$(node -p "require('./server.json').version")" = "$version" || { echo "server.json version differs"; exit 1; }
+
       # Trusted Publishing exchanges this job's OIDC token for a short-lived
       # publish token — no NPM_TOKEN secret, so classic-token 2FA/EOTP
       # prompts (which blocked every publish since v1.13.8) can't happen.
-      # Requires npm CLI >=11.5.1; setup-node's bundled npm may be older.
+      # Requires npm CLI >=11.5.1; setup-node's bundled npm may be older. Pinned to the 11.x line
+      # (this job holds id-token: write, so an unpinned `latest` would let a new major run here).
       - name: Update npm for Trusted Publishing support
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       - name: Install dependencies
         run: npm ci

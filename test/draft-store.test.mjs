@@ -293,3 +293,19 @@ test("missing drafts.json is an empty store", async () => {
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("a draft that has been sent cannot be edited afterwards", async () => {
+  // updateDraft refused only drafts that were being sent; after markSent the edit went through, the
+  // draft kept status "sent" with text that was never delivered, and update_draft synced it to Drafts.
+  const dataDir = await mkdtemp(join(tmpdir(), "protonmail-drafts-sent-edit-"));
+  try {
+    const store = new DraftStoreService(createConfig(dataDir));
+    const draft = await store.createDraft({ subject: "s", body: "original", to: ["a@example.com"] });
+    await store.claimForSending(draft.id);
+    await store.markSent(draft.id, { messageId: "<m@example.com>", accepted: ["a@example.com"], rejected: [] });
+    await assert.rejects(store.updateDraft(draft.id, { body: "edited after send" }), /already been sent/);
+    assert.equal((await store.getDraft(draft.id)).body, "original");
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

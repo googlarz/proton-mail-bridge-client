@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { EmailTemplateRecord, ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 
 // Named, reusable email templates with {{variable}} substitution. Persistence
@@ -152,18 +152,10 @@ export class TemplateService {
       const parsed = JSON.parse(raw) as TemplateFile;
       return { ...createEmptyStore(), ...parsed };
     } catch (error) {
-      if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
+      if (isFileNotFound(error)) {
         return createEmptyStore();
       }
-
-      const corruptPath = `${this.storePath}.corrupt`;
-      try {
-        copyFileSync(this.storePath, corruptPath);
-        this.log.error(`Corrupted templates.json backed up to ${corruptPath} — recreating empty store`, "TemplateService", error);
-      } catch (backupError) {
-        this.log.error("Failed to back up corrupted templates.json — recreating empty store without backup", "TemplateService", { parseError: error, backupError });
-      }
-
+      setAsideCorruptStore(this.storePath, error, this.log, "TemplateService");
       return createEmptyStore();
     }
   }
