@@ -25,7 +25,18 @@
       "args": ["${__dirname}/server/index.js"],
       "env": {
         "PROTONMAIL_USERNAME": "${user_config.protonmail_username}",
-        "PROTONMAIL_PASSWORD": "${user_config.protonmail_password}"
+        "PROTONMAIL_PASSWORD": "${user_config.protonmail_password}",
+        "PROTONMAIL_IMAP_HOST": "${user_config.imap_host}",
+        "PROTONMAIL_IMAP_PORT": "${user_config.imap_port}",
+        "PROTONMAIL_SMTP_HOST": "${user_config.smtp_host}",
+        "PROTONMAIL_SMTP_PORT": "${user_config.smtp_port}",
+        "PROTONMAIL_READ_ONLY": "${user_config.read_only}",
+        "PROTONMAIL_ALLOW_SEND": "${user_config.allow_send}",
+        "PROTONMAIL_SIGNATURE": "${user_config.signature}",
+        "PROTONMAIL_ACCOUNTS_JSON": "${user_config.accounts_json}",
+        "PROTONMAIL_DATA_DIR": "${user_config.data_dir}",
+        "PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR": "${user_config.download_dir}",
+        "PROTONMAIL_TOOL_TIER": "${user_config.tool_tier}"
       }
     }
   },
@@ -42,6 +53,85 @@
       "description": "Proton Bridge's own password (Bridge app -> account -> Mailbox details) — not your Proton account password",
       "sensitive": true,
       "required": true
+    },
+    "imap_host": {
+      "type": "string",
+      "title": "Bridge IMAP host",
+      "description": "Where Proton Bridge listens for IMAP. Leave the default unless Bridge runs on another host.",
+      "default": "127.0.0.1",
+      "required": false
+    },
+    "imap_port": {
+      "type": "number",
+      "title": "Bridge IMAP port",
+      "description": "Bridge Settings -> IMAP port. Bridge's default is 1143, but Bridge picks another port when 1143 is taken.",
+      "default": 1143,
+      "min": 1,
+      "max": 65535,
+      "required": false
+    },
+    "smtp_host": {
+      "type": "string",
+      "title": "Bridge SMTP host",
+      "description": "Where Proton Bridge listens for SMTP. Leave the default unless Bridge runs on another host.",
+      "default": "127.0.0.1",
+      "required": false
+    },
+    "smtp_port": {
+      "type": "number",
+      "title": "Bridge SMTP port",
+      "description": "Bridge Settings -> SMTP port. Bridge's default is 1025, but Bridge picks another port when 1025 is taken.",
+      "default": 1025,
+      "min": 1,
+      "max": 65535,
+      "required": false
+    },
+    "read_only": {
+      "type": "boolean",
+      "title": "Read-only mode",
+      "description": "Block every tool that changes the mailbox (flags, moves, deletes, drafts on the server). Also turn off \"Allow sending\" below: an explicit \"Allow sending\" overrides read-only.",
+      "default": false,
+      "required": false
+    },
+    "allow_send": {
+      "type": "boolean",
+      "title": "Allow sending",
+      "description": "Let Claude send, reply and forward mail. Turn off to make sending impossible (drafts can still be created).",
+      "default": true,
+      "required": false
+    },
+    "signature": {
+      "type": "string",
+      "title": "Signature",
+      "description": "Plain text appended to messages sent with send_email, reply_to_email, reply_all_email and forward_email. Leave empty for none.",
+      "required": false
+    },
+    "accounts_json": {
+      "type": "string",
+      "title": "Additional accounts (JSON)",
+      "description": "Optional JSON array of extra Proton addresses, e.g. [{\"address\":\"me@pm.me\",\"password\":\"<bridge password>\"}]. Contains passwords, so it is stored as a secret.",
+      "sensitive": true,
+      "required": false
+    },
+    "data_dir": {
+      "type": "directory",
+      "title": "Data directory",
+      "description": "Where the local search index, drafts and audit log are kept. Must be an absolute path.",
+      "default": "${HOME}/.proton-mail-bridge-client",
+      "required": false
+    },
+    "download_dir": {
+      "type": "directory",
+      "title": "Attachment download directory",
+      "description": "Folder that save_attachment and export_email may write into. Leave empty to disable saving to disk.",
+      "required": false
+    },
+    "tool_tier": {
+      "type": "string",
+      "title": "Tool tier",
+      "description": "\"full\" exposes every tool; \"core\" exposes a smaller set to save context.",
+      "default": "full",
+      "required": false
     }
   },
   "compatibility": {

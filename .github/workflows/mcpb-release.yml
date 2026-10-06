@@ -16,7 +16,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          # One runner builds every target whose native prebuild better-sqlite3 ships in the
+          # package (checked by test/mcpb-build.test.mjs); no extra runner types needed.
+          - os: macos-latest
+            targets: darwin-arm64,darwin-x64
+          - os: ubuntu-latest
+            targets: linux-x64,linux-arm64
+          - os: windows-latest
+            targets: win32-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,7 +45,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: test "$TAG" = "v$(node -p "require('./package.json').version")"
 
-      - run: npm run package:mcpb
+      - run: npm run package:mcpb -- --targets ${{ matrix.targets }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
