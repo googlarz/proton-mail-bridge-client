@@ -25,6 +25,7 @@ const LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
 // instead of blocking forever. Generous relative to how briefly these
 // load-modify-save cycles actually take.
 const STALE_LOCK_MS = 30_000;
+const EMPTY_LOCK_STALE_MS = 2_000;
 
 // Taking over a stale lock is itself a critical section. Two waiters can both judge the same lock stale; if
 // each then removes "the" lock and creates its own, the second removes the first's brand-new lock and both
@@ -137,6 +138,11 @@ async function isStale(lockPath: string): Promise<boolean> {
       // and fall through to the existing age-based check below rather than
       // assume anything about a PID we can't rule out.
     }
+    // An empty lock is a holder that crashed between creating the file and writing its token (writing takes
+    // milliseconds), so it does not need the long wait that unknown content gets.
+    if (content === "" && ageMs > EMPTY_LOCK_STALE_MS) {
+      return true;
+    }
     // Malformed/legacy lock content (no parseable PID prefix) also falls
     // through here rather than throwing.
 
@@ -163,8 +169,16 @@ async function acquire(lockPath: string): Promise<string> {
   for (;;) {
     try {
       const handle = await open(lockPath, "wx");
-      await handle.writeFile(token);
-      await handle.close();
+      try {
+        await handle.writeFile(token);
+        await handle.close();
+      } catch (error) {
+        // The file now exists but does not carry our token. Left behind it would be an empty lock that
+        // nobody owns and everybody waits on.
+        await handle.close().catch(() => undefined);
+        await unlink(lockPath).catch(() => undefined);
+        throw error;
+      }
       return token;
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? (error as { code?: string }).code : undefined;

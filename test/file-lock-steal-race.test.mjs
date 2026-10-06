@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withFileLock } from "../dist/utils/file-lock.js";
@@ -59,6 +59,21 @@ test("a live lock is never stolen, however many waiters there are", async () => 
       ),
     );
     assert.equal(maxInside, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an empty lock file left by a holder that died before writing its token is taken over after a moment", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "protonmail-lock-empty-"));
+  try {
+    const store = join(dir, "store.json");
+    await writeFile(`${store}.lock`, "");
+    const old = new Date(Date.now() - 5_000);
+    await utimes(`${store}.lock`, old, old);
+    const started = Date.now();
+    await withFileLock(store, async () => undefined);
+    assert.ok(Date.now() - started < 3_000, "waited for the 30 s staleness limit instead of taking the empty lock over");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

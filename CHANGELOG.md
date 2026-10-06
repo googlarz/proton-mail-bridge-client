@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [2.5.1] — 2026-10-06
+
+### Fixed
+- **A crashed or interrupted start could leave an empty lock file that blocked the data directory for 30 seconds.** The cross-process lock creates its file first and writes the owner token second. If the second step failed (seen on Windows, where a scanner or a concurrent delete makes the write fail with `EPERM`), the empty file stayed behind, nobody owned it, and every later start waited on it until the 30 s staleness limit and gave up after 10 s (`Timed out ... waiting for lock account.json.lock (held by )`). The lock is now removed when writing the token fails, and an empty lock is treated as abandoned after 2 seconds. The test fails on 2.5.0.
+- This is the likely cause of the CLI health test that failed once on macOS and once on Windows CI with no output; it is not proven for the macOS case.
+
 ## [2.5.0] — 2026-10-06
 
 ### Changed
