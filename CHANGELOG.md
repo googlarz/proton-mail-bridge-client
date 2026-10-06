@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here.
 
+## [2.4.0] — 2026-10-06
+
+A second, broader review pass (server, CLI, installers) plus every issue found along the way. Each fix has a test that fails without it.
+
+### Fixed
+- **Sync tools ignored `account`.** `sync_emails`, `sync_folders`, `run_background_sync` and `wait_for_mailbox_changes` always acted on the primary account; they now take `account` (address or slug) and an unknown value is an error instead of a silent fallback to the primary.
+- **`reply_all_email` with a Reply-To header dropped the original sender**; the sender now stays in Cc when Reply-To redirects the To.
+- **Reply and forward text lost the first line's indentation** (code, lists); blank lines around the body are still removed.
+- **A timed-out move now says the outcome is unknown** (the server may have completed it) instead of reading like a clean failure.
+- **`get_inbox_digest` flags capped counts** (`countsCapped`) when the recent snapshot hit its 5000-message limit.
+- Stricter argument handling across the tools (wrong types are `InvalidParams` rather than being coerced), bulk and thread operations validate their matches and UIDVALIDITY, IDLE start/stop and shutdown races, atomic file writes with fsync, a lock-steal race, calendar-invite summaries (cancelled and multi-event invites), attachment save/read edge cases (name collisions, reserved names, output paths), snooze retry classification, audit-log redaction, outgoing-message detection, import (Date header), `get_volume_trends` and `top_senders` totals.
+- **CLI:** `--help` never runs a command, `--flag=value` and `--` parsing, strict flags and numbers, a guard on bulk filters, health-check exit codes, EPIPE handling, account-routed shortcuts.
+- **Installers:** the runtime install is staged with rollback, environment config is merged rather than overwritten, output is redacted, the health check is real, config writes are safer; the `.mcpb` build has settings and multiple targets.
+
+### Changed
+- README documents which tools `PROTONMAIL_ALLOWED_ACTIONS` covers (message actions and deleting folders/labels) and which only `PROTONMAIL_READ_ONLY` blocks (creating/renaming folders and labels, templates, import, clearing cache or index).
+
+### Known limits
+- The sync-routing test checks the schema, the unknown-account error and which account's index is reported; it was not run against a second live Bridge account.
+- The body-edge change (indentation) is a judgment about the intended behavior of a review note whose exact wording was lost; revert `trimBodyEdges` if you prefer the old full trim.
+
 ## [2.3.2] — 2026-10-06
 
 Fixes from an independent review of everything changed since 2.1.47. Each has a test that fails without the fix.
