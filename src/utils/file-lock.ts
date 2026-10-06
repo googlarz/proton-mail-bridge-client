@@ -26,6 +26,37 @@ const LOCK_ACQUIRE_TIMEOUT_MS = 10_000;
 // load-modify-save cycles actually take.
 const STALE_LOCK_MS = 30_000;
 
+// Taking over a stale lock is itself a critical section. Two waiters can both judge the same lock stale; if
+// each then removes "the" lock and creates its own, the second removes the first's brand-new lock and both
+// end up inside the protected section. So stealing is serialized behind a short-lived guard file, and the
+// staleness verdict is taken again while holding it: a waiter that arrives second sees the first stealer's
+// fresh lock (live PID) and backs off.
+const STEAL_GUARD_STALE_MS = 5_000;
+
+async function stealStale(lockPath: string): Promise<void> {
+  const guard = `${lockPath}.steal`;
+  let handle;
+  try {
+    handle = await open(guard, "wx");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // Someone else is stealing right now. A guard left behind by a process that died mid-steal is removed
+    // once it is old; either way this waiter just loops and looks again.
+    const info = await stat(guard).catch(() => undefined);
+    if (info && Date.now() - info.mtimeMs > STEAL_GUARD_STALE_MS) await unlink(guard).catch(() => undefined);
+    return;
+  }
+  try {
+    await handle.close();
+    if (await isStale(lockPath)) {
+      logger.warn(`Stale lock file detected, stealing it: ${lockPath}`, "FileLock");
+      await unlink(lockPath).catch(() => undefined);
+    }
+  } finally {
+    await unlink(guard).catch(() => undefined);
+  }
+}
+
 function lockPathFor(storePath: string): string {
   return `${storePath}.lock`;
 }
@@ -134,8 +165,7 @@ async function acquire(lockPath: string): Promise<string> {
       }
 
       if (await isStale(lockPath)) {
-        logger.warn(`Stale lock file detected, stealing it: ${lockPath}`, "FileLock");
-        await unlink(lockPath).catch(() => undefined);
+        await stealStale(lockPath);
         continue;
       }
 

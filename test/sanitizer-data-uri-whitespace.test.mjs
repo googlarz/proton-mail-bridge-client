@@ -52,3 +52,27 @@ test("a display name ending in a backslash cannot break out of the quoted From n
     assert.match(from, /^"[^"\\]*" <o@example\.com>$/, `${JSON.stringify(fromName)} -> ${from}`);
   }
 });
+
+// A relative link (href="/x", "page.html", "#top", "?q=1") means nothing in a mail: there is no base to
+// resolve it against, and a recipient's client may resolve it against its own host. Only http, https and
+// mailto links are meant to survive.
+const renderLink = (href) =>
+  service.buildMailOptions({ to: ["a@example.com"], subject: "s", body: "b", htmlBody: `<p><a href="${href}">link text</a></p>`, isHtml: true }).html ?? "";
+
+test("relative and fragment-only links lose their href but keep their text", () => {
+  for (const href of ["/relative/path", "page.html", "#top", "?q=1", "../up", "  /padded"]) {
+    const html = renderLink(href);
+    assert.equal(/href=/.test(html), false, `${JSON.stringify(href)} -> ${html}`);
+    assert.match(html, /link text/);
+  }
+});
+
+test("http, https and mailto links are kept, padding is trimmed, other schemes are dropped", () => {
+  assert.match(renderLink("https://example.com/a?b=1"), /href="https:\/\/example\.com\/a\?b=1"/);
+  assert.match(renderLink("HTTP://EXAMPLE.COM"), /href="HTTP:\/\/EXAMPLE\.COM"/);
+  assert.match(renderLink("mailto:a@example.com"), /href="mailto:a@example\.com"/);
+  assert.match(renderLink("  https://example.com/x "), /href="https:\/\/example\.com\/x"/);
+  for (const href of ["javascript:alert(1)", " javascript:alert(1)", "java\tscript:alert(1)", "data:text/html,<p>x", "tel:+491739048003", "ftp://example.com/f"]) {
+    assert.equal(/href=/.test(renderLink(href)), false, JSON.stringify(href));
+  }
+});

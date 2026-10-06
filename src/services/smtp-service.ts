@@ -318,6 +318,20 @@ export class SMTPService {
       // "data" above only admits the scheme; a data: image needs no network
       // request, but only raster image types are accepted (no svg/html payloads).
       transformTags: {
+        // Only absolute http, https and mailto links mean anything in a mail. A relative or fragment-only
+        // href has nothing to resolve against (and a recipient's client may resolve it against its own
+        // host), so it is dropped and the link text stays. Read the value the way a browser does first.
+        a: (tagName, attribs) => {
+          if (attribs.href !== undefined) {
+            const href = attribs.href.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+            if (/^(https?|mailto):/i.test(href)) {
+              attribs.href = href;
+            } else {
+              delete attribs.href;
+            }
+          }
+          return { tagName, attribs };
+        },
         img: (tagName, attribs) => {
           // Check what a browser will load, not the raw attribute: it ignores leading/trailing control
           // characters and spaces in a URL and tabs/newlines anywhere in it, so " data:image/svg+xml,..."

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DeliveryQueueKind, DeliveryQueueRecord, ProtonMailConfig, SendEmailInput } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { isProcessAlive, withFileLock } from "../utils/file-lock.js";
 import { ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
+import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { withTimeout } from "../utils/helpers.js";
@@ -585,12 +586,6 @@ export class DeliveryQueueService {
   // matters here (a CLI `cancel-send` racing this server's own checkDue()).
   private async save(store: DeliveryQueueFile): Promise<void> {
     await mkdir(dirname(this.queuePath), { recursive: true, mode: 0o700 });
-    const tempPath = `${this.queuePath}.tmp`;
-    // Restrictive mode on the temp file itself, not just the final renamed
-    // path — rename() preserves the mode it's given, but a mode passed only
-    // after the fact wouldn't retroactively cover the temp file's brief
-    // window on disk.
-    await writeFile(tempPath, JSON.stringify(store, null, 2), { encoding: "utf8", mode: 0o600 });
-    await rename(tempPath, this.queuePath);
+    await writeFileAtomic(this.queuePath, JSON.stringify(store, null, 2));
   }
 }

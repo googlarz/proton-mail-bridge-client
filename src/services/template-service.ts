@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { EmailTemplateRecord, ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 
@@ -181,8 +182,6 @@ export class TemplateService {
   // comment for why it's left unlocked and the real upgrade path (SQLite).
   private async save(store: TemplateFile): Promise<void> {
     await mkdir(dirname(this.storePath), { recursive: true, mode: 0o700 });
-    const tempPath = `${this.storePath}.tmp`;
-    await writeFile(tempPath, JSON.stringify(store, null, 2), { encoding: "utf8", mode: 0o600 });
-    await rename(tempPath, this.storePath);
+    await writeFileAtomic(this.storePath, JSON.stringify(store, null, 2));
   }
 }

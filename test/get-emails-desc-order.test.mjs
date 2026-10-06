@@ -70,3 +70,23 @@ test("getEmails(sortByUid:'desc', beforeUid) pages continue the same UID-descend
   assert.deepEqual(first.emails.map((e) => e.uid), range(30, 21));
   assert.deepEqual(next.emails.map((e) => e.uid), range(20, 11));
 });
+
+test("getEmails with beforeUid 1 (the oldest message's cursor) returns nothing and never asks for the range 1:0", async () => {
+  // IMAP ranges are unordered, so "1:0" means "0:1" and would return UID 1 again; a cursor loop that has
+  // reached the oldest message would then never end.
+  const service = createService();
+  const queries = [];
+  const original = service.withMailbox;
+  service.withMailbox = async (folder, readOnly, action) =>
+    original.call(service, folder, readOnly, (client) => action({
+      ...client,
+      mailbox: client.mailbox,
+      search: async (query, options) => { queries.push(query); return client.search(query, options); },
+      fetch: (...args) => client.fetch(...args),
+    }));
+  for (const beforeUid of [1, 0, -5]) {
+    const page = await service.getEmails({ folder: "INBOX", limit: 10, sortByUid: "desc", beforeUid });
+    assert.deepEqual(page.emails, [], `beforeUid ${beforeUid}`);
+  }
+  assert.deepEqual(queries.filter((q) => String(q.uid) === "1:0" || String(q.uid) === "1:-1"), []);
+});

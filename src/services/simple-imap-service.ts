@@ -108,6 +108,9 @@ const MAX_ATTACHMENT_TEXT_BYTES = 512_000;
 // per candidate.
 // Newest candidates examined when a non-ASCII criterion has to be verified locally.
 const NON_ASCII_SCAN_CAP = 500;
+// A count with a local-only filter (hasAttachment, senderDomain...) must fetch every candidate, because the
+// server cannot evaluate it. Beyond this many, only the newest are checked and the count is marked approximate.
+const LOCAL_FILTER_COUNT_SCAN_CAP = 5000;
 export const SEARCH_FILTER_BATCH_SIZE = 50;
 // A healthy IMAP IDLE blocks until a mailbox change or the requested timeout.
 // If client.idle() returns faster than this with no events, IDLE never actually
@@ -1392,6 +1395,11 @@ export class SimpleIMAPService {
       const fetchQuery = input.includeSnippet ? FETCH_DETAIL_QUERY : FETCH_SUMMARY_QUERY;
 
       if (input.beforeUid !== undefined) {
+        // Nothing lies below UID 1. Asking for "1:0" would not mean "empty": IMAP ranges are unordered, so it
+        // is "0:1" and returns UID 1 again, which would keep a cursor loop at the oldest message going forever.
+        if (!(input.beforeUid > 1)) {
+          return { folder, total, limit, offset, emails: [] };
+        }
         // UID-based pagination: search for UIDs below the given upper bound
         const searchQuery: SearchObject = { uid: `1:${input.beforeUid - 1}` };
         const uids = await client.search(searchQuery, { uid: true });
@@ -2347,12 +2355,13 @@ export class SimpleIMAPService {
       }
       // The narrowed query can be broad; check only the newest candidates (by date, which is what
       // searchEmails ranks by: UID order does not follow date order after an import) and say so.
-      if (nonAsciiCriteria && uids.length > NON_ASCII_SCAN_CAP) {
+      const scanCap = nonAsciiCriteria ? NON_ASCII_SCAN_CAP : LOCAL_FILTER_COUNT_SCAN_CAP;
+      if (uids.length > scanCap) {
         const dated: { uid: number; date: number }[] = [];
         for await (const message of client.fetch(uids, FETCH_INDEX_QUERY, { uid: true })) {
           dated.push({ uid: message.uid, date: new Date(message.internalDate ?? 0).getTime() });
         }
-        uids = pickNewestUids(dated, NON_ASCII_SCAN_CAP);
+        uids = pickNewestUids(dated, scanCap);
         approximate = true;
       }
       // A non-ASCII free-text query is verified against the body, so it needs the source too.
@@ -4409,6 +4418,14 @@ export class SimpleIMAPService {
     return String(err);
   }
 
+  // Where a save with no path given goes. Attachments are only meant to be written into the configured
+  // download directory (PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR); the server's private data directory is only the
+  // fallback when none is configured.
+  private defaultAttachmentDir(): string {
+    const allowed = this.config.runtime?.allowFileDownloadDir;
+    return allowed ? resolve(allowed) : join(this.config.dataDir, "attachments");
+  }
+
   private async writeAttachmentToPath(
     emailId: string,
     attachment: EmailDetail["attachments"][number] & { content: Buffer; checksum?: string },
@@ -4437,7 +4454,7 @@ export class SimpleIMAPService {
         this.identityChecked = true;
       }
       const filename = sanitizeFileName(attachment.filename, attachment.id || "attachment");
-      const dirPath = join(this.config.dataDir, "attachments", encodeURIComponent(emailId));
+      const dirPath = join(this.defaultAttachmentDir(), encodeURIComponent(emailId));
       // 0o700/0o600: this writes the user's own private email content — restrict
       // it to the owner regardless of the destination directory's own permissions.
       await mkdir(dirPath, { recursive: true, mode: 0o700 });
@@ -4553,7 +4570,7 @@ export class SimpleIMAPService {
   ): Promise<string> {
     const filename = sanitizeFileName(attachment.filename, attachment.id || "attachment");
     if (!outputPath) {
-      return join(this.config.dataDir, "attachments", encodeURIComponent(emailId), filename);
+      return join(this.defaultAttachmentDir(), encodeURIComponent(emailId), filename);
     }
 
     const resolved = resolve(outputPath);

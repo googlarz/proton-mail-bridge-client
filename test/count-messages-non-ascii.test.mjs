@@ -160,3 +160,22 @@ test("count_messages with a label that is a folder counts that folder, as search
   assert.equal(searched.emails.length, 2);
   assert.equal((await service.countMessages({ label: "NoSuchLabel" })).count, 0);
 });
+
+test("a broad ASCII count with a local-only filter is capped too, and says so", async () => {
+  // hasAttachment cannot be asked of the server, so every candidate must be fetched. On a folder of tens of
+  // thousands that is hundreds of round trips for one count: only the newest 5000 are checked.
+  const many = Array.from({ length: 5200 }, (_, i) => ({ uid: i + 1, name: "Sender", addr: `s${i}@example.com`, subject: "x", body: "y", attachment: "f.pdf" }));
+  const { service, sent } = createService({ total: many });
+  const result = await service.countMessages({ folder: "INBOX", hasAttachment: true });
+  assert.equal(result.count, 5000);
+  assert.equal(result.approximate, true);
+  assert.ok(sent.fetched < 5200 * 2, `fetched ${sent.fetched} messages`);
+});
+
+test("a local-only count under the cap stays exact", async () => {
+  const some = Array.from({ length: 300 }, (_, i) => ({ uid: i + 1, name: "Sender", addr: `s${i}@example.com`, subject: "x", body: "y", attachment: i % 2 ? "f.pdf" : undefined }));
+  const { service } = createService({ total: some });
+  const result = await service.countMessages({ folder: "INBOX", hasAttachment: true });
+  assert.equal(result.count, 150);
+  assert.equal(result.approximate, undefined);
+});

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile, readdir, unlink } from "node:fs/promises";
+import { mkdir, readFile, rm, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
   DraftMode,
@@ -11,6 +11,7 @@ import type {
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { extractDomain } from "../utils/helpers.js";
+import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 
@@ -555,9 +556,7 @@ export class DraftStoreService {
   private async save(store: DraftStoreFile): Promise<void> {
     this.pruneSentDrafts(store);
     await mkdir(dirname(this.draftPath), { recursive: true, mode: 0o700 });
-    const tempPath = `${this.draftPath}.tmp`;
-    await writeFile(tempPath, JSON.stringify(store, null, 2), { encoding: "utf8", mode: 0o600 });
-    await rename(tempPath, this.draftPath);
+    await writeFileAtomic(this.draftPath, JSON.stringify(store, null, 2));
   }
 
   // Pruning here (a write-path helper called opportunistically from save())

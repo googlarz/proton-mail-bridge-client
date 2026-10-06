@@ -66,3 +66,14 @@ test("only ä, ö, ü, ø and å get a spelled-out form; other accented letters 
     assert.equal(searchNeedles(letter).length, 2, letter);
   }
 });
+
+test("the ASCII fast path gives exactly what the full folding gives", () => {
+  const full = (value) => value.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const samples = ["", "Hello World", "INVOICE-2026_03", "a@b.example", "Tab\tand\nnewline", "MiXeD 123 !@#$%^&*()", "{\"from\":[{\"name\":\"A B\",\"address\":\"a@x.com\"}]}"];
+  for (const sample of samples) {
+    assert.equal(foldSearchText(sample), full(sample), JSON.stringify(sample));
+    assert.equal(searchKey(sample), full(sample), JSON.stringify(sample));
+  }
+  // One non-ASCII character takes the full path and still folds the whole string.
+  assert.equal(foldSearchText("INVOICE Łódź"), "invoice lodz");
+});

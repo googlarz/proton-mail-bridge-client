@@ -569,8 +569,13 @@ export function hasNonAscii(value: string | undefined): boolean {
   return value !== undefined && /[^\x00-\x7f]/.test(value);
 }
 
+const NON_ASCII = /[^\x00-\x7f]/;
+
 // Lowercase, strip combining accents, and spell out the letters Unicode does not decompose.
 export function foldSearchText(value: string): string {
+  // Plain ASCII (most of the text the index compares) folds to just its lower case: skip the Unicode
+  // normalisation, which is most of the cost when this runs for every row of a large mailbox.
+  if (!NON_ASCII.test(value)) return value.toLowerCase();
   return value
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
@@ -584,6 +589,7 @@ const SPELLED_OUT: Record<string, string> = { ä: "ae", ö: "oe", ü: "ue", ø: 
 
 // The value with those letters spelled out as pairs, or undefined when it has none.
 function spelledOutText(value: string): string | undefined {
+  if (!NON_ASCII.test(value)) return undefined;
   const lower = value.normalize("NFC").toLowerCase();
   if (!/[äöüøå]/.test(lower)) return undefined;
   return foldSearchText(lower.replace(/[äöüøå]/g, (letter) => SPELLED_OUT[letter] ?? letter));
@@ -933,23 +939,50 @@ export function classifyAttachment(input: {
   return { kind: "other", isCalendarInvite: false, isSignature: false };
 }
 
-export function summarizeCalendarText(value: string): string | undefined {
-  const normalized = value.replace(/\r/g, "");
-  const fields = new Map<string, string>();
-  const lines = normalized.split("\n");
+// Splits "NAME;PARAM=x:value" at the first colon that is not inside a quoted parameter value
+// (ORGANIZER;CN="Doe: John":mailto:j@x.com), returning the upper-case name and the value.
+function splitIcsProperty(line: string): { name: string; value: string } | undefined {
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === '"') {
+      quoted = !quoted;
+    } else if (char === ":" && !quoted) {
+      if (index === 0) return undefined;
+      return { name: line.slice(0, index).split(";")[0].trim().toUpperCase(), value: line.slice(index + 1).trim() };
+    }
+  }
+  return undefined;
+}
 
-  // Only read the first VEVENT's own properties when one exists: a VTIMEZONE ahead of it
-  // carries its own DTSTART (e.g. 19700329T020000 for a DST rule), and a nested VALARM
-  // carries its own SUMMARY/DESCRIPTION.
-  const hasEvent = lines.some((line) => line.trim().toUpperCase() === "BEGIN:VEVENT");
+// RFC 5545 text escapes: \n is a line break, \, \; \\ are the literal character.
+function unescapeIcsText(value: string): string {
+  return value.replace(/\\([nN,;\\])/g, (_match, char: string) => (char === "n" || char === "N" ? " " : char));
+}
+
+const ICS_TEXT_FIELDS = new Set(["SUMMARY", "LOCATION", "DESCRIPTION"]);
+// Components whose own properties (e.g. the DTSTART of a daylight-saving rule) are not the event's.
+const ICS_NON_EVENT_COMPONENTS = new Set(["VTIMEZONE", "DAYLIGHT", "STANDARD", "VALARM"]);
+
+export function summarizeCalendarText(value: string): string | undefined {
+  const normalized = value.replace(/\r\n?/g, "\n");
+  // A line that starts with a space or tab continues the previous one (RFC 5545 line folding).
+  const lines = normalized.replace(/\n[ \t]/g, "").split("\n");
+  const fields = new Map<string, string>();
   const componentStack: string[] = [];
+  let method: string | undefined;
+  let eventCount = 0;
   let seenEvent = false;
+  // Only the first VEVENT's own properties are read when there is one: a VTIMEZONE ahead of it carries
+  // its own DTSTART (e.g. 19700329T020000 for a DST rule) and a nested VALARM its own SUMMARY.
+  const hasEvent = lines.some((line) => line.trim().toUpperCase() === "BEGIN:VEVENT");
 
   for (const line of lines) {
     const marker = /^(BEGIN|END):(\S+)\s*$/i.exec(line.trim());
     if (marker) {
       const component = marker[2].toUpperCase();
       if (marker[1].toUpperCase() === "BEGIN") {
+        if (component === "VEVENT") eventCount += 1;
         componentStack.push(component);
       } else {
         if (component === "VEVENT" && componentStack[componentStack.length - 1] === "VEVENT") {
@@ -959,26 +992,28 @@ export function summarizeCalendarText(value: string): string | undefined {
       }
       continue;
     }
-    if (hasEvent && (seenEvent || componentStack[componentStack.length - 1] !== "VEVENT")) {
+    const property = splitIcsProperty(line);
+    if (!property) continue;
+    const top = componentStack[componentStack.length - 1];
+    if (top === "VCALENDAR" && property.name === "METHOD") {
+      method = property.value.toUpperCase();
       continue;
     }
-    const separator = line.indexOf(":");
-    if (separator <= 0) {
-      continue;
-    }
-    const key = line.slice(0, separator).split(";")[0].trim().toUpperCase();
-    const fieldValue = line.slice(separator + 1).trim();
-    if (fieldValue && !fields.has(key)) {
-      fields.set(key, fieldValue);
+    if (componentStack.some((component) => ICS_NON_EVENT_COMPONENTS.has(component))) continue;
+    if (hasEvent && (seenEvent || top !== "VEVENT")) continue;
+    if (property.value && !fields.has(property.name)) {
+      fields.set(property.name, ICS_TEXT_FIELDS.has(property.name) ? unescapeIcsText(property.value) : property.value);
     }
   }
 
+  const cancelled = method === "CANCEL" || fields.get("STATUS")?.toUpperCase() === "CANCELLED";
   const summary = [
-    fields.get("SUMMARY"),
+    fields.get("SUMMARY") ? `${cancelled ? "[Cancelled] " : ""}${fields.get("SUMMARY")}` : cancelled ? "[Cancelled]" : undefined,
     fields.get("ORGANIZER"),
     fields.get("DTSTART") ? `Starts ${fields.get("DTSTART")}` : undefined,
     fields.get("DTEND") ? `Ends ${fields.get("DTEND")}` : undefined,
     fields.get("LOCATION") ? `Location ${fields.get("LOCATION")}` : undefined,
+    eventCount > 1 ? `+${eventCount - 1} more event${eventCount === 2 ? "" : "s"}` : undefined,
   ]
     .filter(Boolean)
     .join(" | ");

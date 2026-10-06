@@ -1532,9 +1532,12 @@ export class LocalIndexService {
     // membership so a matching document thread outside DEFAULT_SNAPSHOT_LIMIT is never
     // silently missed. A message with no attachments can never contribute a document
     // match regardless of its text, so has_attachments = 1 narrows this further.
+    // The keywords are fixed lower-case English words, and the JS filter below lower-cases the haystack, so
+    // the native LOWER() is exactly right here. FOLD() would run a JavaScript function over the whole of
+    // attachment_text for every row, which is several times slower for no gain.
     const keywordConditions = keywords.map(
       () =>
-        `(FOLD(attachments_json) LIKE ? ESCAPE '\\' OR FOLD(subject) LIKE ? ESCAPE '\\' OR FOLD(preview) LIKE ? ESCAPE '\\' OR FOLD(attachment_text) LIKE ? ESCAPE '\\')`,
+        `(LOWER(attachments_json) LIKE ? ESCAPE '\\' OR LOWER(subject) LIKE ? ESCAPE '\\' OR LOWER(preview) LIKE ? ESCAPE '\\' OR LOWER(attachment_text) LIKE ? ESCAPE '\\')`,
     );
     const keywordParams: unknown[] = [];
     for (const keyword of keywords) {

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ProtonMailConfig, SnoozeRecord } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { isProcessAlive, withFileLock } from "../utils/file-lock.js";
 import { parseEmailId } from "../utils/helpers.js";
+import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
@@ -486,12 +487,6 @@ export class SnoozeService {
   // comment for why it's left unlocked and the real upgrade path (SQLite).
   private async save(store: SnoozeFile): Promise<void> {
     await mkdir(dirname(this.storePath), { recursive: true, mode: 0o700 });
-    const tempPath = `${this.storePath}.tmp`;
-    // Restrictive mode on the temp file itself, not just the final renamed
-    // path — rename() preserves the mode it's given, but a mode passed only
-    // after the fact wouldn't retroactively cover the temp file's brief
-    // window on disk.
-    await writeFile(tempPath, JSON.stringify(store, null, 2), { encoding: "utf8", mode: 0o600 });
-    await rename(tempPath, this.storePath);
+    await writeFileAtomic(this.storePath, JSON.stringify(store, null, 2));
   }
 }
