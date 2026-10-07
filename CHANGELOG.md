@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [2.6.0] — 2026-10-07
+
+### Changed
+- **`get_threads` with a filter is about 15 times faster on repeated calls.** A `query`, `label` or `folder` that matched a message belonging to a reference chain made the server read and group the whole index every time (about 630 ms on 57,000 messages). It now keeps which thread every message belongs to, worked out exactly as before from the whole index, until the index changes (by this server or by another process using the same data directory) and builds only the threads the filter touches. On a copy of a real index the first call takes about 490 ms and the following ones about 34 ms. The map costs about 26 MB of memory for 57,000 messages.
+
+### Fixed
+- **`get_threads` with `folder` returned every thread in the index** whenever the folder held a message from a reference chain (49,115 threads for `INBOX` on a real index instead of the 27,440 that have a message there). It now returns only the threads with a message in that folder, as it already did when no reference chain was involved.
+- **A thread id returned by a filtered `get_threads` could fail in `get_thread_by_id`.** When copies of one message (the same Message-ID in several folders) carry different `References` headers, which copy decided the thread depended on the query. The thread is now decided from the whole index in a fixed order, the same way `get_thread_by_id` does it. On a real index this changed the id of 2 of 12,199 threads for one query (same messages, different id); ids stored by a client for such a thread may need a fresh lookup.
+
+### Not changed
+- The inbox digest, actionable threads, follow-ups, meeting preparation and `get_thread_by_id` still read the whole index when they need a reference chain; only `get_threads` uses the map so far.
+
 ## [2.5.3] — 2026-10-07
 
 ### Changed

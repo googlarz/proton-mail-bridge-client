@@ -196,6 +196,13 @@ function foldedLike(columns: string[], needle: string): { sql: string; params: s
   return { sql: `email_id IN (SELECT email_id FROM message_keys WHERE ${parts.join(" OR ")})`, params };
 }
 
+// canonicalMessageKey -> thread key, and thread key -> the canonical keys of its messages (see loadThreadMap).
+interface ThreadMap {
+  keyByMessage: Map<string, string>;
+  messagesByKey: Map<string, string[]>;
+  emailIdsByMessage: Map<string, string[]>;
+}
+
 interface SnapshotLoadOptions {
   limit?: number;
   offset?: number;
@@ -707,6 +714,11 @@ export class LocalIndexService {
   // a fetch that started later and already committed fresher data. This
   // lock only makes the DB-write ordering deterministic, not the data current.
   private snapshotQueue: Promise<unknown> = Promise.resolve();
+  // Which thread every message belongs to, for the whole index. Computing it means reading every message,
+  // so it is kept until the index changes: by this process (writeVersion) or by another one sharing the file
+  // (SQLite's data_version).
+  private writeVersion = 0;
+  private threadMapCache?: { version: string; map: ThreadMap };
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -1110,6 +1122,7 @@ export class LocalIndexService {
     const syncCheckpoints = this.loadCheckpointsSync(db);
 
     let messages: EmailSummary[];
+    let threadKeys: Map<string, string> | undefined;
     let messagesCapped = false;
     const hasFilter = Boolean(input.folder || input.label || input.query);
     if (hasFilter) {
@@ -1117,7 +1130,9 @@ export class LocalIndexService {
       // before any snapshot-size limiting — so a thread whose messages sit entirely
       // outside the DEFAULT_SNAPSHOT_LIMIT-capped snapshot is never silently missed
       // just because a folder/label/query filter was given.
-      messages = this.loadThreadCandidateMessages(db, input);
+      const loaded = this.loadThreadCandidateMessages(db, input);
+      messages = loaded.messages;
+      threadKeys = loaded.threadKeys;
     } else {
       // No filter at all: a huge mailbox still needs SOME cap on what's fetched, so
       // keep the deliberate DEFAULT_SNAPSHOT_LIMIT cap here — but surface it via
@@ -1138,7 +1153,7 @@ export class LocalIndexService {
     // the SQL prefilter already proved relevant is never re-excluded by which message happened
     // to be newest. `messages` is stripped back off in the final return below — callers still
     // get plain ThreadSummary shapes, not the full per-message detail.
-    const threads = (this.buildThreads(snapshot, true) as ThreadDetail[]).filter((thread) => {
+    const threads = (this.buildThreads(snapshot, true, threadKeys) as ThreadDetail[]).filter((thread) => {
       if (input.label) {
         const wanted = input.label;
         if (!thread.normalizedLabels.some((label) => searchEquals(label, wanted))) {
@@ -1875,6 +1890,8 @@ export class LocalIndexService {
     ownerEmail?: string,
     cleanupExpunged = false,
   ): void {
+    this.writeVersion += 1;
+    this.threadMapCache = undefined;
     const upsertFolder = db.prepare(`
       INSERT INTO folders (
         path, name, delimiter, special_use, listed, subscribed, flags_json,
@@ -2848,7 +2865,7 @@ export class LocalIndexService {
   private loadThreadCandidateMessages(
     db: Database.Database,
     input: { folder?: string; label?: string; query?: string },
-  ): EmailSummary[] {
+  ): { messages: EmailSummary[]; threadKeys?: Map<string, string> } {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
@@ -2901,12 +2918,70 @@ export class LocalIndexService {
     // getThreadById() now uses for these threads — so the thread is always built
     // from its complete membership, filtered query or not.
     if (this.hasUnresolvedReferenceCandidate(db, candidates)) {
-      for (const email of this.loadAllMessages(db)) {
+      // Pull in every message of the threads the candidates belong to, with the thread keys the whole
+      // index gives them (see loadThreadMap), instead of reading and grouping the entire index each time.
+      const map = this.loadThreadMap(db);
+      const wanted = new Set<string>();
+      for (const email of byId.values()) {
+        const key = map.keyByMessage.get(canonicalMessageKey(email));
+        if (key !== undefined) wanted.add(key);
+      }
+      const emailIds: string[] = [];
+      for (const key of wanted) {
+        for (const canonicalId of map.messagesByKey.get(key) ?? []) {
+          emailIds.push(...(map.emailIdsByMessage.get(canonicalId) ?? []));
+        }
+      }
+      for (const email of this.loadMessagesByEmailIds(db, emailIds)) {
         byId.set(email.id, email);
       }
+      return { messages: [...byId.values()], threadKeys: map.keyByMessage };
     }
 
-    return [...byId.values()];
+    return { messages: [...byId.values()] };
+  }
+
+  // The thread of every message in the index, worked out exactly as buildThreads does for a full read, but
+  // only the keys are kept. Valid until the index is written to.
+  private loadThreadMap(db: Database.Database): ThreadMap {
+    const version = `${this.writeVersion}:${String(db.pragma("data_version", { simple: true }))}`;
+    if (this.threadMapCache?.version === version) {
+      return this.threadMapCache.map;
+    }
+    const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
+    const snapshot: SnapshotData = {
+      ownerEmail,
+      updatedAt,
+      folders,
+      indexedFolders,
+      syncCheckpoints: this.loadCheckpointsSync(db),
+      messages: this.loadAllMessages(db),
+    };
+    const resolved = this.assignResolvedThreadKeys(this.buildMailboxMessages(snapshot), ownerEmail);
+    const keyByMessage = new Map<string, string>();
+    const messagesByKey = new Map<string, string[]>();
+    const emailIdsByMessage = new Map<string, string[]>();
+    for (const message of resolved) {
+      keyByMessage.set(message.canonicalId, message.threadKey);
+      emailIdsByMessage.set(message.canonicalId, message.locations.map((location) => location.emailId));
+      const members = messagesByKey.get(message.threadKey);
+      if (members) members.push(message.canonicalId);
+      else messagesByKey.set(message.threadKey, [message.canonicalId]);
+    }
+    const map = { keyByMessage, messagesByKey, emailIdsByMessage };
+    this.threadMapCache = { version, map };
+    return map;
+  }
+
+  private loadMessagesByEmailIds(db: Database.Database, emailIds: string[]): EmailSummary[] {
+    const result: EmailSummary[] = [];
+    const CHUNK_SIZE = 500;
+    for (let i = 0; i < emailIds.length; i += CHUNK_SIZE) {
+      const chunk = emailIds.slice(i, i + CHUNK_SIZE);
+      const rows = db.prepare(`SELECT * FROM messages WHERE email_id IN (${chunk.map(() => "?").join(", ")})`).all(...chunk);
+      for (const row of rows) result.push(this.rowToEmailSummary(row as MessageRow));
+    }
+    return result;
   }
 
   // The check above only looked at the candidate's OWN inReplyTo/references — but a
@@ -3132,11 +3207,14 @@ export class LocalIndexService {
     );
   }
 
+  // threadKeys, when given, are the keys the whole index assigns (see loadThreadMap); they replace the
+  // resolution below, which on a partial set of messages could land on a different key.
   private buildThreads(
     snapshot: SnapshotData,
     includeMessages = false,
+    threadKeys?: Map<string, string>,
   ): Array<ThreadSummary | ThreadDetail> {
-    const messages = this.assignResolvedThreadKeys(this.buildMailboxMessages(snapshot), snapshot.ownerEmail);
+    const messages = this.assignResolvedThreadKeys(this.buildMailboxMessages(snapshot), snapshot.ownerEmail, threadKeys);
     const groups = new Map<string, MailboxMessage[]>();
 
     for (const message of messages) {
@@ -3196,7 +3274,11 @@ export class LocalIndexService {
       .map((entry) => entry.thread);
   }
 
-  private assignResolvedThreadKeys(messages: MailboxMessage[], ownerEmail?: string): MailboxMessage[] {
+  private assignResolvedThreadKeys(
+    messages: MailboxMessage[],
+    ownerEmail?: string,
+    knownKeys?: Map<string, string>,
+  ): MailboxMessage[] {
     const byCanonicalId = new Map(messages.map((message) => [message.canonicalId, message]));
     const byMessageId = new Map(
       messages.flatMap((message) => {
@@ -3256,7 +3338,7 @@ export class LocalIndexService {
 
     return messages.map((message) => ({
       ...message,
-      threadKey: resolveThreadKey(message),
+      threadKey: knownKeys?.get(message.canonicalId) ?? resolveThreadKey(message),
     }));
   }
 
@@ -3295,6 +3377,7 @@ export class LocalIndexService {
       this.db.close();
       this.db = undefined;
       this.initialized = false;
+      this.threadMapCache = undefined;
     }
   }
 }
