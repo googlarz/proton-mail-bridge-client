@@ -560,36 +560,30 @@ function isLikelyAutomatedSender(message: Pick<EmailSummary, "from" | "isAutomat
   return message.from.some((address) => AUTOMATED_SENDER_PATTERN.test(address.address ?? ""));
 }
 
-function actionableThreadScore(
-  thread: ThreadDetail,
-  ownerEmail?: string,
-): {
+// What the follow-up and digest rankings need to know about a thread, without its messages.
+interface ThreadStat {
+  key: string;
+  latestDate?: string;
+  unreadCount: number;
   pendingOn: ActionableThreadSummary["pendingOn"];
-  score: number;
-} {
-  const latestMessage = thread.messages[thread.messages.length - 1];
-  const latestIsOutgoing = latestMessage ? isOutgoingMessage(latestMessage, ownerEmail) : false;
-  const pendingOn: ActionableThreadSummary["pendingOn"] = latestMessage
-    ? latestIsOutgoing
-      ? "them"
-      : isLikelyAutomatedSender(latestMessage)
-        ? "unknown"
-        : "you"
-    : "unknown";
+  isStarred: boolean;
+  hasAttachments: boolean;
+}
 
+function actionableScore(stat: Pick<ThreadStat, "latestDate" | "unreadCount" | "pendingOn" | "isStarred" | "hasAttachments">): number {
   let score = 0;
-  score += thread.unreadCount * 10;
-  if (pendingOn === "you") {
+  score += stat.unreadCount * 10;
+  if (stat.pendingOn === "you") {
     score += 8;
   }
-  if (latestMessage?.isStarred) {
+  if (stat.isStarred) {
     score += 4;
   }
-  if (latestMessage?.hasAttachments) {
+  if (stat.hasAttachments) {
     score += 2;
   }
 
-  const latestTime = new Date(thread.latestDate || 0).getTime();
+  const latestTime = new Date(stat.latestDate || 0).getTime();
   if (latestTime > 0) {
     const ageHours = (Date.now() - latestTime) / (60 * 60 * 1000);
     if (ageHours > 24) {
@@ -599,7 +593,55 @@ function actionableThreadScore(
     }
   }
 
+  return score;
+}
+
+function pendingOnForThread(thread: ThreadDetail, ownerEmail?: string): ActionableThreadSummary["pendingOn"] {
+  const latestMessage = thread.messages[thread.messages.length - 1];
+  const latestIsOutgoing = latestMessage ? isOutgoingMessage(latestMessage, ownerEmail) : false;
+  return latestMessage
+    ? latestIsOutgoing
+      ? "them"
+      : isLikelyAutomatedSender(latestMessage)
+        ? "unknown"
+        : "you"
+    : "unknown";
+}
+
+function actionableThreadScore(
+  thread: ThreadDetail,
+  ownerEmail?: string,
+): {
+  pendingOn: ActionableThreadSummary["pendingOn"];
+  score: number;
+} {
+  const latestMessage = thread.messages[thread.messages.length - 1];
+  const pendingOn = pendingOnForThread(thread, ownerEmail);
+  const score = actionableScore({
+    latestDate: thread.latestDate,
+    unreadCount: thread.unreadCount,
+    pendingOn,
+    isStarred: Boolean(latestMessage?.isStarred),
+    hasAttachments: Boolean(latestMessage?.hasAttachments),
+  });
   return { pendingOn, score };
+}
+
+// A thread with the fields the actionable lists add on top of it.
+function toActionableSummary(thread: ThreadDetail, ownerEmail?: string): ActionableThreadSummary {
+  const latestMessage = thread.messages[thread.messages.length - 1];
+  const { pendingOn, score } = actionableThreadScore(thread, ownerEmail);
+  return {
+    ...thread,
+    latestEmailId: latestMessage?.primaryEmailId,
+    latestPreview: latestMessage?.preview,
+    latestFrom: latestMessage?.from ?? [],
+    latestIsRead: latestMessage?.isRead ?? true,
+    latestIsStarred: latestMessage?.isStarred ?? false,
+    latestHasAttachments: latestMessage?.hasAttachments ?? false,
+    pendingOn,
+    score,
+  } satisfies ActionableThreadSummary;
 }
 
 function safeJsonParse<T>(value: string | null, fallback: T): T {
@@ -718,7 +760,7 @@ export class LocalIndexService {
   // so it is kept until the index changes: by this process (writeVersion) or by another one sharing the file
   // (SQLite's data_version).
   private writeVersion = 0;
-  private threadMapCache?: { version: string; map: ThreadMap };
+  private threadMapCache?: { version: string; map: ThreadMap; stats?: ThreadStat[] };
 
   constructor(
     private readonly config: ProtonMailConfig,
@@ -865,7 +907,25 @@ export class LocalIndexService {
     const limit = normalizedFilters.limit ?? 50;
     const offset = 0;
 
-    if (normalizedFilters.threadId?.trim()) {
+    const unrestrictedThreadLookup =
+      !normalizedFilters.folder && normalizedFilters.isRead === undefined && !normalizedFilters.dateFrom;
+    if (normalizedFilters.threadId?.trim() && unrestrictedThreadLookup) {
+      // No folder/read/date restriction: the thread is built from the whole index, as getThreadById does.
+      const db = await this.ensureDb();
+      const thread = this.loadThreadByKey(db, normalizedFilters.threadId);
+      if (thread) {
+        const threadMessages = sortEmailsByNewest(thread.messages).filter((email) =>
+          matchesIndexedSearch(email, { ...normalizedFilters, threadId: undefined }),
+        ).sort((left, right) => searchRelevanceScore(right, normalizedFilters) - searchRelevanceScore(left, normalizedFilters));
+        const totalCount = threadMessages.length;
+        return {
+          total: totalCount,
+          hasMore: totalCount > offset + limit,
+          emails: threadMessages.slice(offset, offset + limit),
+          ...this.indexFreshnessFields(this.readLastSyncAt(db)),
+        };
+      }
+    } else if (normalizedFilters.threadId?.trim()) {
       const snapshot = await this.loadSnapshot({
         folder: normalizedFilters.folder,
         isRead: normalizedFilters.isRead,
@@ -1225,13 +1285,7 @@ export class LocalIndexService {
     // newest 5000 messages — or one whose id only comes out right when its
     // complete membership is considered — still resolves instead of throwing
     // "Thread not found".
-    const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
-    const syncCheckpoints = this.loadCheckpointsSync(db);
-    const messages = this.loadAllMessages(db);
-    const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
-    const thread = this.buildThreads(snapshot, true).find((entry) => entry.id === threadId) as
-      | ThreadDetail
-      | undefined;
+    const thread = this.loadThreadByKey(db, threadId);
     if (!thread) {
       throw new Error(`Thread not found for id ${threadId}`);
     }
@@ -1269,6 +1323,7 @@ export class LocalIndexService {
     const unreadOnly = input.unreadOnly !== false;
 
     let messages: EmailSummary[];
+    let threadKeys: Map<string, string> | undefined;
     let messagesCapped = false;
     if (unreadOnly || input.label || input.query) {
       // Same SQL-prefilter-then-expand-by-thread_id pattern getThreads() already uses:
@@ -1297,7 +1352,9 @@ export class LocalIndexService {
         .prepare(sql)
         .all(...params)
         .map((row) => this.rowToEmailSummary(row as MessageRow));
-      messages = this.expandCandidatesToFullThreads(db, candidateMessages);
+      const expanded = this.expandCandidatesToFullThreads(db, candidateMessages);
+      messages = expanded.messages;
+      threadKeys = expanded.threadKeys;
     } else {
       // unreadOnly explicitly false and no label/query: a genuinely unfiltered "every
       // thread" view, same as getThreads()' unfiltered path — nothing SQL-expressible to
@@ -1307,7 +1364,7 @@ export class LocalIndexService {
     }
 
     const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
-    const actionable = (this.buildThreads(snapshot, true) as ThreadDetail[])
+    const actionable = (this.buildThreads(snapshot, true, threadKeys) as ThreadDetail[])
       .map((thread) => {
         const latestMessage = thread.messages[thread.messages.length - 1];
         const { pendingOn, score } = actionableThreadScore(thread, snapshot.ownerEmail);
@@ -1429,40 +1486,19 @@ export class LocalIndexService {
     // entirely out of recentSnapshot above. SQL-prefilter by date (any qualifying
     // thread's latest message necessarily satisfies this condition itself), then expand
     // to full, uncapped thread membership — mirrors getFollowUpCandidates()' fix.
-    const cutoffIso = new Date(now - staleThresholdMs).toISOString();
-    const staleCandidateMessages = db
-      .prepare(`SELECT * FROM messages WHERE COALESCE(internal_date, date) < ?`)
-      .all(cutoffIso)
-      .map((row) => this.rowToEmailSummary(row as MessageRow));
-    const staleMessages = this.expandCandidatesToFullThreads(db, staleCandidateMessages);
-    const staleSnapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages: staleMessages };
-    const staleAwaitingYou = (this.buildThreads(staleSnapshot, true) as ThreadDetail[])
-      .map((thread) => {
-        const latestMessage = thread.messages[thread.messages.length - 1];
-        const { pendingOn, score } = actionableThreadScore(thread, ownerEmail);
-        return {
-          ...thread,
-          latestEmailId: latestMessage?.primaryEmailId,
-          latestPreview: latestMessage?.preview,
-          latestFrom: latestMessage?.from ?? [],
-          latestIsRead: latestMessage?.isRead ?? true,
-          latestIsStarred: latestMessage?.isStarred ?? false,
-          latestHasAttachments: latestMessage?.hasAttachments ?? false,
-          pendingOn,
-          score,
-        } satisfies ActionableThreadSummary;
-      })
-      .filter((thread) => {
-        if (thread.pendingOn !== "you" || !thread.latestDate) {
+    const staleRanked = this.loadThreadStats(db, ownerEmail)
+      .filter((stat) => {
+        if (stat.pendingOn !== "you" || !stat.latestDate) {
           return false;
         }
-        return now - new Date(thread.latestDate).getTime() >= staleThresholdMs;
+        return now - new Date(stat.latestDate).getTime() >= staleThresholdMs;
       })
+      .map((stat) => ({ stat, score: actionableScore(stat) }))
       .sort((left, right) => {
         if (right.score !== left.score) {
           return right.score - left.score;
         }
-        return new Date(right.latestDate || 0).getTime() - new Date(left.latestDate || 0).getTime();
+        return new Date(right.stat.latestDate || 0).getTime() - new Date(left.stat.latestDate || 0).getTime();
       });
 
     return {
@@ -1475,7 +1511,7 @@ export class LocalIndexService {
         pendingOnThem: allActionable.filter((thread) => thread.pendingOn === "them").length,
         starredThreads: allActionable.filter((thread) => thread.latestIsStarred).length,
         attachmentThreads: allActionable.filter((thread) => thread.latestHasAttachments).length,
-        staleAwaitingYou: staleAwaitingYou.length,
+        staleAwaitingYou: staleRanked.length,
       },
       // counts/topThreads come from the newest DEFAULT_SNAPSHOT_LIMIT messages only.
       ...(recentMessages.length >= DEFAULT_SNAPSHOT_LIMIT
@@ -1483,7 +1519,12 @@ export class LocalIndexService {
         : {}),
       ...this.indexFreshnessFields(updatedAt),
       topThreads: allActionable.slice(0, input.limit ?? 10).map((thread) => shapeThreadForList(thread)),
-      staleAwaitingYou: staleAwaitingYou.slice(0, input.limit ?? 10).map((thread) => shapeThreadForList(thread)),
+      staleAwaitingYou: staleRanked
+        .slice(0, input.limit ?? 10)
+        .flatMap(({ stat }) => {
+          const thread = this.loadThreadByKey(db, stat.key);
+          return thread ? [shapeThreadForList(toActionableSummary(thread, ownerEmail))] : [];
+        }),
     };
   }
 
@@ -1494,8 +1535,7 @@ export class LocalIndexService {
     offset?: number;
   } = {}): Promise<Record<string, unknown>> {
     const db = await this.ensureDb();
-    const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
-    const syncCheckpoints = this.loadCheckpointsSync(db);
+    const { ownerEmail, updatedAt } = this.loadFoldersAndMetadata(db);
     const minAgeHours = input.minAgeHours ?? 24;
     const pendingOn = input.pendingOn ?? "you";
     const thresholdMs = minAgeHours * 60 * 60 * 1000;
@@ -1511,44 +1551,20 @@ export class LocalIndexService {
     // qualify below necessarily has that message satisfy this condition itself, so
     // expanding every match to its full thread_id membership (expandCandidatesToFullThreads)
     // is guaranteed not to miss a qualifying thread, unbounded by the snapshot cap.
-    const cutoffIso = new Date(now - thresholdMs).toISOString();
-    const candidateMessages = db
-      .prepare(`SELECT * FROM messages WHERE COALESCE(internal_date, date) < ?`)
-      .all(cutoffIso)
-      .map((row) => this.rowToEmailSummary(row as MessageRow));
-    const messages = this.expandCandidatesToFullThreads(db, candidateMessages);
-    const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
-
-    const candidates = (this.buildThreads(snapshot, true) as ThreadDetail[])
-      .map((thread) => {
-        const latestMessage = thread.messages[thread.messages.length - 1];
-        const { pendingOn: currentPendingOn, score } = actionableThreadScore(thread, snapshot.ownerEmail);
-        const ageHours = thread.latestDate
-          ? Math.max(0, Math.round((now - new Date(thread.latestDate).getTime()) / (60 * 60 * 1000)))
-          : undefined;
-        return {
-          ...thread,
-          latestEmailId: latestMessage?.primaryEmailId,
-          latestPreview: latestMessage?.preview,
-          latestFrom: latestMessage?.from ?? [],
-          latestIsRead: latestMessage?.isRead ?? true,
-          latestIsStarred: latestMessage?.isStarred ?? false,
-          latestHasAttachments: latestMessage?.hasAttachments ?? false,
-          pendingOn: currentPendingOn,
-          score,
-          ageHours,
-          suggestedAction:
-            currentPendingOn === "you" ? "reply" : currentPendingOn === "them" ? "follow_up" : "review",
-        } satisfies ActionableThreadSummary & {
-          ageHours?: number;
-          suggestedAction: "reply" | "follow_up" | "review";
-        };
-      })
-      .filter((thread) => {
-        if (pendingOn !== "any" && thread.pendingOn !== pendingOn) {
+    // Ranked from the per-thread stats of the whole index; only the page that is returned is built in full.
+    const ranked = this.loadThreadStats(db, ownerEmail)
+      .map((stat) => ({
+        stat,
+        score: actionableScore(stat),
+        ageHours: stat.latestDate
+          ? Math.max(0, Math.round((now - new Date(stat.latestDate).getTime()) / (60 * 60 * 1000)))
+          : undefined,
+      }))
+      .filter(({ stat }) => {
+        if (pendingOn !== "any" && stat.pendingOn !== pendingOn) {
           return false;
         }
-        if (thread.latestDate && now - new Date(thread.latestDate).getTime() < thresholdMs) {
+        if (stat.latestDate && now - new Date(stat.latestDate).getTime() < thresholdMs) {
           return false;
         }
         return true;
@@ -1559,19 +1575,35 @@ export class LocalIndexService {
         }
         return right.score - left.score;
       });
+    const page = ranked.slice(offset, offset + limit).flatMap(({ stat, ageHours }) => {
+      const thread = this.loadThreadByKey(db, stat.key);
+      if (!thread) return [];
+      const summary = toActionableSummary(thread, ownerEmail);
+      return [
+        {
+          ...summary,
+          ageHours,
+          suggestedAction:
+            summary.pendingOn === "you" ? "reply" : summary.pendingOn === "them" ? "follow_up" : "review",
+        } satisfies ActionableThreadSummary & {
+          ageHours?: number;
+          suggestedAction: "reply" | "follow_up" | "review";
+        },
+      ];
+    });
 
-    const totalCount = candidates.length;
+    const totalCount = ranked.length;
     return {
       generatedAt: new Date().toISOString(),
-      indexUpdatedAt: snapshot.updatedAt,
+      indexUpdatedAt: updatedAt,
       minAgeHours,
       pendingOn,
       total: totalCount,
       hasMore: totalCount > offset + limit,
       offset,
       ...(totalCount > offset + limit ? { nextOffset: offset + limit } : {}),
-      ...this.indexFreshnessFields(snapshot.updatedAt),
-      threads: candidates.slice(offset, offset + limit).map((thread) => shapeThreadForList(thread)),
+      ...this.indexFreshnessFields(updatedAt),
+      threads: page.map((thread) => shapeThreadForList(thread)),
     };
   }
 
@@ -1617,10 +1649,10 @@ export class LocalIndexService {
       .prepare(`SELECT * FROM messages WHERE has_attachments = 1 AND (${keywordConditions.join(" OR ")})`)
       .all(...keywordParams)
       .map((row) => this.rowToEmailSummary(row as MessageRow));
-    const messages = this.expandCandidatesToFullThreads(db, candidateMessages);
-    const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
+    const expanded = this.expandCandidatesToFullThreads(db, candidateMessages);
+    const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages: expanded.messages };
 
-    const matches = (this.buildThreads(snapshot, true) as ThreadDetail[])
+    const matches = (this.buildThreads(snapshot, true, expanded.threadKeys) as ThreadDetail[])
       .map((thread) => {
         const documents = thread.messages.flatMap((message) =>
           message.attachments.filter((attachment) => {
@@ -1707,6 +1739,7 @@ export class LocalIndexService {
     }
 
     let messages: EmailSummary[];
+    let threadKeys: Map<string, string> | undefined;
     let messagesCapped = false;
     if (conditions.length > 0) {
       // SQL-prefilter by participant text (a safe superset over the exact person/domain
@@ -1718,7 +1751,9 @@ export class LocalIndexService {
         .prepare(sql)
         .all(...params)
         .map((row) => this.rowToEmailSummary(row as MessageRow));
-      messages = this.expandCandidatesToFullThreads(db, candidateMessages);
+      const expanded = this.expandCandidatesToFullThreads(db, candidateMessages);
+      messages = expanded.messages;
+      threadKeys = expanded.threadKeys;
     } else {
       // Neither person nor domain given: nothing SQL-expressible to narrow by — same
       // unavoidable bound as getThreads()' unfiltered path.
@@ -1727,7 +1762,7 @@ export class LocalIndexService {
     }
 
     const snapshot: SnapshotData = { ownerEmail, updatedAt, folders, indexedFolders, syncCheckpoints, messages };
-    const threads = (this.buildThreads(snapshot, true) as ThreadDetail[])
+    const threads = (this.buildThreads(snapshot, true, threadKeys) as ThreadDetail[])
       .filter((thread) =>
         thread.participants.some((participant) => {
           const participantText = `${participant.name ?? ""} ${participant.address ?? ""}`;
@@ -2464,6 +2499,8 @@ export class LocalIndexService {
       CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
       CREATE INDEX IF NOT EXISTS idx_messages_internal_date ON messages(internal_date);
       CREATE INDEX IF NOT EXISTS idx_messages_folder_date ON messages(folder, internal_date DESC);
+      -- The newest-first order every capped read uses (see loadMessages); without it each call sorted the whole table.
+      CREATE INDEX IF NOT EXISTS idx_messages_recent ON messages(COALESCE(internal_date, date) DESC, uid DESC);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         email_id UNINDEXED,
@@ -2918,35 +2955,74 @@ export class LocalIndexService {
     // getThreadById() now uses for these threads — so the thread is always built
     // from its complete membership, filtered query or not.
     if (this.hasUnresolvedReferenceCandidate(db, candidates)) {
-      // Pull in every message of the threads the candidates belong to, with the thread keys the whole
-      // index gives them (see loadThreadMap), instead of reading and grouping the entire index each time.
-      const map = this.loadThreadMap(db);
-      const wanted = new Set<string>();
-      for (const email of byId.values()) {
-        const key = map.keyByMessage.get(canonicalMessageKey(email));
-        if (key !== undefined) wanted.add(key);
-      }
-      const emailIds: string[] = [];
-      for (const key of wanted) {
-        for (const canonicalId of map.messagesByKey.get(key) ?? []) {
-          emailIds.push(...(map.emailIdsByMessage.get(canonicalId) ?? []));
-        }
-      }
-      for (const email of this.loadMessagesByEmailIds(db, emailIds)) {
-        byId.set(email.id, email);
-      }
-      return { messages: [...byId.values()], threadKeys: map.keyByMessage };
+      const threadKeys = this.addThreadsFromMap(db, byId);
+      return { messages: [...byId.values()], threadKeys };
     }
 
     return { messages: [...byId.values()] };
   }
 
+  // Adds every message of the threads the given messages belong to (using the thread of every message in the
+  // whole index, see loadThreadMap) instead of reading and grouping the entire index each time. Returns those
+  // thread keys; buildThreads must use them, because on a partial set of messages it could land on another key.
+  private addThreadsFromMap(db: Database.Database, byId: Map<string, EmailSummary>): Map<string, string> {
+    const map = this.loadThreadMap(db);
+    const wanted = new Set<string>();
+    for (const email of byId.values()) {
+      const key = map.keyByMessage.get(canonicalMessageKey(email));
+      if (key !== undefined) wanted.add(key);
+    }
+    const emailIds: string[] = [];
+    for (const key of wanted) {
+      for (const canonicalId of map.messagesByKey.get(key) ?? []) {
+        emailIds.push(...(map.emailIdsByMessage.get(canonicalId) ?? []));
+      }
+    }
+    for (const email of this.loadMessagesByEmailIds(db, emailIds)) {
+      byId.set(email.id, email);
+    }
+    return map.keyByMessage;
+  }
+
+  // One thread by its id (the thread key), built from its whole membership.
+  private loadThreadByKey(db: Database.Database, threadId: string): ThreadDetail | undefined {
+    const map = this.loadThreadMap(db);
+    const members = map.messagesByKey.get(threadId);
+    if (!members) return undefined;
+    const emailIds = members.flatMap((canonicalId) => map.emailIdsByMessage.get(canonicalId) ?? []);
+    const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
+    const snapshot: SnapshotData = {
+      ownerEmail,
+      updatedAt,
+      folders,
+      indexedFolders,
+      syncCheckpoints: this.loadCheckpointsSync(db),
+      messages: this.loadMessagesByEmailIds(db, emailIds),
+    };
+    return (this.buildThreads(snapshot, true, map.keyByMessage) as ThreadDetail[]).find((entry) => entry.id === threadId);
+  }
+
   // The thread of every message in the index, worked out exactly as buildThreads does for a full read, but
   // only the keys are kept. Valid until the index is written to.
   private loadThreadMap(db: Database.Database): ThreadMap {
+    return this.loadThreadIndex(db, false).map;
+  }
+
+  // For every thread, what the follow-up and digest rankings need, in buildThreads order. Costs one full
+  // read per index version, like the map it is built beside.
+  private loadThreadStats(db: Database.Database, ownerEmail?: string): ThreadStat[] {
+    return this.loadThreadIndex(db, true, ownerEmail).stats as ThreadStat[];
+  }
+
+  private loadThreadIndex(
+    db: Database.Database,
+    withStats: boolean,
+    ownerArg?: string,
+  ): { map: ThreadMap; stats?: ThreadStat[] } {
     const version = `${this.writeVersion}:${String(db.pragma("data_version", { simple: true }))}`;
-    if (this.threadMapCache?.version === version) {
-      return this.threadMapCache.map;
+    const cached = this.threadMapCache;
+    if (cached?.version === version && (!withStats || cached.stats)) {
+      return { map: cached.map, stats: cached.stats };
     }
     const { ownerEmail, updatedAt, folders, indexedFolders } = this.loadFoldersAndMetadata(db);
     const snapshot: SnapshotData = {
@@ -2969,8 +3045,22 @@ export class LocalIndexService {
       else messagesByKey.set(message.threadKey, [message.canonicalId]);
     }
     const map = { keyByMessage, messagesByKey, emailIdsByMessage };
-    this.threadMapCache = { version, map };
-    return map;
+    let stats: ThreadStat[] | undefined;
+    if (withStats) {
+      stats = (this.buildThreads(snapshot, true, keyByMessage) as ThreadDetail[]).map((thread) => {
+        const latestMessage = thread.messages[thread.messages.length - 1];
+        return {
+          key: thread.id,
+          latestDate: thread.latestDate,
+          unreadCount: thread.unreadCount,
+          pendingOn: pendingOnForThread(thread, ownerEmail ?? ownerArg),
+          isStarred: Boolean(latestMessage?.isStarred),
+          hasAttachments: Boolean(latestMessage?.hasAttachments),
+        };
+      });
+    }
+    this.threadMapCache = { version, map, stats };
+    return { map, stats };
   }
 
   private loadMessagesByEmailIds(db: Database.Database, emailIds: string[]): EmailSummary[] {
@@ -3038,7 +3128,10 @@ export class LocalIndexService {
   // Used by getFollowUpCandidates(), getActionableThreads(), getInboxDigest()'s
   // stale-awaiting-you section, findDocumentThreads(), and getMeetingPrep() below —
   // each has its own SQL candidate query but needs the identical expansion afterward.
-  private expandCandidatesToFullThreads(db: Database.Database, candidates: EmailSummary[]): EmailSummary[] {
+  private expandCandidatesToFullThreads(
+    db: Database.Database,
+    candidates: EmailSummary[],
+  ): { messages: EmailSummary[]; threadKeys?: Map<string, string> } {
     const byId = new Map(candidates.map((email) => [email.id, email]));
 
     const threadIds = [...new Set(
@@ -3060,12 +3153,11 @@ export class LocalIndexService {
     // why this must also check whether some OTHER message's In-Reply-To points at a
     // header-less candidate, not just the candidate's own inReplyTo/references.
     if (this.hasUnresolvedReferenceCandidate(db, candidates)) {
-      for (const email of this.loadAllMessages(db)) {
-        byId.set(email.id, email);
-      }
+      const threadKeys = this.addThreadsFromMap(db, byId);
+      return { messages: [...byId.values()], threadKeys };
     }
 
-    return [...byId.values()];
+    return { messages: [...byId.values()] };
   }
 
   private async loadSnapshot(options: SnapshotLoadOptions = {}): Promise<SnapshotData> {
