@@ -69,6 +69,7 @@ see `list-accounts`) is routed to that account, and `PROTONMAIL_ALLOWED_ACTIONS`
 ```bash
 proton-mail-bridge-client digest
 proton-mail-bridge-client threads "quarterly review"
+proton-mail-bridge-client get-threads --args '{"folder":"Archive","limit":20}'   # threads with a message in one folder
 proton-mail-bridge-client actionable
 proton-mail-bridge-client followups
 proton-mail-bridge-client thread-brief <threadId>

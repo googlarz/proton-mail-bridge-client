@@ -1495,6 +1495,7 @@ const TOOLS = [
       properties: {
         query: { type: "string", description: "Free-text filter across subject, participants, and labels." },
         label: { type: "string", description: "Require a normalized label on the thread." },
+        folder: { type: "string", description: "Only threads with a message in this folder, by its exact path as get_folders lists it (e.g. INBOX, Archive, Trash, Folders/Receipts). With several accounts it applies to each." },
         limit: { type: "number", description: "Maximum threads to return.", default: 100 },
         offset: { type: "number", description: "Skip this many threads (use nextOffset from the previous response to page).", default: 0 },
       },
@@ -7913,6 +7914,7 @@ export function createServer(
           const threadsInput = {
             query: optionalString(args, "query"),
             label: optionalString(args, "label"),
+            folder: optionalString(args, "folder"),
             limit: optionalInteger(args.limit, 1, 1000),
             offset: optionalInteger(args.offset, 0, 1_000_000),
           };

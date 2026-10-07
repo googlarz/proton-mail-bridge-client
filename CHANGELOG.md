@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [2.7.1] — 2026-10-07
+
+### Added
+- **`get_threads` takes a `folder`.** Only threads with a message in that folder, by its exact path as `get_folders` lists it (`INBOX`, `Archive`, `Trash`, `Folders/Receipts`); with several accounts it applies to each. The index already supported it (and 2.6.0 fixed it returning every thread); the tool just did not pass it on, and an unknown argument is ignored without a word, so `folder` used to have no effect. From the CLI: `get-threads --args '{"folder":"Archive"}'`; the hand-written `threads` command still uses `--folder` only for the sync it can run first.
+
 ## [2.7.0] — 2026-10-07
 
 ### Changed
