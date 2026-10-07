@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [2.5.2] — 2026-10-07
+
+### Changed
+- `nodemailer` 10.0.15 (the minimum is now `^10.0.15`). No code changes; the full suite and the pack smoke test pass.
+
 ## [2.5.1] — 2026-10-06
 
 ### Fixed
