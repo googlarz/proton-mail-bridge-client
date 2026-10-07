@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## [2.7.0] — 2026-10-07
+
+### Changed
+- **The thread tools no longer read the whole index on every call.** Since 2.6.0 `get_threads` kept which thread every message belongs to until the index changes; the same map now serves `get_thread_by_id`, a thread search by id, actionable threads, meeting preparation and document search, and follow-ups and the digest's stale section are ranked from compact per-thread stats and build only the page they return. Measured on a copy of a real 57,000-message index (second call, so the map is warm; the first call after the index changes builds it, about 0.5 s, or 0.8 s for follow-ups and the digest):
+
+  | call | before | after |
+  |---|---|---|
+  | `get_thread_by_id` (reference-chain thread) | 520 ms | 1 ms |
+  | `search` with a `threadId` | 880 ms | under 1 ms |
+  | follow-ups | 760-880 ms | 20-40 ms |
+  | inbox digest | 960 ms | 80 ms |
+  | actionable threads (`unreadOnly`, or with `query`) | 600-780 ms | 17-35 ms |
+  | meeting prep (`person` or `domain`) | 580-620 ms | 30 ms |
+  | document search | 720 ms | 225 ms |
+
+  Twenty-four calls in all took 16.4 s before and 1.2 s after, with the same results. The map and stats take about 31 MB of memory for 57,000 messages.
+- **Reads of the newest messages are faster.** `get_threads` without a filter, the label list, the recent-message list, the status and the digest's recent part sorted the whole table by date on every call. A new index (`idx_messages_recent`, created once on the first start after the upgrade, about 25 ms) lets them read just the newest 5,000: `get_threads` without a filter 113 to 40 ms, the label list 121 to 43 ms, the recent-message list 101 to 24 ms, the status 173 to 89 ms.
+
+### Known limits
+- Document search is still about 225 ms: it scans attachment names and text for keywords in SQL, which the thread map does not help.
+- Follow-ups and the digest's stale section now rank every thread of the whole index. On the real index tested the results are identical to 2.5.3 across the calls compared; the claim does not go beyond that index.
+
 ## [2.6.0] — 2026-10-07
 
 ### Changed
