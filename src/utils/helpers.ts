@@ -501,19 +501,40 @@ export function dedupeEmails(emails: EmailSummary[]): EmailSummary[] {
   return result;
 }
 
+function emailTime(email: Pick<EmailSummary, "date" | "internalDate">): number {
+  return new Date(email.internalDate || email.date || 0).getTime();
+}
+
 export function sortEmailsByNewest<T extends Pick<EmailSummary, "date" | "internalDate" | "uid">>(
   emails: T[],
 ): T[] {
-  return [...emails].sort((left, right) => {
-    const leftTime = new Date(left.internalDate || left.date || 0).getTime();
-    const rightTime = new Date(right.internalDate || right.date || 0).getTime();
+  // Each date is parsed once, not once per comparison.
+  return emails
+    .map((email) => ({ email, time: emailTime(email) }))
+    .sort((left, right) => {
+      if (right.time !== left.time) {
+        return right.time - left.time;
+      }
 
-    if (rightTime !== leftTime) {
-      return rightTime - leftTime;
+      return right.email.uid - left.email.uid;
+    })
+    .map((entry) => entry.email);
+}
+
+// The first element sortEmailsByNewest would return, without sorting everything.
+export function newestEmail<T extends Pick<EmailSummary, "date" | "internalDate" | "uid">>(
+  emails: T[],
+): T | undefined {
+  let best: T | undefined;
+  let bestTime = 0;
+  for (const email of emails) {
+    const time = emailTime(email);
+    if (best === undefined || time > bestTime || (time === bestTime && email.uid > best.uid)) {
+      best = email;
+      bestTime = time;
     }
-
-    return right.uid - left.uid;
-  });
+  }
+  return best;
 }
 
 // A tool argument that could not be read as what it should be. The server maps it to InvalidParams, so

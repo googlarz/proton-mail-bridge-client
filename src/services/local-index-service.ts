@@ -34,6 +34,7 @@ import {
   searchIncludes,
   searchKey,
   searchNeedles,
+  newestEmail,
   sortEmailsByNewest,
 } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -3147,16 +3148,17 @@ export class LocalIndexService {
 
     return [...groups.entries()]
       .map(([id, entries]) => {
-        const sortedMessages = [...entries].sort((left, right) => {
-          const leftTime = new Date(left.internalDate || left.date || 0).getTime();
-          const rightTime = new Date(right.internalDate || right.date || 0).getTime();
-          if (leftTime !== rightTime) {
-            return leftTime - rightTime;
-          }
-          return left.uid - right.uid;
-        });
+        const sortedMessages = entries
+          .map((message) => ({ message, time: new Date(message.internalDate || message.date || 0).getTime() }))
+          .sort((left, right) => {
+            if (left.time !== right.time) {
+              return left.time - right.time;
+            }
+            return left.message.uid - right.message.uid;
+          })
+          .map((entry) => entry.message);
 
-        const latest = sortEmailsByNewest(sortedMessages)[0];
+        const latest = newestEmail(sortedMessages);
         const normalizedLabels = new Set<string>();
         for (const message of sortedMessages) {
           for (const label of message.normalizedLabels) {
@@ -3184,14 +3186,14 @@ export class LocalIndexService {
           messages: sortedMessages,
         };
       })
+      .map((thread) => ({ thread, time: new Date(thread.latestDate || 0).getTime() }))
       .sort((left, right) => {
-        const leftTime = new Date(left.latestDate || 0).getTime();
-        const rightTime = new Date(right.latestDate || 0).getTime();
-        if (rightTime !== leftTime) {
-          return rightTime - leftTime;
+        if (right.time !== left.time) {
+          return right.time - left.time;
         }
-        return left.subject.localeCompare(right.subject);
-      });
+        return left.thread.subject.localeCompare(right.thread.subject);
+      })
+      .map((entry) => entry.thread);
   }
 
   private assignResolvedThreadKeys(messages: MailboxMessage[], ownerEmail?: string): MailboxMessage[] {

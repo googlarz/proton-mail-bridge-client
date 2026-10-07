@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [2.5.3] — 2026-10-07
+
+### Changed
+- Building thread lists does less sorting work: the newest message of a thread is found with one pass instead of a full sort, and dates are parsed once per message instead of once per comparison. `get_threads` with a `query` on a 57,000-message index went from about 690 ms to about 630 ms. Results are identical to 2.5.2 (checked on a copy of a real index across `get_threads`, actionable threads, inbox digest, follow-ups and searches).
+- Not changed: `get_threads` with a `query`, `label` or `folder` filter still loads and groups every message when a matching message has no stored thread id and references another one (so its thread can be built from its full chain), which is where most of those 630 ms go. Making that faster means keeping thread membership in the index, a larger change. `search_emails`/`search_indexed_emails` with a `label` (about 60 ms) or free-text `query` (about 35 ms) are not slow.
+
 ## [2.5.2] — 2026-10-07
 
 ### Changed
