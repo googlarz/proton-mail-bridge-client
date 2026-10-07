@@ -339,6 +339,7 @@ First, enable **Split Addresses** in Proton Bridge and configure each address as
 - Actions: `mark_email_read`, `star_email`, `move_email`, `delete_email`, etc. — prefix the `emailId` with account slug if targeting a non-primary account
 - Drafts: `create_draft`, `get_draft`, `send_draft`, etc. — drafts live per account; prefix `draftId` to access non-primary drafts
 - Send: `send_email`, `reply_to_email`, `forward_email` — match the `from` address to route through the correct account's SMTP
+- Sync and index maintenance: `sync_emails`, `sync_folders`, `run_background_sync`, `wait_for_mailbox_changes` — pass `account` (address or slug) to act on a non-primary account; without it they act on the primary account, and an unknown value is an error
 
 **Primary-only (for now):**
 - `list_remote_drafts` — shows the primary account's remote Proton Drafts folder only
@@ -609,6 +610,23 @@ Measured against a real Proton Bridge with a ~57,000-message mailbox (INBOX 29k,
 
 Bridge answers IMAP `SEARCH` itself, and its cost grows with folder size. That is why a live search is slower than the local index, and why narrowing the scope matters most.
 
+**Local index: filters and thread tools**
+
+Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "Warm" is a second call; the first call after the index changes (a sync, or another process writing to it) builds a map of which thread every message belongs to, which takes about 0.5 s (0.8 s for follow-ups and the digest) and about 31 MB of memory.
+
+| Call | Warm |
+|---|---|
+| filter by `subject` or `from` | ~20 ms |
+| filter by `to` | ~40 ms |
+| `get_threads` with `query`, `label` or `folder` | ~25 ms |
+| `get_threads` without a filter | ~40 ms |
+| `get_thread_by_id` | ~1 ms |
+| `get_follow_up_candidates` | 20-40 ms |
+| `get_inbox_digest` | ~80 ms |
+| `get_actionable_threads` | 17-35 ms |
+| `prepare_meeting_context` with `person` or `domain` | ~30 ms |
+| `find_document_threads` | ~225 ms |
+
 **Make searches faster**
 
 - **Prefer `search_indexed_emails`** when the index is current (`get_index_status`, `sync_emails`). It does not touch Bridge at all.
@@ -651,6 +669,7 @@ To check a real Bridge yourself, run the read-only smoke test: `PROTONMAIL_USERN
 - `get_emails` and `search_emails` return a composite `emailId` — use it for all subsequent reads and actions.
 - `search_indexed_emails` supports `from:`, `to:`, `subject:`, `label:`, `domain:` shortcuts.
 - The local index lives at `PROTONMAIL_DATA_DIR/mail-index.sqlite`. Background sync and IMAP IDLE keep it warm.
+- Filters on the local index ignore case and accents, and match spelling variants: `Müller` finds `Mueller`, `lodz` finds `Łódź`, `strasse` finds `Straße`. Live `search_emails` and `count_messages` go through Bridge: a query with umlauts or other non-ASCII letters also matches the spelled-out form (`Müller` finds `Mueller`), but a plain ASCII query is sent as typed, so `Mueller` does not find `Müller` there. Use `search_indexed_emails` for that.
 - Audit logs live at `PROTONMAIL_DATA_DIR/audit.log`.
 - Draft sync is best-effort — the local draft is always preserved even if remote sync fails.
 - System folders (INBOX, Sent, Trash, Spam, Archive, All Mail) are guarded against accidental deletion.
