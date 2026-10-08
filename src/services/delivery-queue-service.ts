@@ -11,6 +11,7 @@ import { logger, type Logger } from "../utils/logger.js";
 import { withTimeout } from "../utils/helpers.js";
 import { SMTPService } from "./smtp-service.js";
 import type { DraftStoreService } from "./draft-store-service.js";
+import { ownRecord } from "../utils/own-record.js";
 
 const SEND_ITEM_TIMEOUT_MS = 30_000;
 // How long a terminal (sent/failed) record is kept before checkDue() prunes
@@ -179,7 +180,7 @@ export class DeliveryQueueService {
   async cancel(id: string): Promise<{ id: string; canceled: boolean; status: string }> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const record = store.items[id];
+      const record = ownRecord(store.items, id);
       if (!record) {
         throw new Error(`Queued send not found for id ${id}`);
       }
@@ -194,7 +195,7 @@ export class DeliveryQueueService {
 
   async get(id: string): Promise<DeliveryQueueRecord> {
     const store = await this.load();
-    const record = store.items[id];
+    const record = ownRecord(store.items, id);
     if (!record) {
       throw new Error(`Queued send not found for id ${id}`);
     }
@@ -225,7 +226,7 @@ export class DeliveryQueueService {
     for (const id of dueIds) {
       const claimed = await this.withLock(async () => {
         const store = await this.loadUnlocked();
-        const record = store.items[id];
+        const record = ownRecord(store.items, id);
         if (!record || record.status !== "pending") return undefined;
         record.status = "sending";
         // Tag the claim with this process's identity — see the ownerPid
@@ -275,7 +276,7 @@ export class DeliveryQueueService {
           );
           await this.withLock(async () => {
             const store = await this.loadUnlocked();
-            const record = store.items[id];
+            const record = ownRecord(store.items, id);
             if (record && record.status === "sending") {
               record.status = "failed";
               record.failureReason =
@@ -326,7 +327,7 @@ export class DeliveryQueueService {
           try {
             await this.withLock(async () => {
               const store = await this.loadUnlocked();
-              const record = store.items[id];
+              const record = ownRecord(store.items, id);
               if (record && record.status === "sending") {
                 record.status = "sent";
                 record.sentAt = new Date().toISOString();
@@ -418,7 +419,7 @@ export class DeliveryQueueService {
         this.log.warn("Delivery queue item failed to send", "DeliveryQueueService", { id, error });
         await this.withLock(async () => {
           const store = await this.loadUnlocked();
-          const record = store.items[id];
+          const record = ownRecord(store.items, id);
           if (record && record.status === "sending") {
             record.status = "failed";
             record.failureReason = message;

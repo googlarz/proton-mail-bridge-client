@@ -37,3 +37,41 @@ test("an ordinary folder or label is still deleted", async () => {
   await svc.deleteFolder("Labels/Work");
   assert.deepEqual(deleted, ["called"]);
 });
+
+// rename_folder / rename_label had no such guard: nothing stopped a system folder from being renamed away, and
+// emptyFolder compared INBOX exactly, so "INBOX/" or " inbox" slipped past the check.
+
+function renameService(folders = []) {
+  const { svc } = service(folders);
+  const calls = [];
+  svc.ensureConnected = async () => ({ mailboxRename: async (from, to) => { calls.push([from, to]); return { path: from, newPath: to }; } });
+  svc.mutateFolderWithReconnectCheck = async (action) => { calls.push("reached the server"); return { path: "x", newPath: "y" }; };
+  return { svc, calls };
+}
+
+test("a system folder cannot be renamed, whatever its capitalisation or slashes", async () => {
+  for (const name of ["INBOX", "inbox/", "/Trash", " sent ", "Spam", "Archive", "All Mail", "Labels", "Folders/"]) {
+    const { svc, calls } = renameService();
+    await assert.rejects(svc.renameFolder(name, "Folders/Elsewhere"), /reserved|system/i, JSON.stringify(name));
+    assert.deepEqual(calls, [], `${JSON.stringify(name)} must not reach the server`);
+  }
+});
+
+test("a folder the server marks with a special use cannot be renamed under an unusual name", async () => {
+  const { svc, calls } = renameService([{ path: "Mein Postausgang", specialUse: "\\Sent" }]);
+  await assert.rejects(svc.renameFolder("Mein Postausgang", "Folders/Elsewhere"), /system|special|reserved/i);
+  assert.deepEqual(calls, []);
+});
+
+test("an ordinary folder or label is still renamed", async () => {
+  const { svc, calls } = renameService([{ path: "Labels/Work" }]);
+  await svc.renameFolder("Labels/Work", "Labels/Job");
+  assert.deepEqual(calls, ["reached the server"]);
+});
+
+test("emptyFolder refuses INBOX however it is written", async () => {
+  for (const name of ["INBOX", "inbox", "INBOX/", " Inbox ", "/INBOX"]) {
+    const { svc } = service();
+    await assert.rejects(svc.emptyFolder(name), /cannot be used on INBOX/, JSON.stringify(name));
+  }
+});

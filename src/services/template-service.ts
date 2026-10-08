@@ -8,6 +8,7 @@ import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { InvalidArgumentError } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { ownRecord } from "../utils/own-record.js";
 
 // Named, reusable email templates with {{variable}} substitution. Persistence
 // mirrors DeliveryQueueService/SnoozeService: atomic temp+rename writes,
@@ -104,7 +105,7 @@ export class TemplateService {
 
   async get(id: string): Promise<EmailTemplateRecord> {
     const store = await this.load();
-    const record = store.items[id];
+    const record = ownRecord(store.items, id);
     if (!record) {
       throw new Error(`Template not found for id ${id}`);
     }
@@ -119,7 +120,7 @@ export class TemplateService {
   async delete(id: string): Promise<{ id: string; deleted: boolean }> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      if (!store.items[id]) {
+      if (!ownRecord(store.items, id)) {
         return { id, deleted: false };
       }
       delete store.items[id];

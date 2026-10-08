@@ -312,18 +312,57 @@ const MARKDOWN_INPUT_LIMIT = 300_000;
 const MARKDOWN_DEPTH_LIMIT = 400;
 const VOID_HTML_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
 
-// True when more than `limit` elements are open at the same time. One linear pass over the tags.
-function exceedsHtmlDepth(html: string, limit: number): boolean {
-  const tag = /<(\/?)([a-z][a-z0-9-]*)[^<>]*?(\/?)>/gi;
+function isAsciiLetter(code: number): boolean {
+  return (code >= 97 && code <= 122) || (code >= 65 && code <= 90);
+}
+
+function isHtmlNameChar(code: number): boolean {
+  return isAsciiLetter(code) || (code >= 48 && code <= 57) || code === 45;
+}
+
+// True when more than `limit` elements are open at the same time. One pass over the characters: a "<" that
+// never turns into a complete tag (no ">" before the next "<") is dropped and scanning goes on from that next
+// "<", so no stretch of text is read twice. (A regular expression for this backtracked quadratically on a
+// "<" followed by a long run of letters.)
+export function exceedsHtmlDepth(html: string, limit: number): boolean {
+  const length = html.length;
   let depth = 0;
-  for (let match = tag.exec(html); match; match = tag.exec(html)) {
-    const name = match[2].toLowerCase();
-    if (VOID_HTML_TAGS.has(name) || match[3] === "/") continue;
-    if (match[1] === "/") {
-      depth = Math.max(0, depth - 1);
-    } else if (++depth > limit) {
-      return true;
+  let i = 0;
+  while (i < length) {
+    if (html.charCodeAt(i) !== 60 /* < */) {
+      i += 1;
+      continue;
     }
+    let j = i + 1;
+    const closing = html.charCodeAt(j) === 47; /* / */
+    if (closing) j += 1;
+    if (!isAsciiLetter(html.charCodeAt(j))) {
+      i += 1;
+      continue;
+    }
+    const nameStart = j;
+    j += 1;
+    while (j < length && isHtmlNameChar(html.charCodeAt(j))) j += 1;
+    const name = html.slice(nameStart, j).toLowerCase();
+    while (j < length) {
+      const code = html.charCodeAt(j);
+      if (code === 60 || code === 62) break; /* < or > */
+      j += 1;
+    }
+    if (j >= length || html.charCodeAt(j) === 60) {
+      i = j;
+      continue;
+    }
+    // html[j] is the ">" that ends the tag
+    const selfClosing = html.charCodeAt(j - 1) === 47;
+    if (!VOID_HTML_TAGS.has(name) && !selfClosing) {
+      if (closing) {
+        depth = Math.max(0, depth - 1);
+      } else if (++depth > limit) {
+        return true;
+      }
+    }
+    i = j + 1;
   }
   return false;
 }
@@ -428,7 +467,8 @@ export function extractMessageIdList(value?: string | string[]): string[] {
   }
 
   const raw = Array.isArray(value) ? value.join(" ") : value;
-  const matches = raw.match(/<[^>]+>/g) ?? [];
+  // A message id never contains angle brackets; excluding "<" also keeps this linear on a long run of "<".
+  const matches = raw.match(/<[^<>]+>/g) ?? [];
   const normalized = matches
     .map((entry) => normalizeMessageId(entry))
     .filter((entry): entry is string => Boolean(entry));
@@ -1138,6 +1178,8 @@ export function summarizeCalendarText(value: string): string | undefined {
   const lines = normalized.replace(/\n[ \t]/g, "").split("\n");
   const fields = new Map<string, string>();
   const componentStack: string[] = [];
+  // How many open components are not the event itself; kept as a count so each property line is O(1).
+  let nonEventOpen = 0;
   let method: string | undefined;
   let eventCount = 0;
   let seenEvent = false;
@@ -1152,11 +1194,13 @@ export function summarizeCalendarText(value: string): string | undefined {
       if (marker[1].toUpperCase() === "BEGIN") {
         if (component === "VEVENT") eventCount += 1;
         componentStack.push(component);
+        if (ICS_NON_EVENT_COMPONENTS.has(component)) nonEventOpen += 1;
       } else {
         if (component === "VEVENT" && componentStack[componentStack.length - 1] === "VEVENT") {
           seenEvent = true;
         }
-        componentStack.pop();
+        const closed = componentStack.pop();
+        if (closed !== undefined && ICS_NON_EVENT_COMPONENTS.has(closed)) nonEventOpen -= 1;
       }
       continue;
     }
@@ -1167,7 +1211,7 @@ export function summarizeCalendarText(value: string): string | undefined {
       method = property.value.toUpperCase();
       continue;
     }
-    if (componentStack.some((component) => ICS_NON_EVENT_COMPONENTS.has(component))) continue;
+    if (nonEventOpen > 0) continue;
     if (hasEvent && (seenEvent || top !== "VEVENT")) continue;
     if (property.value && !fields.has(property.name)) {
       fields.set(property.name, ICS_TEXT_FIELDS.has(property.name) ? unescapeIcsText(property.value) : property.value);

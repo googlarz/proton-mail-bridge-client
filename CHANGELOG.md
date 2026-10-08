@@ -4,22 +4,30 @@ All notable changes to this project are documented here.
 
 ## [2.7.3] — 2026-10-08
 
-Housekeeping and hardening found by a full pass over the project: dependencies, CI, a security review of everything changed since 2.3.2, and a measurement of test coverage.
+Fixes from two independent security reviews of everything changed since 2.3.2, plus housekeeping found along the way. Each fix has a test that fails without it.
+
+### Security
+- **Moving mail to the Trash folder bypassed the `trash` permission.** `trash_email` is a move to Trash underneath, but `move_email`, `bulk_move`, `move_thread`, `batch_email_action` (action `move`) and `apply_thread_action` (action `move`) only checked `move`. With `PROTONMAIL_ALLOWED_ACTIONS` set to allow `move` but not `trash`, moving to Trash trashed mail anyway. They now also require `trash` when the destination is the Trash folder (found by its special-use, so a localized name such as `Papierkorb` counts, and by the name `Trash` with any case or surrounding slashes; `Folders/Trash` is an ordinary folder). Moving mail out of Trash is still checked as `move` only.
+- **Three more ways one received message could freeze the server for many seconds** (the work grew with the square of the input; all single-threaded, so IDLE and timers stopped too): an HTML-only body that is `<` followed by 300,000 letters took 18 s in the HTML-to-Markdown depth check; a `References` header of 100,000 `<a ` took 11 s to extract message ids; a calendar with 50,000 unclosed components took 7.6 s to summarise. All three now take milliseconds. Results are unchanged: 280,000 random inputs gave the same answers as before. A message id can no longer contain a `<`.
+- **A stored id such as `constructor` or `__proto__` was looked up as if it were a record** (drafts, scheduled sends, snoozes, templates). `get_template` returned a function, `delete_template` reported a deletion that did not happen. Lookups now see only the store's own entries.
+- **System folders can no longer be renamed** (`rename_folder`, `rename_label` on `INBOX`, `Trash`, ... or on a folder the server marks with a special use), with the same guard `delete_folder` already had. `empty_folder` also recognises INBOX written as `INBOX/` or ` inbox`.
+- **The setup wizard no longer echoes the Bridge password** while you type it. Checked in a real terminal.
+- **The npm publish job installs dependencies with `--ignore-scripts`.** That job holds the npm OIDC token and no dependency needs an install script.
+- **Dependabot alerts are switched on** for the repository.
 
 ### Changed
-- **A tool result now says when an argument was ignored.** Arguments a tool does not declare were dropped without a word, which is why `folder` on `get_threads` did nothing for a long time. The result still arrives unchanged; one extra text block after it names the ignored arguments (at most 10, 64 characters each) and lists what the tool accepts. Nothing is refused, so clients that send extra fields keep working. A new test checks that no handler reads an argument its schema leaves out, so the note cannot be wrong.
-- **The setup wizard no longer echoes the Bridge password** while you type it (the old prompt said "input is visible"). Other prompts are unchanged.
-- **The npm publish job installs dependencies with `--ignore-scripts`.** That job holds the npm OIDC token, and no dependency needs an install script (`better-sqlite3` ships prebuilt binaries); the full suite and the build pass without them.
+- **A tool result now says when an argument was ignored.** Arguments a tool does not declare were dropped silently, which is why `folder` on `get_threads` did nothing for a long time. The result is unchanged; one extra text block after it names the ignored arguments (at most 10, 64 characters each) and lists what the tool accepts. Nothing is refused, so clients that send extra fields keep working. A test checks that no handler reads an argument its schema leaves out.
 - **Dependencies:** `imapflow` 2.2.11, `mailparser` 3.9.37, `nodemailer` 10.0.16 (lockfile only).
-- **CI** also runs on `ubuntu-26.04` (the `ubuntu-latest` label moves to it between 2026-10-19 and 2026-11-19) and on Node 26 (`engines` says `>=24`; the whole suite passes on 26.11). Dependabot alerts are switched on for the repository.
+- **CI** also runs on `ubuntu-26.04` (the `ubuntu-latest` label moves to it between 2026-10-19 and 2026-11-19) and on Node 26 (`engines` says `>=24`; the whole suite passes on 26.11).
 - **Homebrew formula:** the generated formula used `Language::Node.std_npm_install_args`, which `brew audit --strict` rejects; it now uses `std_npm_args`. `brew audit --strict --online` and `brew style` pass, a build from the formula succeeds and the installed binary reports its version.
 
 ### Added
 - `npm run test:coverage` (Node's built-in coverage, no new dependency). At this release 79% of lines are covered; `setup-claude-desktop` (32%) and `cli` (42%) are the least covered files.
-- A test that calls all 96 tools through the real MCP server, with arguments made from their schemas, against a Bridge that does not exist, with one account and with two. It fails on any crash inside a handler and found none today; on its own it runs about 55% of the lines of the tool handlers (the whole suite about 66%).
+- A test that calls all 96 tools through the real MCP server, with arguments made from their schemas, against a Bridge that does not exist, with one account and with two. It fails on any crash inside a handler and found none; on its own it runs about 55% of the lines of the tool handlers (the whole suite about 66%).
 
 ### Not changed
 - Installing the package without its lockfile (a global or `npx` install) resolves dependency ranges at install time. Pinning them means shipping `npm-shrinkwrap.json`, which would also pin them for anyone using the package as a library.
+- `update_message_labels`, `bulk_update_labels` and the label-creating tools need write access but no particular action: labels are metadata, and the tools only ever touch `Labels/`.
 
 ## [2.7.2] — 2026-10-08
 

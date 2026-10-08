@@ -1370,6 +1370,7 @@ export class SimpleIMAPService {
     if (fromPath === toPath) {
       throw new Error("Source and target paths are identical.");
     }
+    await this.refuseSystemFolder(fromPath, "rename");
 
     const response = await this.mutateFolderWithReconnectCheck(
       async () => {
@@ -1408,6 +1409,25 @@ export class SimpleIMAPService {
     return { path: response.path, newPath: response.newPath, folder, warning };
   }
 
+  // System folders, by name (any capitalisation, with or without surrounding slashes) and by the special-use
+  // the server itself reports. Compared on the normalised name: "inbox", "INBOX/" and "/Trash" are the same
+  // folders as "INBOX" and "Trash".
+  private async refuseSystemFolder(path: string, verb: "delete" | "rename"): Promise<void> {
+    const reservedNames = new Set([
+      "inbox", "drafts", "sent", "sent mail", "trash", "deleted messages", "spam", "junk", "archive",
+      "all mail", "starred", "folders", "labels",
+    ]);
+    const normalized = path.replace(/^\/+|\/+$/g, "").trim().toLowerCase();
+    if (reservedNames.has(normalized)) {
+      throw new Error(`Refusing to ${verb} reserved system folder ${path}.`);
+    }
+    const known = await this.getFolders().catch(() => [] as Array<{ path: string; specialUse?: string }>);
+    const target = known.find((entry) => entry.path.replace(/^\/+|\/+$/g, "").toLowerCase() === normalized);
+    if (target?.specialUse) {
+      throw new Error(`Refusing to ${verb} system folder ${path} (it is the server's ${target.specialUse} folder).`);
+    }
+  }
+
   async deleteFolder(path: string): Promise<{
     path: string;
     deleted: true;
@@ -1417,22 +1437,7 @@ export class SimpleIMAPService {
       throw new Error("Folder path is required.");
     }
 
-    // System folders, by name (any capitalisation, with or without surrounding slashes) and by the special-use
-    // the server itself reports. Compared on the normalised name: "inbox", "INBOX/" and "/Trash" are the same
-    // folders as "INBOX" and "Trash".
-    const reservedNames = new Set([
-      "inbox", "drafts", "sent", "sent mail", "trash", "deleted messages", "spam", "junk", "archive",
-      "all mail", "starred", "folders", "labels",
-    ]);
-    const normalized = trimmed.replace(/^\/+|\/+$/g, "").trim().toLowerCase();
-    if (reservedNames.has(normalized)) {
-      throw new Error(`Refusing to delete reserved system folder ${trimmed}.`);
-    }
-    const known = await this.getFolders().catch(() => [] as Array<{ path: string; specialUse?: string }>);
-    const target = known.find((entry) => entry.path.replace(/^\/+|\/+$/g, "").toLowerCase() === normalized);
-    if (target?.specialUse) {
-      throw new Error(`Refusing to delete system folder ${trimmed} (it is the server's ${target.specialUse} folder).`);
-    }
+    await this.refuseSystemFolder(trimmed, "delete");
 
     const response = await this.mutateFolderWithReconnectCheck<{ path: string }>(
       async () => {
@@ -2559,7 +2564,7 @@ export class SimpleIMAPService {
   }
 
   async emptyFolder(folder: string): Promise<{ folder: string; deleted: number }> {
-    if (folder.toUpperCase() === "INBOX") {
+    if (folder.replace(/^\/+|\/+$/g, "").trim().toUpperCase() === "INBOX") {
       throw new Error("emptyFolder cannot be used on INBOX. Move messages to Trash first.");
     }
 
@@ -3953,6 +3958,22 @@ export class SimpleIMAPService {
     const selectable = (await this.getFolderStructure()).filter((entry) => !entry.flags.includes("\\Noselect"));
     const real = selectable.filter((entry) => !isVirtualMailView(entry));
     return (real.length > 0 ? real : selectable).map((entry) => entry.path);
+  }
+
+  // True when `path` is this account's Trash folder. Moving a message there is trashing it, whatever tool does
+  // the move, so the move tools check this to apply the "trash" permission as well. A folder merely named
+  // "Trash" under another path (Folders/Trash) is a different folder.
+  async isTrashFolder(path: string): Promise<boolean> {
+    const normalize = (value: string) => value.trim().replace(/\/+$/, "").toLowerCase();
+    const wanted = normalize(path);
+    if (wanted === "trash") {
+      return true;
+    }
+    try {
+      return normalize(await this.resolveSpecialFolder("\\Trash", ["Trash", "INBOX.Trash"])) === wanted;
+    } catch {
+      return false;
+    }
   }
 
   private async resolveSpecialFolder(

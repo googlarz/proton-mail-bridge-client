@@ -14,6 +14,7 @@ import { extractDomain } from "../utils/helpers.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { ownRecord } from "../utils/own-record.js";
 
 interface DraftStoreFile {
   version: number;
@@ -114,7 +115,7 @@ export class DraftStoreService {
 
   async getDraft(id: string): Promise<DraftRecord> {
     const store = await this.load();
-    const draft = store.drafts[id];
+    const draft = ownRecord(store.drafts, id);
     if (!draft) {
       throw new Error(`Draft not found for id ${id}`);
     }
@@ -197,7 +198,7 @@ export class DraftStoreService {
   ): Promise<DraftRecord> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const existing = store.drafts[id];
+      const existing = ownRecord(store.drafts, id);
       if (!existing) {
         throw new Error(`Draft not found for id ${id}`);
       }
@@ -249,7 +250,7 @@ export class DraftStoreService {
   async markSent(id: string, result: DraftSendResult): Promise<DraftRecord> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const existing = store.drafts[id];
+      const existing = ownRecord(store.drafts, id);
       if (!existing) {
         throw new Error(`Draft not found for id ${id}`);
       }
@@ -283,7 +284,7 @@ export class DraftStoreService {
   async claimForSending(id: string): Promise<DraftRecord> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const existing = store.drafts[id];
+      const existing = ownRecord(store.drafts, id);
       if (!existing) {
         throw new Error(`Draft not found for id ${id}`);
       }
@@ -313,7 +314,7 @@ export class DraftStoreService {
   async revertSending(id: string): Promise<void> {
     await this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const existing = store.drafts[id];
+      const existing = ownRecord(store.drafts, id);
       if (!existing || existing.status !== "sending") {
         return;
       }
@@ -332,7 +333,7 @@ export class DraftStoreService {
   async markRemoteSynced(id: string, remoteDraft: RemoteDraftRef, syncedFingerprint?: string): Promise<DraftRecord> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const existing = store.drafts[id];
+      const existing = ownRecord(store.drafts, id);
       if (!existing) {
         throw new Error(`Draft not found for id ${id}`);
       }
@@ -357,7 +358,7 @@ export class DraftStoreService {
   async markRemoteSyncError(id: string, message: string): Promise<DraftRecord> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const existing = store.drafts[id];
+      const existing = ownRecord(store.drafts, id);
       if (!existing) {
         throw new Error(`Draft not found for id ${id}`);
       }
@@ -380,7 +381,7 @@ export class DraftStoreService {
   async clearRemoteSync(id: string): Promise<DraftRecord> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const existing = store.drafts[id];
+      const existing = ownRecord(store.drafts, id);
       if (!existing) {
         throw new Error(`Draft not found for id ${id}`);
       }
@@ -404,7 +405,7 @@ export class DraftStoreService {
   async deleteDraft(id: string): Promise<{ id: string; removed: boolean }> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      if (!store.drafts[id]) {
+      if (!ownRecord(store.drafts, id)) {
         return { id, removed: false };
       }
 

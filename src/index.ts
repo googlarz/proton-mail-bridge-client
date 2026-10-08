@@ -41,6 +41,7 @@ import type {
   ContactStats,
   MailboxLabel,
   ProtonMailConfig,
+  ProtonRuntimeConfig,
   SendEmailInput,
   ThreadDetail,
   VolumeTrendPoint,
@@ -2081,6 +2082,19 @@ function parseBodyEdits(value: unknown): BodyEdit[] {
     }
     return { find: edit.find, replace: edit.replace, ...(edit.all === true ? { all: true } : {}) };
   });
+}
+
+// Moving a message into the Trash folder is trashing it: trash_email is literally a move there. The move tools
+// therefore need the "trash" permission as well as "move" when the destination is the Trash folder, or an
+// ALLOWED_ACTIONS list that leaves out "trash" could be sidestepped by moving to Trash instead.
+async function ensureMoveTargetAllowed(
+  runtime: ProtonRuntimeConfig,
+  imap: { isTrashFolder(path: string): Promise<boolean> },
+  targetFolder: string | undefined,
+): Promise<void> {
+  if (targetFolder && (await imap.isTrashFolder(targetFolder))) {
+    ensureEmailActionAllowed(runtime, "trash");
+  }
 }
 
 // Arguments a tool does not declare are ignored (clients send extra fields, and refusing them would break
@@ -6411,6 +6425,7 @@ export function createServer(
           if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
           const folder = optionalString(args, "folder") ?? "INBOX";
           const targetFolder = requireString(args, "targetFolder");
+          await ensureMoveTargetAllowed(config.runtime, imapService, targetFolder);
           const max = getBulkMaxBatchSize(args);
           const dryRun = normalizeBoolean(args.dryRun, false);
 
@@ -6759,6 +6774,7 @@ export function createServer(
           // (e.g. a match/threading key that could resolve differently per
           // account) is out of scope for this pass.
           const { bundle, rest: messageId } = resolveAccountForEmailId(requireString(args, "messageId"));
+          await ensureMoveTargetAllowed(config.runtime, bundle.imapService, requireString(args, "destination"));
           const result = await withAudit(bundle.auditService, name, args, () =>
             bundle.imapService.moveThread({
               messageId,
@@ -6947,6 +6963,7 @@ export function createServer(
           const rawEmailId = requireString(args, "emailId");
           const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const targetFolder = requireString(args, "targetFolder");
+          await ensureMoveTargetAllowed(config.runtime, bundle.imapService, targetFolder);
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () => {
             try {
@@ -7219,6 +7236,9 @@ export function createServer(
           const continueOnError = normalizeBoolean(args.continueOnError, true);
           const dryRun = normalizeBoolean(args.dryRun, false);
           const targetFolder = optionalString(args, "targetFolder");
+          if (action === "move") {
+            await ensureMoveTargetAllowed(config.runtime, imapService, targetFolder);
+          }
           const groups = groupEmailIdsByAccount(accountManager, emailIds);
 
           const groupResults: Array<{ slug: string | undefined; result: BatchActionResult }> = [];
@@ -8567,6 +8587,9 @@ export function createServer(
           const thread = await bundle.localIndexService.getThreadById(threadId);
           const action = requireEmailAction(args);
           ensureEmailActionAllowed(config.runtime, action);
+          if (action === "move") {
+            await ensureMoveTargetAllowed(config.runtime, bundle.imapService, optionalString(args, "targetFolder"));
+          }
           const unreadOnly = normalizeBoolean(args.unreadOnly, false);
           const emailIds = [...new Set(
             thread.messages

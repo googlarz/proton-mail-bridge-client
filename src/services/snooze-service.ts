@@ -10,6 +10,7 @@ import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js"
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { isLikelyConnectionError, SimpleIMAPService } from "./simple-imap-service.js";
+import { ownRecord } from "../utils/own-record.js";
 
 // Same persistence pattern as DeliveryQueueService/DraftStoreService: atomic
 // temp+rename writes, corrupted-file backup, orphaned .tmp cleanup, in-process
@@ -182,7 +183,7 @@ export class SnoozeService {
     // record.
     const claim = await this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const record = store.items[id];
+      const record = ownRecord(store.items, id);
       if (!record) {
         throw new Error(`Snoozed email not found for id ${id}`);
       }
@@ -241,7 +242,7 @@ export class SnoozeService {
       // instead of getting stuck in "waking" forever.
       await this.withLock(async () => {
         const store = await this.loadUnlocked();
-        const record = store.items[id];
+        const record = ownRecord(store.items, id);
         if (record && record.status === "waking") {
           record.status = claim.revertTo;
           if (claim.revertTo === "failed") {
@@ -255,7 +256,7 @@ export class SnoozeService {
 
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const record = store.items[id];
+      const record = ownRecord(store.items, id);
       if (!record) {
         throw new Error(`Snoozed email not found for id ${id}`);
       }
@@ -300,7 +301,7 @@ export class SnoozeService {
 
   async get(id: string): Promise<SnoozeRecord> {
     const store = await this.load();
-    const record = store.items[id];
+    const record = ownRecord(store.items, id);
     if (!record) {
       throw new Error(`Snoozed email not found for id ${id}`);
     }
