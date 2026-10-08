@@ -67,7 +67,10 @@ test("reading an invitation stays linear on hostile calendar text", () => {
     head + "ATTENDEE;CN=" + "\"".repeat(100_000) + ":mailto:x@y.z\r\n" + tail,
     head + "ATTENDEE" + ";a=b".repeat(100_000) + ":mailto:x@y.z\r\n" + tail,
   ]) {
-    const { ms } = timed(() => buildInviteReply(parseInvite(text), { attendeeAddress: "me@x.y", response: "accept" }));
+    // Refusing an oversized or over-nested invitation is a bounded outcome too.
+    const { ms } = timed(() => {
+      try { return buildInviteReply(parseInvite(text), { attendeeAddress: "me@x.y", response: "accept" }); } catch (error) { if (error?.name !== "InviteError") throw error; return undefined; }
+    });
     assert.ok(ms < LIMIT_MS, `took ${Math.round(ms)} ms`);
   }
 });

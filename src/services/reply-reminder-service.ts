@@ -72,8 +72,8 @@ export class ReplyReminderService {
         id: existing?.id ?? randomUUID(),
         emailId: input.emailId,
         messageId: input.messageId,
-        subject: input.subject,
-        to: input.to,
+        subject: input.subject.slice(0, 300),
+        to: input.to.slice(0, 50).map((address) => address.slice(0, 320)),
         createdAt: existing?.createdAt ?? now.toISOString(),
         remindAt: input.remindAt.toISOString(),
         note,
@@ -86,7 +86,7 @@ export class ReplyReminderService {
 
   async list(): Promise<ReplyReminderRecord[]> {
     const store = await this.withLock(() => this.loadUnlocked());
-    return Object.values(store.items).filter((item) => !item.canceled).sort((left, right) => left.remindAt.localeCompare(right.remindAt));
+    return Object.values(store.items).filter((item) => !item.canceled).sort((left, right) => String(left.remindAt ?? "").localeCompare(String(right.remindAt ?? "")));
   }
 
   async cancel(id: string): Promise<{ id: string; canceled: boolean }> {

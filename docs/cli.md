@@ -81,7 +81,7 @@ Every triage command above covers all configured accounts; add `--args '{"accoun
 
 ### Reply reminders
 
-Ask to be told when a message goes unanswered by a date. A reminder is a local note; its state (waiting, due, answered) is worked out from the local index each time you look, and a reply from anyone but you settles it. Due reminders also appear in `digest`.
+Ask to be told when a message goes unanswered by a date. A reminder is a local note; its state (waiting, due, answered) is worked out from the local index each time you look, and any later message in the thread from someone other than you settles it (a different person's message counts, not only the one you wrote to). Due reminders also appear in `digest`.
 
 ```bash
 proton-mail-bridge-client set-reply-reminder Sent::5195::f6a63249 --args '{"afterDays":5,"note":"ask about the budget"}'
@@ -114,7 +114,7 @@ proton-mail-bridge-client forward INBOX::25642 --to carol@example.com
 
 ### Calendar invitations
 
-Answer an invitation in a message. `respond-to-invite` reads the invitation, then sends the organizer a calendar reply from the address it was sent to; `--args '{"dryRun":true}'` shows who would be answered and what the reply says without sending. It follows the same send settings as `reply`.
+Answer an invitation in a message. `respond-to-invite` reads the invitation, then sends the organizer a calendar reply from the account that holds the message (or the account the invitation names, when that is exactly one of yours), and warns when the organizer is not the sender of the message; `--args '{"dryRun":true}'` shows who would be answered and what the reply says without sending. It follows the same send settings as `reply`.
 
 ```bash
 proton-mail-bridge-client respond-to-invite INBOX::25642 accept

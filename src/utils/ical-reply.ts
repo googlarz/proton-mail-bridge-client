@@ -39,9 +39,17 @@ export interface ParsedInvite {
   attendees: InviteAttendee[];
   /** Lines copied into the reply: RECURRENCE-ID, SUMMARY, DTSTART, DTEND, ORGANIZER. */
   copy: string[];
-  /** VTIMEZONE components of the invite, which the copied dates may refer to. */
+  /** VTIMEZONE components of the invite, rebuilt from whitelisted properties only (never copied verbatim). */
   timezones: string[][];
 }
+
+const MAX_LINES = 20_000;
+const MAX_DEPTH = 8;
+const MAX_TIMEZONES = 4;
+const MAX_TIMEZONE_LINES = 60;
+const MAX_TITLE = 200;
+const TIMEZONE_PROPERTIES = new Set(["TZID", "TZOFFSETFROM", "TZOFFSETTO", "TZNAME", "DTSTART", "RRULE", "RDATE"]);
+const TIMEZONE_PARTS = new Set(["STANDARD", "DAYLIGHT"]);
 
 function unfold(text: string): string[] {
   return text.replace(/\r\n?/g, "\n").replace(/\n[ \t]/g, "").split("\n");
@@ -98,8 +106,9 @@ function mailtoAddress(value: string): string | undefined {
 /** The first VEVENT of an invitation, with what a reply needs. Throws InviteError when it cannot be answered. */
 export function parseInvite(text: string): ParsedInvite {
   const lines = unfold(text);
+  if (lines.length > MAX_LINES) throw new InviteError("The calendar attachment is too large to answer.");
   let method = "";
-  let depth: string[] = [];
+  const depth: string[] = [];
   let seenEvent = false;
   let inFirstEvent = false;
   const event: IcsProperty[] = [];
@@ -112,11 +121,13 @@ export function parseInvite(text: string): ParsedInvite {
     const marker = /^(BEGIN|END):(\S+)$/i.exec(line);
     if (marker) {
       const component = marker[2].toUpperCase();
-      // STANDARD / DAYLIGHT blocks belong to the time zone being copied.
-      if (timezone && component !== "VTIMEZONE") timezone.push(line);
-      if (marker[1].toUpperCase() === "BEGIN") {
+      const begin = marker[1].toUpperCase() === "BEGIN";
+      if (timezone && TIMEZONE_PARTS.has(component) && timezone.length < MAX_TIMEZONE_LINES) timezone.push(`${begin ? "BEGIN" : "END"}:${component}`);
+      if (begin) {
+        if (depth.length >= MAX_DEPTH) throw new InviteError("The calendar attachment is nested too deeply to answer.");
+        const insideTimezone = depth.includes("VTIMEZONE");
         depth.push(component);
-        if (component === "VEVENT" && !seenEvent) {
+        if (component === "VEVENT" && !seenEvent && !insideTimezone) {
           seenEvent = true;
           inFirstEvent = true;
         }
@@ -124,15 +135,20 @@ export function parseInvite(text: string): ParsedInvite {
       } else {
         if (component === "VEVENT" && inFirstEvent) inFirstEvent = false;
         if (component === "VTIMEZONE" && timezone) {
-          timezones.push([`BEGIN:VTIMEZONE`, ...timezone, `END:VTIMEZONE`]);
+          if (timezones.length < MAX_TIMEZONES) timezones.push(["BEGIN:VTIMEZONE", ...timezone, "END:VTIMEZONE"]);
           timezone = undefined;
         }
-        depth = depth.slice(0, depth.lastIndexOf(component));
+        const index = depth.lastIndexOf(component);
+        if (index >= 0) depth.length = index;
       }
       continue;
     }
     if (timezone && depth.includes("VTIMEZONE")) {
-      timezone.push(line);
+      // Only known time-zone properties, re-emitted from what was parsed, so no foreign line rides along.
+      const property = parseProperty(line);
+      if (property && TIMEZONE_PROPERTIES.has(property.name) && timezone.length < MAX_TIMEZONE_LINES) {
+        timezone.push(`${property.name}:${property.value}`);
+      }
       continue;
     }
     const property = parseProperty(line);
@@ -162,7 +178,9 @@ export function parseInvite(text: string): ParsedInvite {
   const copy: string[] = [];
   for (const name of ["RECURRENCE-ID", "SUMMARY", "DTSTART", "DTEND"]) {
     const property = first(name);
-    if (property) copy.push(property.raw);
+    if (!property) continue;
+    // SUMMARY is rebuilt from its capped text: an invite must not make the reply arbitrarily large.
+    copy.push(name === "SUMMARY" ? `SUMMARY:${escapeText(unescapeText(property.value).slice(0, MAX_TITLE))}` : property.raw);
   }
   copy.push(organizerProperty.raw);
 
@@ -172,8 +190,8 @@ export function parseInvite(text: string): ParsedInvite {
     method: method || "REQUEST",
     uid,
     sequence: first("SEQUENCE")?.value || "0",
-    summary: summaryProperty ? unescapeText(summaryProperty.value) : undefined,
-    location: locationProperty ? unescapeText(locationProperty.value) : undefined,
+    summary: summaryProperty ? unescapeText(summaryProperty.value).slice(0, MAX_TITLE) : undefined,
+    location: locationProperty ? unescapeText(locationProperty.value).slice(0, MAX_TITLE) : undefined,
     hasRecurrence: Boolean(first("RRULE") || first("RDATE")),
     organizer: { address: organizerAddress, name: organizerProperty.params.get("CN") },
     attendees,

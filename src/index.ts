@@ -5203,12 +5203,13 @@ export function createServer(
           if (!invite) {
             throw new McpError(ErrorCode.InvalidParams, inviteProblem ?? "No invitation could be read from this message.");
           }
-          // Answer as the address the invitation was sent to; when none of the attendees is one of ours (a list,
-          // a forwarded invitation), answer as the account that holds the message.
+          // Answer as the account that holds the message. Only an attendee address that is exactly one of our
+          // accounts is used; a "+tag" or alias address in a hostile invite never picks the sender.
           const myAddresses = allAccountAddresses();
-          const myAttendee = findMyAttendee(invite, (address) => myAddresses.some((own) => isSelfAddress(address, own)));
-          const answeringAs = myAttendee?.address ?? inviteBundle.config.smtp.username;
-          const inviteSendBundle = (myAttendee ? accountManager.byAddress(answeringAs) : undefined) ?? inviteBundle;
+          const myAttendee = findMyAttendee(invite, (address) => myAddresses.some((own) => own.toLowerCase() === address.toLowerCase()));
+          const attendeeBundle = myAttendee ? accountManager.byAddress(myAttendee.address) : undefined;
+          const inviteSendBundle = attendeeBundle ?? inviteBundle;
+          const answeringAs = inviteSendBundle.config.smtp.username;
           const inviteReply = buildInviteReply(invite, {
             attendeeAddress: answeringAs,
             attendeeName: myAttendee?.name,
@@ -5218,8 +5219,14 @@ export function createServer(
           const inviteTo = [inviteReply.to];
           ensureValidEmails(inviteTo, "to");
           ensureOutboundRecipientsAllowed(config.runtime, inviteSendBundle.config.smtp.username, inviteTo);
+          const senderDomains = (inviteDetail.from ?? []).map((entry) => (entry.address ?? "").split("@").pop()?.toLowerCase());
+          const organizerDomain = invite.organizer.address.split("@").pop()?.toLowerCase();
+          const organizerMismatch = !senderDomains.includes(organizerDomain);
           const inviteSummary = {
             event: invite.summary ?? "(no title)",
+            ...(organizerMismatch
+              ? { warning: `The organizer (${invite.organizer.address}) is not the sender of this message; the answer goes to the organizer, so check that you trust them.` }
+              : {}),
             organizer: invite.organizer.address,
             answeringAs,
             response: responseArg,

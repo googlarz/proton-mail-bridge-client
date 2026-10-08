@@ -84,7 +84,7 @@ test("each answer maps to its PARTSTAT and subject", () => {
 });
 
 test("long lines are folded at 75 octets without splitting a character, and unfold back to the original", () => {
-  const long = "Zażółć gęślą jaźń ".repeat(12).trim();
+  const long = "Zażółć gęślą jaźń ".repeat(8).trim();
   const invite = parseInvite(GOOGLE.replace("SUMMARY:Planning\\, Q4 review", `SUMMARY:${long}`));
   const reply = buildInviteReply(invite, { attendeeAddress: "me@example.com", response: "accept" });
   for (const line of reply.ics.split("\r\n")) assert.ok(Buffer.byteLength(line, "utf8") <= 75, line);
@@ -106,4 +106,28 @@ test("an attendee name cannot break out of the CN parameter", () => {
   const invite = parseInvite(GOOGLE);
   const reply = buildInviteReply(invite, { attendeeAddress: "me@example.com", attendeeName: 'Evil"\r\nATTENDEE:mailto:x@y.z', response: "accept" });
   assert.equal(reply.ics.split("\r\n").filter((line) => line.startsWith("ATTENDEE")).length, 1);
+});
+
+test("a hostile VTIMEZONE cannot inject components or properties into the reply", () => {
+  const evil = crlf([
+    "BEGIN:VCALENDAR", "METHOD:REQUEST",
+    "BEGIN:VTIMEZONE", "TZID:x", "BEGIN:STANDARD", "TZOFFSETFROM:+0000", "TZOFFSETTO:+0100", "END:STANDARD",
+    "END:VEVENT", "BEGIN:VEVENT", "UID:other-event", "ATTENDEE;PARTSTAT=DECLINED:mailto:me@ex.test", "END:VEVENT", "ATTACH:http://evil.example/x",
+    "END:VTIMEZONE",
+    "BEGIN:VEVENT", "UID:real", "ORGANIZER:mailto:o@x.test", "DTSTART:20261015T090000Z", "SUMMARY:hi", "END:VEVENT", "END:VCALENDAR",
+  ]);
+  const reply = buildInviteReply(parseInvite(evil), { attendeeAddress: "me@ex.test", response: "accept" });
+  assert.equal((reply.ics.match(/BEGIN:VEVENT/g) ?? []).length, 1);
+  assert.ok(!reply.ics.includes("other-event"));
+  assert.ok(!reply.ics.includes("evil.example"));
+  assert.ok(reply.ics.includes("TZOFFSETTO:+0100"));
+});
+
+test("an invitation nested too deeply or with a huge title is bounded", () => {
+  const deep = "BEGIN:VCALENDAR\r\n" + "BEGIN:A\r\n".repeat(50) + "END:A\r\n".repeat(50) + "END:VCALENDAR\r\n";
+  assert.throws(() => parseInvite(deep), InviteError);
+  const big = crlf(["BEGIN:VCALENDAR", "METHOD:REQUEST", "BEGIN:VEVENT", "UID:u", "ORGANIZER:mailto:a@b.test", `SUMMARY:${"x".repeat(100000)}`, "END:VEVENT", "END:VCALENDAR"]);
+  const reply = buildInviteReply(parseInvite(big), { attendeeAddress: "me@x.test", response: "accept" });
+  assert.ok(reply.subject.length <= 220);
+  assert.ok(reply.ics.length < 2000);
 });
