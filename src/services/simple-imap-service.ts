@@ -3963,7 +3963,7 @@ export class SimpleIMAPService {
   // True when `path` is this account's Trash folder. Moving a message there is trashing it, whatever tool does
   // the move, so the move tools check this to apply the "trash" permission as well. A folder merely named
   // "Trash" under another path (Folders/Trash) is a different folder.
-  async isTrashFolder(path: string): Promise<boolean> {
+  async isTrashFolder(path: string): Promise<boolean | undefined> {
     const normalize = (value: string) => value.trim().replace(/^\/+|\/+$/g, "").trim().toLowerCase();
     const wanted = normalize(path);
     if (wanted === "trash" || wanted === "inbox.trash") {
@@ -3972,7 +3972,8 @@ export class SimpleIMAPService {
     try {
       return normalize(await this.resolveSpecialFolder("\\Trash", ["Trash", "INBOX.Trash"])) === wanted;
     } catch {
-      return false;
+      // The folder list could not be read, so it is not known whether this is the Trash folder.
+      return undefined;
     }
   }
 

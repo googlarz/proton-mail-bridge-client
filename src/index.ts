@@ -2091,16 +2091,26 @@ function parseBodyEdits(value: unknown): BodyEdit[] {
 // ALLOWED_ACTIONS list that leaves out "trash" could be sidestepped by moving to Trash instead.
 async function ensureMoveTargetAllowed(
   runtime: ProtonRuntimeConfig,
-  imap: { isTrashFolder(path: string): Promise<boolean> } | Array<{ isTrashFolder(path: string): Promise<boolean> }>,
+  imap: { isTrashFolder(path: string): Promise<boolean | undefined> } | Array<{ isTrashFolder(path: string): Promise<boolean | undefined> }>,
   targetFolder: string | undefined,
 ): Promise<void> {
   if (!targetFolder) return;
   // A call that can span accounts is checked against every account's own Trash folder: their names may differ.
+  let unknown = false;
   for (const candidate of Array.isArray(imap) ? imap : [imap]) {
-    if (await candidate.isTrashFolder(targetFolder)) {
+    const isTrash = await candidate.isTrashFolder(targetFolder);
+    if (isTrash) {
       ensureEmailActionAllowed(runtime, "trash");
       return;
     }
+    if (isTrash === undefined) unknown = true;
+  }
+  // Not being able to tell must not open a way round the permission: with "trash" not allowed, refuse.
+  if (unknown && !runtime.allowedActions.includes("trash")) {
+    throw new McpError(
+      ErrorCode.InternalError,
+      `Cannot tell whether ${targetFolder} is the Trash folder (the folder list could not be read), and the trash action is not allowed. Try again when Bridge answers.`,
+    );
   }
 }
 

@@ -130,3 +130,23 @@ test("isTrashFolder reads the folder the server marks as Trash, in any spelling"
     }
   });
 });
+
+// When the folder list cannot be read, it is not known whether the destination is the Trash folder. With "trash"
+// not allowed that must not let the move through.
+test("an unreadable folder list refuses a move when trash is not allowed, and allows it when it is", async () => {
+  await withServer(["move"], async (client, moved, imapService) => {
+    imapService.getFolderStructure = async () => { throw new Error("no bridge"); };
+    const refused = await run(client, "move_email", { emailId: "INBOX::1", targetFolder: "Folders/Receipts" });
+    assert.equal(refused.error, true);
+    assert.match(refused.text, /Cannot tell whether Folders\/Receipts is the Trash folder/);
+    assert.deepEqual(moved, []);
+    assert.equal(await imapService.isTrashFolder("Folders/Receipts"), undefined);
+    assert.equal(await imapService.isTrashFolder("Trash"), true, "the standard name needs no folder list");
+  });
+  await withServer(["move", "trash"], async (client, moved, imapService) => {
+    imapService.getFolderStructure = async () => { throw new Error("no bridge"); };
+    const result = await run(client, "move_email", { emailId: "INBOX::1", targetFolder: "Folders/Receipts" });
+    assert.equal(result.error, false, result.text);
+    assert.deepEqual(moved, ["Folders/Receipts"]);
+  });
+});
