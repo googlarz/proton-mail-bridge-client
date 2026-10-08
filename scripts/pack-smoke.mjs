@@ -119,7 +119,28 @@ async function main() {
     const text = status.content.find((part) => part.type === "text")?.text ?? "";
     if (!text.includes("mail-index.sqlite")) fail(`get_index_status did not report the index path: ${text.slice(0, 200)}`);
 
-    console.log(`pack-smoke OK: ${pkg.name}@${pkg.version} installed from the tarball, ${tools.length} tools, local index opens, CLI runs`);
+    // The installed server started with no login at all (how a registry or a fresh client inspects it) still
+    // lists its tools and refuses a call with a message, instead of exiting and leaving only "Connection closed".
+    const bareTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: [join(installed, installedPkg.bin["proton-mail-bridge-mcp"])],
+      cwd: project,
+      stderr: "pipe",
+      env: { PATH: process.env.PATH ?? "", HOME: join(tmp, "bare-home"), USERPROFILE: join(tmp, "bare-home"), SystemRoot: process.env.SystemRoot ?? "" },
+    });
+    const bareClient = new Client({ name: "pack-smoke-bare", version: "0.0.0" });
+    try {
+      await bareClient.connect(bareTransport);
+      const bareTools = (await bareClient.listTools()).tools;
+      if (bareTools.length < MIN_TOOLS) fail(`without a login only ${bareTools.length} tools were listed`);
+      const refused = await bareClient.callTool({ name: "get_runtime_status", arguments: {} });
+      const refusedText = refused.content.find((part) => part.type === "text")?.text ?? "";
+      if (!refused.isError || !refusedText.includes("PROTONMAIL_USERNAME")) fail(`without a login a call was not refused with a message: ${refusedText.slice(0, 200)}`);
+    } finally {
+      await bareClient.close().catch(() => {});
+    }
+
+    console.log(`pack-smoke OK: ${pkg.name}@${pkg.version} installed from the tarball, ${tools.length} tools, local index opens, CLI runs, starts without a login`);
   } catch (error) {
     fail(`${error instanceof Error ? error.stack : String(error)}\n${stderr}`);
   } finally {

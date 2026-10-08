@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [2.8.0] — 2026-10-08
+
+### Changed
+- **The server starts without a login.** With `PROTONMAIL_USERNAME` or `PROTONMAIL_PASSWORD` missing it used to exit at once ("Missing required environment variables"), so a client or an MCP registry that starts servers to inspect them saw only "Connection closed". It now answers the MCP handshake, lists its tools (the `core` tier applies too) and answers every tool call with an error that says which variables to set and where the password comes from. In this mode it creates nothing on disk, makes no Bridge connection and runs no background work. Any other configuration mistake (a bad port, a relative data directory) still stops the server at start, as before.
+- The pack smoke test (`npm run smoke:pack`) now also starts the installed package with no login and checks the tool list and the refusal, so a packaging mistake in this path is caught before release.
+
+### Not changed
+- A Glama build failed on 2026-10-08 with `HTTP code 502 Bad Gateway` from its own Docker host after 10 ms; that was not caused by the package (its build steps and its placeholder login, `myuser`/`mypassword`, both work). This release is a robustness change, not the fix for that failure.
+
 ## [2.7.1] — 2026-10-07
 
 ### Added

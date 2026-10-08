@@ -1835,6 +1835,11 @@ const TOOLS = [
 ] as const;
 
 // Core tier: the 20 tools that cover ~80% of daily email use.
+function listedTools(): Array<(typeof TOOLS)[number]> {
+  const tier = (process.env.PROTONMAIL_TOOL_TIER ?? "full").trim().toLowerCase();
+  return tier === "core" ? [...TOOLS].filter((t) => CORE_TOOL_NAMES.has(t.name)) : [...TOOLS];
+}
+
 // Set PROTONMAIL_TOOL_TIER=core to expose only these — reduces context-window burn
 // significantly on every session. Default is "full" (all tools).
 export const CORE_TOOL_NAMES = new Set([
@@ -3985,14 +3990,22 @@ function parseAdditionalAccountsEnv(primary: AccountConfig): AccountConfig[] {
   });
 }
 
+// The one configuration error the server can still answer: without a login it cannot reach Bridge, but it can
+// list its tools and say what is missing (registries and MCP clients start servers without credentials to
+// inspect them, and "Connection closed" tells nobody anything).
+export class MissingCredentialsError extends Error {
+  constructor() {
+    super("Missing required environment variables or secret sources: PROTONMAIL_USERNAME and PROTONMAIL_PASSWORD.");
+    this.name = "MissingCredentialsError";
+  }
+}
+
 export function buildConfigFromEnv(): ProtonMailConfig {
   const username = readEnvValue("PROTONMAIL_USERNAME");
   const password = readEnvValue("PROTONMAIL_PASSWORD");
 
   if (!username || !password) {
-    throw new Error(
-      "Missing required environment variables or secret sources: PROTONMAIL_USERNAME and PROTONMAIL_PASSWORD.",
-    );
+    throw new MissingCredentialsError();
   }
 
   validatePortEnv("PROTONMAIL_SMTP_PORT");
@@ -4275,10 +4288,7 @@ export function createServer(
     },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tier = (process.env.PROTONMAIL_TOOL_TIER ?? "full").trim().toLowerCase();
-    return { tools: tier === "core" ? [...TOOLS].filter((t) => CORE_TOOL_NAMES.has(t.name)) : [...TOOLS] };
-  });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools() }));
 
   server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
     const cursor = request.params?.cursor ? Number.parseInt(request.params.cursor, 10) : 0;
@@ -8867,8 +8877,45 @@ export async function stopAllAccounts(
   if (timer) clearTimeout(timer);
 }
 
+export const NOT_CONFIGURED_MESSAGE =
+  "Proton Mail Bridge Client is not configured: PROTONMAIL_USERNAME and PROTONMAIL_PASSWORD are not set. " +
+  "Set them to your Bridge login (the password is the one the Proton Mail Bridge app shows under your account, " +
+  "not your Proton password) and restart the server. `proton-mail-bridge-client setup-claude-desktop` does this for Claude Desktop.";
+
+// Starts a server that lists its tools and answers every call with NOT_CONFIGURED_MESSAGE. It touches nothing:
+// no data directory, no Bridge connection, no background work.
+export function createUnconfiguredServer(): Server {
+  const server = new Server({ name: "proton-mail-bridge-client", version: PACKAGE_VERSION }, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools() }));
+  server.setRequestHandler(CallToolRequestSchema, async () => ({
+    isError: true,
+    content: [{ type: "text", text: NOT_CONFIGURED_MESSAGE }],
+  }));
+  return server;
+}
+
+async function runUnconfigured(): Promise<void> {
+  logger.warn(NOT_CONFIGURED_MESSAGE, "MCPServer");
+  const server = createUnconfiguredServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  const leave = () => process.exit(0);
+  process.on("SIGINT", leave);
+  process.on("SIGTERM", leave);
+  transport.onclose = leave;
+}
+
 export async function main(): Promise<void> {
-  const config = buildConfigFromEnv();
+  let config: ProtonMailConfig;
+  try {
+    config = buildConfigFromEnv();
+  } catch (error) {
+    if (error instanceof MissingCredentialsError) {
+      await runUnconfigured();
+      return;
+    }
+    throw error;
+  }
   // Create the data directory explicitly with a restrictive mode as its very
   // first creation, before any service (draft store, template store, audit
   // log, local index, ...) does its own mkdir(dirname(...)) as a side effect
