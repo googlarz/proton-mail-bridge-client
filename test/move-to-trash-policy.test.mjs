@@ -42,7 +42,7 @@ async function withServer(allowedActions, fn) {
   const client = new Client({ name: "t", version: "0" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(b), client.connect(a)]);
-  try { await fn(client, moved); } finally {
+  try { await fn(client, moved, imapService); } finally {
     await client.close(); await server.close(); await closeTrackedIndexes();
     await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
@@ -66,6 +66,8 @@ for (const [tool, args] of [
   ["move_thread", { messageId: "<a@example.com>", destination: "Trash" }],
   ["batch_email_action", { emailIds: ["INBOX::1"], action: "move", targetFolder: "Trash" }],
   ["apply_thread_action", { threadId: "t", action: "move", targetFolder: "Papierkorb" }],
+  ["move_email", { emailId: "INBOX::1", targetFolder: "/Trash" }],
+  ["move_email", { emailId: "INBOX::1", targetFolder: "INBOX.Trash" }],
 ]) {
   test(`${tool} to ${JSON.stringify(args.targetFolder ?? args.destination)} is refused when only move is allowed`, async () => {
     await withServer(["move"], async (client, moved) => {
@@ -92,5 +94,39 @@ test("with trash allowed as well, moving to the Trash folder goes through", asyn
     const result = await run(client, "move_email", { emailId: "INBOX::1", targetFolder: "Trash" });
     assert.equal(result.error, false, result.text);
     assert.deepEqual(moved, ["Trash"]);
+  });
+});
+
+// restore takes a destination too, and a destination of Trash is trashing, not restoring.
+for (const [tool, args] of [
+  ["restore_email", { emailId: "Trash::1", targetFolder: "Trash" }],
+  ["restore_email", { emailId: "Trash::1", targetFolder: "/trash/" }],
+  ["batch_email_action", { emailIds: ["Trash::1"], action: "restore", targetFolder: "Papierkorb" }],
+  ["apply_thread_action", { threadId: "t", action: "restore", targetFolder: "Trash" }],
+]) {
+  test(`${tool} (restore) to ${JSON.stringify(args.targetFolder)} is refused when only restore is allowed`, async () => {
+    await withServer(["restore"], async (client) => {
+      const result = await run(client, tool, args);
+      assert.equal(result.error, true);
+      assert.match(result.text, POLICY);
+    });
+  });
+}
+
+test("restoring to an ordinary destination still works with only restore allowed", async () => {
+  await withServer(["restore"], async (client) => {
+    const result = await run(client, "restore_email", { emailId: "Trash::1", targetFolder: "Folders/Receipts" });
+    assert.doesNotMatch(result.text, POLICY);
+  });
+});
+
+test("isTrashFolder reads the folder the server marks as Trash, in any spelling", async () => {
+  await withServer(["move", "trash"], async (_client, _moved, imapService) => {
+    for (const name of ["Trash", " TRASH ", "/Trash/", "inbox.trash", "Papierkorb", "/papierkorb"]) {
+      assert.equal(await imapService.isTrashFolder(name), true, name);
+    }
+    for (const name of ["Folders/Trash", "Archive", "INBOX", "Trash2", ""]) {
+      assert.equal(await imapService.isTrashFolder(name), false, JSON.stringify(name));
+    }
   });
 });

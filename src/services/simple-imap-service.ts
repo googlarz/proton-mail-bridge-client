@@ -3964,9 +3964,9 @@ export class SimpleIMAPService {
   // the move, so the move tools check this to apply the "trash" permission as well. A folder merely named
   // "Trash" under another path (Folders/Trash) is a different folder.
   async isTrashFolder(path: string): Promise<boolean> {
-    const normalize = (value: string) => value.trim().replace(/\/+$/, "").toLowerCase();
+    const normalize = (value: string) => value.trim().replace(/^\/+|\/+$/g, "").trim().toLowerCase();
     const wanted = normalize(path);
-    if (wanted === "trash") {
+    if (wanted === "trash" || wanted === "inbox.trash") {
       return true;
     }
     try {

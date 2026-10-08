@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { createInterface } from "node:readline/promises";
-import { createMutableOutput, promptSecret } from "../dist/scripts/setup-claude-desktop.js";
+import { createMutableOutput, promptSecret, readlineTerminalMode } from "../dist/scripts/setup-claude-desktop.js";
 
 // The Bridge password typed into the setup wizard must not be echoed (terminal scrollback, screen sharing).
 
@@ -58,4 +58,10 @@ test("an empty answer falls back to the default, and an empty answer without one
   without.rl.close();
   assert.match(without.sink.text(), /This value is required\./);
   assert.ok(!without.sink.text().includes("second-try"));
+});
+
+test("readline takes over the terminal whenever stdin is one, even when stdout is redirected", () => {
+  assert.equal(readlineTerminalMode({ isTTY: true }), true);
+  assert.equal(readlineTerminalMode({ isTTY: false }), false);
+  assert.equal(readlineTerminalMode({}), false);
 });

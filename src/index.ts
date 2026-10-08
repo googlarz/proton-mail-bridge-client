@@ -1957,6 +1957,8 @@ const AUDIT_MAX_DEPTH = 8;
 const AUDIT_REDACTED_KEYS = new Set([
   "body", "html", "text", "htmlBody", "textBody", "markdownBody", "customMessage", "notes", "bodyEdits",
   "raw", "rawBase64", "base64", "content", "find", "replace", "signature",
+  // Parts of a received message that a tool result could carry: a preview or attachment text can hold a code or a secret.
+  "preview", "snippet", "attachmentText", "latestPreview",
 ]);
 const AUDIT_SECRET_KEY = /pass(word|wd|phrase)?$|secret|token|api[-_]?key|authoriz|credential|cookie|private[-_]?key/i;
 
@@ -2089,11 +2091,16 @@ function parseBodyEdits(value: unknown): BodyEdit[] {
 // ALLOWED_ACTIONS list that leaves out "trash" could be sidestepped by moving to Trash instead.
 async function ensureMoveTargetAllowed(
   runtime: ProtonRuntimeConfig,
-  imap: { isTrashFolder(path: string): Promise<boolean> },
+  imap: { isTrashFolder(path: string): Promise<boolean> } | Array<{ isTrashFolder(path: string): Promise<boolean> }>,
   targetFolder: string | undefined,
 ): Promise<void> {
-  if (targetFolder && (await imap.isTrashFolder(targetFolder))) {
-    ensureEmailActionAllowed(runtime, "trash");
+  if (!targetFolder) return;
+  // A call that can span accounts is checked against every account's own Trash folder: their names may differ.
+  for (const candidate of Array.isArray(imap) ? imap : [imap]) {
+    if (await candidate.isTrashFolder(targetFolder)) {
+      ensureEmailActionAllowed(runtime, "trash");
+      return;
+    }
   }
 }
 
@@ -6425,7 +6432,7 @@ export function createServer(
           if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
           const folder = optionalString(args, "folder") ?? "INBOX";
           const targetFolder = requireString(args, "targetFolder");
-          await ensureMoveTargetAllowed(config.runtime, imapService, targetFolder);
+          await ensureMoveTargetAllowed(config.runtime, accountManager.all().map((entry) => entry.imapService), targetFolder);
           const max = getBulkMaxBatchSize(args);
           const dryRun = normalizeBoolean(args.dryRun, false);
 
@@ -7046,6 +7053,7 @@ export function createServer(
           ensureEmailActionAllowed(config.runtime, "restore");
           const rawEmailId = requireString(args, "emailId");
           const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
+          await ensureMoveTargetAllowed(config.runtime, bundle.imapService, optionalString(args, "targetFolder"));
           const uidValidity = parseEmailId(emailId).uidValidity;
           const result = await withAudit(auditService, name, args, async () =>
             bundle.imapService.restoreEmail(
@@ -7236,8 +7244,8 @@ export function createServer(
           const continueOnError = normalizeBoolean(args.continueOnError, true);
           const dryRun = normalizeBoolean(args.dryRun, false);
           const targetFolder = optionalString(args, "targetFolder");
-          if (action === "move") {
-            await ensureMoveTargetAllowed(config.runtime, imapService, targetFolder);
+          if (action === "move" || action === "restore") {
+            await ensureMoveTargetAllowed(config.runtime, accountManager.all().map((entry) => entry.imapService), targetFolder);
           }
           const groups = groupEmailIdsByAccount(accountManager, emailIds);
 
@@ -8587,7 +8595,7 @@ export function createServer(
           const thread = await bundle.localIndexService.getThreadById(threadId);
           const action = requireEmailAction(args);
           ensureEmailActionAllowed(config.runtime, action);
-          if (action === "move") {
+          if (action === "move" || action === "restore") {
             await ensureMoveTargetAllowed(config.runtime, bundle.imapService, optionalString(args, "targetFolder"));
           }
           const unreadOnly = normalizeBoolean(args.unreadOnly, false);

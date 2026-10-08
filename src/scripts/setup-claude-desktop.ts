@@ -106,6 +106,12 @@ export async function probePort(host: string, port: number, timeoutMs = 400): Pr
 
 // readline echoes what is typed to its output stream. Handing it this stream lets a prompt switch the echo off
 // (muted) for a password and back on, without touching the terminal's own mode.
+// readline must take over the terminal (raw mode) whenever stdin is one. With only stdout redirected (`setup | tee log`)
+// it used to fall back to line mode, and the terminal itself then echoed the password as it was typed.
+export function readlineTerminalMode(stdin: { isTTY?: boolean }): boolean {
+  return Boolean(stdin.isTTY);
+}
+
 export function createMutableOutput(target: { write: (chunk: string | Uint8Array, encoding?: BufferEncoding) => unknown }): {
   stream: Writable;
   setMuted: (muted: boolean) => void;
@@ -234,7 +240,7 @@ export async function runClaudeDesktopSetupWizard(): Promise<void> {
   );
 
   const mutableOutput = createMutableOutput(output);
-  const rl = createInterface({ input, output: mutableOutput.stream, terminal: Boolean(input.isTTY && output.isTTY) });
+  const rl = createInterface({ input, output: mutableOutput.stream, terminal: readlineTerminalMode(input) });
 
   try {
     const username = await promptRequired(

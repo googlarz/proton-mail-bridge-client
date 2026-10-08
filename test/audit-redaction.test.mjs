@@ -93,3 +93,14 @@ test("error text that is not secret is left readable (an address after 'From:' i
   assert.equal(await scrubbed("Message from: boss@example.com was not found"), "Message from: boss@example.com was not found");
   assert.equal(await scrubbed("Mailbox does not exist"), "Mailbox does not exist");
 });
+
+test("a preview, snippet or attachment text that a result carries is not written to the audit log", async () => {
+  const entry = await run(
+    { to: "someone@example.com" },
+    { emails: [{ subject: "Your code", preview: "reset code 482913", snippet: "code 482913", attachmentText: "iban DE00 SECRET", latestPreview: "code 482913" }] },
+  );
+  const text = JSON.stringify(entry);
+  assert.ok(!text.includes("482913"), text);
+  assert.ok(!text.includes("SECRET"), text);
+  assert.match(text, /Your code/, "the subject, which says what was done, is still recorded");
+});
