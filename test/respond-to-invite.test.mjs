@@ -139,14 +139,14 @@ test("the send settings apply: sending off, outbound limited to yourself, confir
   });
 });
 
-test("an invitation addressed to another of your accounts is answered from that account", async () => {
+test("an invitation naming another of your accounts is still answered from the account that holds it", async () => {
   await withServer({ addresses: ["owner@example.com", "work@example.com"] }, async ({ call, sent, mailbox }) => {
     mailbox.ics = ics("work@example.com");
     const result = await call("respond_to_invite", { emailId: "INBOX::1", response: "accept" });
     assert.equal(result.error, false, result.text);
     assert.equal(sent.length, 1);
-    assert.equal(sent[0].via, "work@example.com", "sent through the invited account");
-    assert.match(sent[0].payload.icalEvent.content, /mailto:work@example\.com/);
+    assert.equal(sent[0].via, "owner@example.com", "never sent through a mailbox the invitation merely names");
+    assert.doesNotMatch(sent[0].payload.icalEvent.content, /work@example\.com/);
   });
 });
 

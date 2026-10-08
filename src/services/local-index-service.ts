@@ -1255,7 +1255,7 @@ export class LocalIndexService {
 
   // The answers a reply reminder waits for: messages in the same thread as `messageId`, newer than `sinceIso`,
   // that none of `ownAddresses` wrote.
-  async getRepliesSince(messageId: string, sinceIso: string, ownAddresses: string[]): Promise<EmailSummary[]> {
+  async getRepliesSince(messageId: string, sinceIso: string, ownAddresses: string[], onlyFrom?: string[]): Promise<EmailSummary[]> {
     const db = await this.ensureDb();
     const key = normalizeMessageId(messageId);
     if (!key) return [];
@@ -1266,7 +1266,10 @@ export class LocalIndexService {
     const since = new Date(sinceIso).getTime();
     return this.loadMessagesByEmailIds(db, emailIds)
       .filter((email) => new Date(email.internalDate || email.date || 0).getTime() > since)
-      .filter((email) => !email.from.some((sender) => ownAddresses.some((own) => isSelfAddress(sender.address, own))));
+      .filter((email) => !email.from.some((sender) => ownAddresses.some((own) => isSelfAddress(sender.address, own))))
+      // A forged In-Reply-To can put any message into a thread, so when the caller names who is expected to answer,
+      // only those senders count.
+      .filter((email) => !onlyFrom || onlyFrom.length === 0 || email.from.some((sender) => onlyFrom.some((wanted) => isSelfAddress(sender.address, wanted))));
   }
 
   async getThreadById(threadId: string): Promise<ThreadDetail> {
@@ -1532,7 +1535,7 @@ export class LocalIndexService {
       },
       // counts/topThreads come from the newest DEFAULT_SNAPSHOT_LIMIT messages only.
       ...(recentMessages.length >= DEFAULT_SNAPSHOT_LIMIT
-        ? { countsCapped: true, countsNote: `counts and topThreads cover only the newest ${DEFAULT_SNAPSHOT_LIMIT} indexed messages.` }
+        ? { countsCapped: true, countsNote: `counts and topThreads cover only the newest ${DEFAULT_SNAPSHOT_LIMIT} indexed messages; counts.staleAwaitingYou covers the whole index (every thread ever), so it is not comparable with them.` }
         : {}),
       ...this.indexFreshnessFields(updatedAt),
       topThreads: allActionable.slice(0, input.limit ?? 10).map((thread) => shapeThreadForList(thread)),

@@ -49,6 +49,11 @@ const MAX_TIMEZONES = 4;
 const MAX_TIMEZONE_LINES = 60;
 const MAX_TITLE = 200;
 const TIMEZONE_PROPERTIES = new Set(["TZID", "TZOFFSETFROM", "TZOFFSETTO", "TZNAME", "DTSTART", "RRULE", "RDATE"]);
+const MAX_COPIED_LINE = 500;
+// Control characters and the Unicode line separators are never legitimate in these lines; a lenient reader might
+// treat U+2028 as a line break.
+const UNSAFE_CHARS = /[\u0000-\u001f\u007f\u0085\u2028\u2029]/g;
+const clean = (value: string) => value.replace(UNSAFE_CHARS, "");
 const TIMEZONE_PARTS = new Set(["STANDARD", "DAYLIGHT"]);
 
 function unfold(text: string): string[] {
@@ -100,7 +105,7 @@ function escapeText(value: string): string {
 function mailtoAddress(value: string): string | undefined {
   const match = /^mailto:(.+)$/i.exec(value.trim());
   const address = (match ? match[1] : value).split("?")[0].trim();
-  return /^[^\s@<>,;"]+@[^\s@<>,;"]+$/.test(address) ? address : undefined;
+  return address.length <= 320 && /^[^\s@<>,;"]+@[^\s@<>,;"]+$/.test(address) ? address : undefined;
 }
 
 /** The first VEVENT of an invitation, with what a reply needs. Throws InviteError when it cannot be answered. */
@@ -163,7 +168,7 @@ export function parseInvite(text: string): ParsedInvite {
   if (method && method !== "REQUEST") throw new InviteError(`This is a calendar message of type ${method}, not an invitation that can be answered.`);
 
   const first = (name: string) => event.find((property) => property.name === name);
-  const uid = first("UID")?.value;
+  const uid = clean(first("UID")?.value ?? "").slice(0, 255) || undefined;
   if (!uid) throw new InviteError("The invitation has no UID, so a reply could not be matched to it.");
   const organizerProperty = first("ORGANIZER");
   const organizerAddress = organizerProperty ? mailtoAddress(organizerProperty.value) : undefined;
@@ -179,17 +184,19 @@ export function parseInvite(text: string): ParsedInvite {
   for (const name of ["RECURRENCE-ID", "SUMMARY", "DTSTART", "DTEND"]) {
     const property = first(name);
     if (!property) continue;
+    if (property.raw.length > MAX_COPIED_LINE && name !== "SUMMARY") throw new InviteError(`The invitation's ${name} line is too long to answer.`);
     // SUMMARY is rebuilt from its capped text: an invite must not make the reply arbitrarily large.
-    copy.push(name === "SUMMARY" ? `SUMMARY:${escapeText(unescapeText(property.value).slice(0, MAX_TITLE))}` : property.raw);
+    copy.push(name === "SUMMARY" ? `SUMMARY:${escapeText(unescapeText(property.value).slice(0, MAX_TITLE))}` : clean(property.raw));
   }
-  copy.push(organizerProperty.raw);
+  const organizerName = organizerProperty.params.get("CN");
+  copy.push(`ORGANIZER${organizerName ? `;CN="${clean(organizerName).replace(/"/g, "").slice(0, 100)}"` : ""}:mailto:${organizerAddress}`);
 
   const summaryProperty = first("SUMMARY");
   const locationProperty = first("LOCATION");
   return {
     method: method || "REQUEST",
     uid,
-    sequence: first("SEQUENCE")?.value || "0",
+    sequence: clean(first("SEQUENCE")?.value ?? "").slice(0, 10) || "0",
     summary: summaryProperty ? unescapeText(summaryProperty.value).slice(0, MAX_TITLE) : undefined,
     location: locationProperty ? unescapeText(locationProperty.value).slice(0, MAX_TITLE) : undefined,
     hasRecurrence: Boolean(first("RRULE") || first("RDATE")),

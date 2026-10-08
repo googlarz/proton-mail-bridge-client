@@ -186,5 +186,8 @@ test("getRepliesSince returns only newer messages from other people in the same 
     assert.deepEqual((await index.getRepliesSince("<m1@example.com>", iso(-6 * DAY), own)).map((e) => e.uid).sort(), [2, 4]);
     assert.deepEqual(await index.getRepliesSince("<nope@example.com>", iso(-6 * DAY), own), []);
     assert.deepEqual(await index.getRepliesSince("", iso(-6 * DAY), own), []);
+    // Naming who is expected to answer: a stranger's message, forged into the thread, does not settle it.
+    assert.deepEqual((await index.getRepliesSince("<m1@example.com>", iso(-6 * DAY), own, ["ann@example.com"])).map((e) => e.uid), [2]);
+    assert.deepEqual(await index.getRepliesSince("<m1@example.com>", iso(-3 * DAY), own, ["ann@example.com"]), []);
   } finally { await index.close(); await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

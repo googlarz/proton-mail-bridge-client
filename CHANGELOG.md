@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+Hardening found by a second review of the 2.8.0 invitation code: copied calendar lines lose control characters and the Unicode line separators and are capped at 500 characters; the ORGANIZER line is rebuilt (its foreign parameters and `?cc=` part are not passed on); an invitation that names another of your accounts is still answered from the account that holds the message; a reply reminder is settled only by a message from one of the people you wrote to, so a forged In-Reply-To cannot silence it. The digest's `countsNote` now says that `staleAwaitingYou` covers the whole index while the other counts cover the newest 5000 messages.
+
 ## [2.8.0] — 2026-10-08
 
 New functionality: four additions, found by looking at what the tool list does not cover for someone who works from several accounts and answers a lot of mail. The tool count goes from 96 to 100.

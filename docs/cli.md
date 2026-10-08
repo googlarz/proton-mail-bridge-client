@@ -81,7 +81,7 @@ Every triage command above covers all configured accounts; add `--args '{"accoun
 
 ### Reply reminders
 
-Ask to be told when a message goes unanswered by a date. A reminder is a local note; its state (waiting, due, answered) is worked out from the local index each time you look, and any later message in the thread from someone other than you settles it (a different person's message counts, not only the one you wrote to). Due reminders also appear in `digest`.
+Ask to be told when a message goes unanswered by a date. A reminder is a local note; its state (waiting, due, answered) is worked out from the local index each time you look, and a later message in the thread from one of the people you wrote to settles it (a message from anyone else does not). Due reminders also appear in `digest`.
 
 ```bash
 proton-mail-bridge-client set-reply-reminder Sent::5195::f6a63249 --args '{"afterDays":5,"note":"ask about the budget"}'

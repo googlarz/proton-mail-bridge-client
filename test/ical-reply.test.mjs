@@ -62,7 +62,7 @@ test("the reply is a METHOD:REPLY with only the answering attendee, the uid and 
   assert.ok(lines.includes("UID:abc123@google.com"));
   assert.ok(lines.includes("SEQUENCE:2"));
   assert.ok(lines.includes("DTSTAMP:20261008T100000Z"));
-  assert.ok(lines.includes("ORGANIZER;CN=Anna Boss:mailto:anna@example.com"));
+  assert.ok(lines.includes('ORGANIZER;CN="Anna Boss":mailto:anna@example.com'));
   const attendees = lines.filter((line) => line.startsWith("ATTENDEE"));
   assert.deepEqual(attendees, ['ATTENDEE;PARTSTAT=ACCEPTED;CN="Dawid P":mailto:dawid.piaskowski@proton.me']);
   assert.ok(lines.includes("COMMENT:See you\\; bring slides\\, please"));
@@ -130,4 +130,16 @@ test("an invitation nested too deeply or with a huge title is bounded", () => {
   const reply = buildInviteReply(parseInvite(big), { attendeeAddress: "me@x.test", response: "accept" });
   assert.ok(reply.subject.length <= 220);
   assert.ok(reply.ics.length < 2000);
+});
+
+test("copied lines carry no control characters, no foreign organizer parameters, and are bounded", () => {
+  const base = (extra) => crlf(["BEGIN:VCALENDAR", "METHOD:REQUEST", "BEGIN:VEVENT", "UID:u", ...extra, "END:VEVENT", "END:VCALENDAR"]);
+  const reply = buildInviteReply(parseInvite(base([
+    'ORGANIZER;SENT-BY="mailto:a@b.test";X-FOO=1:mailto:bob@evil.test?cc=victim@z.test',
+    "DTEND:20300101\u2028ATTENDEE:mailto:x@y.test\u0007\u001b[31m",
+  ])), { attendeeAddress: "me@x.test", response: "accept" });
+  assert.ok(!/[\u2028\u2029\u0007\u001b]/.test(reply.ics));
+  assert.ok(!reply.ics.includes("SENT-BY") && !reply.ics.includes("X-FOO") && !reply.ics.includes("victim@z.test"));
+  assert.throws(() => parseInvite(base(["ORGANIZER:mailto:a@b.test", `DTEND:${"2".repeat(5000)}`])), InviteError);
+  assert.throws(() => parseInvite(base([`ORGANIZER:mailto:${"a".repeat(400)}@b.test`])), InviteError);
 });

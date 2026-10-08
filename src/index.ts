@@ -4314,7 +4314,7 @@ export function createServer(
         const records = await bundle.replyReminderService.list();
         return Promise.all(
           records.map(async (record) => {
-            const replies = await bundle.localIndexService.getRepliesSince(record.messageId, record.createdAt, own);
+            const replies = await bundle.localIndexService.getRepliesSince(record.messageId, record.createdAt, own, record.to);
             const first = [...replies].sort((left, right) => (left.internalDate || left.date || "").localeCompare(right.internalDate || right.date || ""))[0];
             const state: "waiting" | "due" | "answered" = first ? "answered" : new Date(record.remindAt).getTime() <= now ? "due" : "waiting";
             return {
@@ -5205,10 +5205,9 @@ export function createServer(
           }
           // Answer as the account that holds the message. Only an attendee address that is exactly one of our
           // accounts is used; a "+tag" or alias address in a hostile invite never picks the sender.
-          const myAddresses = allAccountAddresses();
-          const myAttendee = findMyAttendee(invite, (address) => myAddresses.some((own) => own.toLowerCase() === address.toLowerCase()));
-          const attendeeBundle = myAttendee ? accountManager.byAddress(myAttendee.address) : undefined;
-          const inviteSendBundle = attendeeBundle ?? inviteBundle;
+          const myAttendee = findMyAttendee(invite, (address) => address.toLowerCase() === inviteBundle.config.smtp.username.toLowerCase());
+          // Never another account: a hostile invitation could otherwise make a different mailbox answer it.
+          const inviteSendBundle = inviteBundle;
           const answeringAs = inviteSendBundle.config.smtp.username;
           const inviteReply = buildInviteReply(invite, {
             attendeeAddress: answeringAs,
@@ -8468,7 +8467,7 @@ export function createServer(
             indexUpdatedAt: perAccount.map((entry) => entry.indexUpdatedAt).filter(Boolean).sort().reverse()[0],
             counts,
             ...(perAccount.some((entry) => entry.countsCapped)
-              ? { countsCapped: true, countsNote: "counts and topThreads cover only the newest 5000 indexed messages per account." }
+              ? { countsCapped: true, countsNote: "counts and topThreads cover only the newest 5000 indexed messages per account; counts.staleAwaitingYou covers every thread in the index, so it is not comparable with them." }
               : {}),
             topThreads,
             staleAwaitingYou,
