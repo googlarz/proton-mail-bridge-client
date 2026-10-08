@@ -66,8 +66,8 @@ async function withTwoTempDirs(fn) {
   try {
     await fn(primaryDataDir, secondaryDataDir);
   } finally {
-    await rm(primaryDataDir, { recursive: true, force: true });
-    await rm(secondaryDataDir, { recursive: true, force: true });
+    await rm(primaryDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await rm(secondaryDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

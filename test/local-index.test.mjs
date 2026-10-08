@@ -125,7 +125,7 @@ test("local index groups replies by In-Reply-To even when subject changes", asyn
     );
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -207,7 +207,7 @@ test("local index groups siblings by References when the parent message is missi
     assert.equal(threads.threads[0].messageCount, 2);
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -272,7 +272,7 @@ test("getThreads({query}) reports full membership for a reference-chain thread e
     );
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -347,7 +347,7 @@ test("local index imports a legacy JSON snapshot into SQLite once", async () => 
     assert.equal(result.emails[0].id, "INBOX::1");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -430,7 +430,7 @@ test("indexed search supports domain and label normalization shortcuts", async (
     assert.equal(result.warnings, undefined);
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -489,7 +489,7 @@ test("search_indexed_emails' mailboxRole filter actually filters by folder, not 
     assert.equal(inboxResult.emails[0].id, "INBOX::30");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -547,7 +547,7 @@ test("search_indexed_emails' from filter finds matches older than the SQL candid
     assert.equal(byMessageId.emails[0].id, "INBOX::1");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -610,7 +610,7 @@ test("a windowed full sync only prunes expunged messages within its own scanned 
     assert.equal(status.storedMessageCount, 999, "a message genuinely missing from a re-scanned range must still be pruned");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -674,7 +674,7 @@ test("a folder observed genuinely empty on the server has its indexed messages p
     assert.equal(archiveSearch.total, 1, "Archive's messages must be untouched by INBOX's emptying");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -715,7 +715,7 @@ test("an empty strategy without a confirmed folderObservedEmpty signal does not 
     assert.equal(status.storedMessageCount, 1, "without folderObservedEmpty, the previously-indexed message must survive");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -750,7 +750,7 @@ test("getSyncCheckpointMap returns backfilledToUid as undefined, not null, when 
     assert.strictEqual(checkpoints.Archive.backfilledToUid, undefined, "must be undefined, not SQLite's null, or planFolderSync misreads it as backfill-complete");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -787,7 +787,7 @@ test("getSyncCheckpointMap returns incrementalResumeUid as undefined, not null, 
     );
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -824,7 +824,7 @@ test("recordSnapshot round-trips a set incrementalResumeUid through getSyncCheck
     assert.strictEqual(checkpoints.INBOX.incrementalResumeUid, 1025);
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -893,7 +893,7 @@ test("dateFrom/dateTo set to the same day includes that day's messages instead o
     assert.equal(tzOffsetDateFrom.emails[0].id, "INBOX::40");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -975,7 +975,7 @@ test("recordSnapshot preserves preview/attachmentText across a flags-only re-syn
     );
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1036,7 +1036,7 @@ test("search treats a query of only FTS5-keyword/hyphen tokens as a real (zero-m
     assert.equal(result.warnings, undefined);
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1104,7 +1104,7 @@ test("search matches a multi-word query whose words are present but out of order
     assert.equal(noMatch.total, 0, "a term that genuinely isn't present must still exclude the message");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1185,7 +1185,7 @@ test("search treats FTS5-keyword and leading-hyphen terms as literal words inste
     assert.equal(result.emails[0].id, "INBOX::31");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1267,7 +1267,7 @@ test("document threads groups invoice and calendar-heavy messages", async () => 
     assert.equal(calendars.threads[0].documents[0].filename, "invite.ics");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1348,7 +1348,7 @@ test("meeting prep filters threads by domain and exposes latest inbound context"
     assert.equal(prep.latestInbound[0].emailId, "INBOX::41");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1433,7 +1433,7 @@ test("getThreads and getThreadById find a thread beyond the DEFAULT_SNAPSHOT_LIM
     assert.equal(detail.messages[0].primaryEmailId, "INBOX::1");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1539,7 +1539,7 @@ test("getFollowUpCandidates, getActionableThreads and getLabels find/count beyon
     assert.equal(inboxLabel.messageCount, total, "getLabels() should report the accurate INBOX message count, not capped at 5000");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1627,7 +1627,7 @@ test("getFollowUpCandidates does not treat one-way automated senders as pending 
     assert.equal(followUps.threads[0].id, "imap:human-thread");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1703,7 +1703,7 @@ test("getSyncCheckpointMap reads sync_state directly without touching the messag
     await assert.rejects(() => service.getThreads({}));
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1807,7 +1807,7 @@ test("filtering a References-linked thread does not change its id or drop messag
     );
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -1935,7 +1935,7 @@ test("getThreadById resolves a References-linked thread beyond the DEFAULT_SNAPS
     );
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2063,7 +2063,7 @@ test("getThreads() and getThreadById() agree on thread identity for a mix of nat
     }
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2159,7 +2159,7 @@ test("recordSnapshot reconciles an old-format id row into the new UIDVALIDITY-em
     assert.equal(ftsResult.emails[0].id, newFormatId, "full-text search must find the message under its new id");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2228,7 +2228,7 @@ test("recordSnapshot reconciles an old 2-field (pre-checksum) id row into the ne
     assert.equal(ftsResult.emails[0].id, newFormatId, "full-text search must find the message under its new id");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2303,7 +2303,7 @@ test("recordSnapshot converges to one row when BOTH a 2-field and a 3-field lega
     );
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2362,7 +2362,7 @@ test("recordSnapshot does not merge a genuine UIDVALIDITY change that reuses a U
     assert.equal(staleSearch.emails.length, 0, "the old generation's content must not still be searchable");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2477,7 +2477,7 @@ test("actionable-thread pendingOn uses the stored isAutomated header verdict ove
     assert.equal(byId.get("INBOX::4"), undefined);
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2548,7 +2548,7 @@ test("opening an index created before the is_automated column migrates in place 
     }
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2608,7 +2608,7 @@ test("deliveredTo round-trips through recordSnapshot and is preserved on a flags
     assert.equal(afterRefresh[0].deliveredTo, "owner@pm.me", "a flags-only refresh must not clobber the previously stored deliveredTo");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2669,7 +2669,7 @@ test("recordSnapshot with folderListComplete:true prunes a folder removed from t
     assert.equal((await service.listRecentMessages(10)).some((m) => m.folder === "Archive"), false, "Archive's messages must be pruned too");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2719,7 +2719,7 @@ test("recordSnapshot with folderListComplete:true but an empty folders array pru
     assert.equal((await service.listRecentMessages(10)).some((m) => m.folder === "Archive"), true, "Archive's messages must not be pruned by an empty folder list");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2763,7 +2763,7 @@ test("concurrent recordSnapshot calls are serialized, not interleaved", async ()
     );
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2780,7 +2780,7 @@ test("close() releases the db, is safe to call twice, and the index reopens on n
     await service.getStatus();
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2811,7 +2811,7 @@ test("getFreshness agrees with getStatus on message count and staleness, without
     assert.equal(fresh.isStale, false);
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -2836,6 +2836,6 @@ test("getFreshness: exactly at the stale threshold is not stale, one minute past
     assert.equal((await service.getFreshness()).isStale, true, "61 minutes old is stale");
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

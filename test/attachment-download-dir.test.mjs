@@ -10,7 +10,7 @@ const WIN_SKIP = { skip: process.platform === "win32" ? "POSIX-only" : false };
 
 async function withDir(fn) {
   const dir = await mkdtemp(join(tmpdir(), "attachment-dl-"));
-  try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true }); }
+  try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 }
 
 // A09 (audit 2.1.19): get_attachment_content(saveTo) wrote 0644 files in 0755 directories.

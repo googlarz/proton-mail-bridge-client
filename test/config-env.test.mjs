@@ -81,7 +81,7 @@ test("buildConfigFromEnv reads *_FILE secrets and runtime policy flags", async (
         process.env[key] = previous[key];
       }
     }
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

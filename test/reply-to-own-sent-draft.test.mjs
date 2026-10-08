@@ -51,6 +51,6 @@ test("create_reply_draft on an own sent message addresses the original recipient
   } finally {
     await client.close();
     await server.close();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

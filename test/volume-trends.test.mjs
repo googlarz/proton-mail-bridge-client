@@ -46,7 +46,7 @@ async function withIndex(emails, fn) {
     await fn(service);
   } finally {
     await service.close();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
@@ -105,7 +105,7 @@ test("a message that appears in two folders (same Message-ID) is counted once", 
     assert.equal(point.count, 1);
   } finally {
     await service.close();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

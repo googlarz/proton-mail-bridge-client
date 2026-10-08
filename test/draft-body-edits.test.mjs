@@ -64,7 +64,7 @@ test("the store applies edits to the STORED body under its lock, so concurrent e
     await assert.rejects(store.updateDraft(draft.id, { bodyEdits: [{ find: "First", replace: "x" }] }), /not found/);
     assert.equal((await store.getDraft(draft.id)).body, "1st sentence. Second sentence. 3rd sentence.", "a failed edit writes nothing");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -80,7 +80,7 @@ async function withServer(fn) {
     const result = await client.callTool({ name, arguments: args });
     return { result, text: result.content[0].text, data: (() => { try { return JSON.parse(result.content[0].text); } catch { return undefined; } })() };
   };
-  try { await fn(call); } finally { await client.close(); await server.close(); await rm(dir, { recursive: true, force: true }); }
+  try { await fn(call); } finally { await client.close(); await server.close(); await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 }
 
 test("update_draft bodyEdits through the real handler: edits a long HTML draft, tiny request, reports bodyEditsApplied", async () => {

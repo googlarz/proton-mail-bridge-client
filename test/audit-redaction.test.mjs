@@ -70,7 +70,7 @@ async function scrubbed(error) {
     await service.record({ timestamp: new Date().toISOString(), tool: "t", status: "error", durationMs: 1, input: {}, error });
     return (await service.list(5))[0].error;
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

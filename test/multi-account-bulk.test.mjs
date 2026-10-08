@@ -103,7 +103,7 @@ async function withTempDirs(n, fn) {
   try {
     await fn(...dirs);
   } finally {
-    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })));
   }
 }
 

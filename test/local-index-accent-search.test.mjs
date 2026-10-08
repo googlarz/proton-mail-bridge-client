@@ -50,7 +50,7 @@ async function withIndex(fn) {
     await fn(service);
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
@@ -164,7 +164,7 @@ test("label filters are exact: Work does not match Network, in either spelling o
     assert.deepEqual(ids(await service.search({ label: "Network", limit: 10 })), ["INBOX::2"]);
   } finally {
     await service.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

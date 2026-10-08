@@ -37,7 +37,7 @@ async function withDir(fn) {
     await fn(dir);
   } finally {
     await chmod(dir, 0o700).catch(() => {});
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

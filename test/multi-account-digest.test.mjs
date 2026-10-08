@@ -153,8 +153,8 @@ test("tagAccountIds prefixes thread/message ids for a non-primary account and is
     assert.ok(!secondaryResult.threads[0].id.startsWith("second-example-com::"));
   } finally {
     await closeTrackedIndexes();
-    await rm(primaryDataDir, { recursive: true, force: true });
-        await rm(secondaryDataDir, { recursive: true, force: true });
+    await rm(primaryDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        await rm(secondaryDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -196,8 +196,8 @@ test("merging two accounts' actionable threads by (score, then latestDate) surfa
     assert.ok(!merged[0].id.startsWith("second-example-com::"));
   } finally {
     await closeTrackedIndexes();
-    await rm(primaryDataDir, { recursive: true, force: true });
-        await rm(secondaryDataDir, { recursive: true, force: true });
+    await rm(primaryDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        await rm(secondaryDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -249,6 +249,6 @@ test("a single-account AccountManager produces the exact same getActionableThrea
     assert.deepEqual(merged, direct.threads);
   } finally {
     await closeTrackedIndexes();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

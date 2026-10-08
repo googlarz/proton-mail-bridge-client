@@ -162,7 +162,7 @@ test("the tool count stated in the bundle manifest and README is the real number
     await server.close();
     const { closeTrackedIndexes } = await import("./helpers/close-indexes.mjs");
     await closeTrackedIndexes();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

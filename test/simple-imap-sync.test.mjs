@@ -1191,7 +1191,7 @@ function createServiceForAttachmentTest(dataDir, raw) {
 
 test("saveAttachments does not silently overwrite two same-named attachments saved in one call (no outputPath)", async () => {
   const dataDir = "/tmp/protonmail-pro-mcp-test-attach-batch";
-  await rm(dataDir, { recursive: true, force: true });
+  await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   const raw = buildRawWithSameNameAttachments("<batch@example.com>");
   const service = createServiceForAttachmentTest(dataDir, raw);
 
@@ -1210,12 +1210,12 @@ test("saveAttachments does not silently overwrite two same-named attachments sav
   // source attachment, not have been clobbered by the other.
   assert.deepEqual(new Set([firstContent, secondContent]), new Set(["FIRST", "SECOND"]));
 
-  await rm(dataDir, { recursive: true, force: true });
+  await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 test("saveAttachments does not silently overwrite a file left over from a prior save (no outputPath)", async () => {
   const dataDir = "/tmp/protonmail-pro-mcp-test-attach-prior";
-  await rm(dataDir, { recursive: true, force: true });
+  await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 
   // First save: a message with a single attachment named report.txt.
   const rawFirst = buildRawWithSingleAttachment("<prior@example.com>", "report.txt", "ORIGINAL");
@@ -1243,7 +1243,7 @@ test("saveAttachments does not silently overwrite a file left over from a prior 
   // ...while the new file holds the new content, at its own reported path.
   assert.equal(await readFile(join(dir, secondPath), "utf8"), "NEWER");
 
-  await rm(dataDir, { recursive: true, force: true });
+  await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
 // --- searchEmails local-filter-after-newest-N-cutoff regression tests ----

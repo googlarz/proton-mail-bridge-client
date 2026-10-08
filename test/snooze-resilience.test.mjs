@@ -51,7 +51,7 @@ function fakeImap() {
 
 async function withDir(fn) {
   const dir = await mkdtemp(join(tmpdir(), "protonmail-snooze-resilience-"));
-  try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true }); }
+  try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 }
 
 const dueSnooze = async (service) => service.snooze(createEmailId("INBOX", 5, "100"), new Date(Date.now() + 60_000).toISOString());

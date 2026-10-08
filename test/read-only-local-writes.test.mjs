@@ -55,7 +55,7 @@ async function withServer(readOnly, fn) {
   } finally {
     await client.close();
     await server.close();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

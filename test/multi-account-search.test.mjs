@@ -166,8 +166,8 @@ test("search_indexed_emails fan-out: results from both accounts appear, correctl
     assert.equal(secondEmail.subject, "Second invoice");
   } finally {
     await closeTrackedIndexes();
-    await rm(dataDirA, { recursive: true, force: true });
-        await rm(dataDirB, { recursive: true, force: true });
+    await rm(dataDirA, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        await rm(dataDirB, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -190,8 +190,8 @@ test("get_labels fan-out: same-named labels from both accounts are summed into o
     assert.equal(inbox.unreadCount, 2);
   } finally {
     await closeTrackedIndexes();
-    await rm(dataDirA, { recursive: true, force: true });
-        await rm(dataDirB, { recursive: true, force: true });
+    await rm(dataDirA, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        await rm(dataDirB, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -219,6 +219,6 @@ test("single-account AccountManager produces identical search results to calling
     assert.ok(merged.emails.every((email) => !email.id.includes("::") || email.id === "INBOX::1"));
   } finally {
     await closeTrackedIndexes();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

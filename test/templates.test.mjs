@@ -60,7 +60,7 @@ test("create + get round-trips a template and auto-detects variables from subjec
     const fetched = await service.get(created.id);
     assert.equal(fetched.subject, "Welcome, {{firstName}}!");
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -71,7 +71,7 @@ test("create rejects a duplicate template name", async () => {
     await service.create({ name: "dup", subject: "s", body: "b" });
     await assert.rejects(() => service.create({ name: "dup", subject: "s2", body: "b2" }), /already exists/);
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -90,7 +90,7 @@ test("render fills known variables and reports missingVariables for the rest", a
     assert.equal(rendered.body, "Hi Sam, any update on {{topic}}?");
     assert.deepEqual(rendered.missingVariables, ["topic"]);
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -106,7 +106,7 @@ test("delete removes a template and list no longer includes it", async () => {
     assert.equal((await service.list()).length, 0);
     await assert.rejects(() => service.get(created.id), /not found/);
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -135,7 +135,7 @@ test("two separate instances against the same dataDir don't lose each other's co
       ["from-a", "from-b"],
     );
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -149,7 +149,7 @@ test("a template store reopened against the same dataDir sees items persisted by
     const fetched = await second.get(created.id);
     assert.equal(fetched.name, "persisted");
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -172,7 +172,7 @@ test("a variable given as null or undefined counts as missing instead of being p
     assert.equal(result.body, "Dear {{name}}, {{topic}}");
     assert.doesNotMatch(result.body, /null|undefined/);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -187,7 +187,7 @@ test("numbers and booleans are written as text, and an object or array is refuse
     await assert.rejects(service.render(template.id, { n: { a: 1 }, b: "x" }), InvalidArgumentError);
     await assert.rejects(service.render(template.id, { n: [1, 2], b: "x" }), InvalidArgumentError);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -204,6 +204,6 @@ test("in an HTML template the substituted values are HTML-escaped; the subject a
     const plain = await service.create({ name: "p", subject: "s", body: "Hello {{name}}" });
     assert.equal((await service.render(plain.id, { name: evil })).body, `Hello ${evil}`);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

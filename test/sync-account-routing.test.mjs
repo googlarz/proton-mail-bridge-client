@@ -46,8 +46,8 @@ async function withServer(fn) {
     await client.close();
     await server.close();
     await closeTrackedIndexes();
-    await rm(primaryDir, { recursive: true, force: true });
-    await rm(secondaryDir, { recursive: true, force: true });
+    await rm(primaryDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await rm(secondaryDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

@@ -75,8 +75,8 @@ async function withServer(fn) {
     await client.close();
     await server.close();
     await closeTrackedIndexes();
-    await rm(d1, { recursive: true, force: true });
-    await rm(d2, { recursive: true, force: true });
+    await rm(d1, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await rm(d2, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
@@ -183,7 +183,7 @@ test("search_emails on a single-account server keeps the service's own hasMore",
     await client.close();
     await server.close();
     await closeTrackedIndexes();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

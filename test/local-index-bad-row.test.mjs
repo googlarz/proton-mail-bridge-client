@@ -49,7 +49,7 @@ async function withBrokenIndex(breakRows, fn) {
       await service.close();
     }
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

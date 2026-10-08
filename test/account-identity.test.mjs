@@ -63,7 +63,7 @@ async function withTempDir(fn) {
     await fn(dataDir);
   } finally {
     await closeTrackedIndexes();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

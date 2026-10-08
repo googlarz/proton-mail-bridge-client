@@ -45,7 +45,7 @@ test("matches the realpath-resolved entry (symlinked bin, default Node)", WIN_SK
       assert.equal(isMainModule(resolvedUrl), true);
     });
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -61,7 +61,7 @@ test("matches the raw entry (symlinked bin, --preserve-symlinks-main)", async ()
       assert.equal(isMainModule(pathToFileURL(link).href), true);
     });
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -74,7 +74,7 @@ test("returns false for an unrelated module url", async () => {
       assert.equal(isMainModule(pathToFileURL(join(dir, "other.js")).href), false);
     });
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -86,6 +86,6 @@ test("falls back to the raw entry when realpath cannot resolve it", async () => 
       assert.equal(isMainModule(pathToFileURL(missing).href), true);
     });
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

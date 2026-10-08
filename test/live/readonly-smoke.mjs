@@ -143,7 +143,7 @@ try {
   check("smoke run", false, error instanceof Error ? error.message : String(error));
 } finally {
   await client.close().catch(() => {});
-  await rm(dataDir, { recursive: true, force: true });
+  await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 // Second server instance with the IDLE watcher and background sync ON (as in a real
@@ -174,7 +174,7 @@ try {
     check("IDLE on: searches", false, error instanceof Error ? error.message : String(error));
   } finally {
     await idleClient.close().catch(() => {});
-    await rm(idleDir, { recursive: true, force: true });
+    await rm(idleDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

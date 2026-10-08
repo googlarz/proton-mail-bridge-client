@@ -30,7 +30,7 @@ test("withFileLock serializes two concurrent callers instead of interleaving", a
     const interleaved = (aStart < bStart && bStart < aEnd) || (bStart < aStart && aStart < bEnd);
     assert.equal(interleaved, false, `expected no interleaving, got: ${order.join(",")}`);
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -54,7 +54,7 @@ test("withFileLock always releases the lock, even when fn throws", async () => {
     });
     assert.equal(ran, true);
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -116,7 +116,7 @@ test("a slow holder whose lock was stolen as stale can't delete the new owner's 
       `C must not start until B finishes — B ran [${windows.bStart},${windows.bEnd}], C started at ${windows.cStart}`,
     );
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -140,7 +140,7 @@ test("a lock file older than the stale threshold is stolen instead of blocking f
     // Should steal near-immediately, not wait out LOCK_ACQUIRE_TIMEOUT_MS (10s).
     assert.ok(Date.now() - start < 2000, "expected the stale lock to be stolen quickly");
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -168,7 +168,7 @@ test("a lock file whose encoded PID is confirmed dead is stolen immediately, wit
     // Should steal near-immediately, not wait out STALE_LOCK_MS (30s).
     assert.ok(Date.now() - start < 2000, "expected the dead-PID lock to be stolen quickly");
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -208,6 +208,6 @@ test("a lock file whose encoded PID is confirmed alive is never stolen, even wel
     await attempt;
     assert.equal(acquired, true, "once released, the waiting caller should still be able to acquire it");
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

@@ -67,6 +67,6 @@ test("threads the owner already answered are pending on them, however the reply 
     for (const thread of threads) assert.equal(thread.pendingOn, "them", `${thread.subject} was answered by the owner`);
   } finally {
     await service.close();
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

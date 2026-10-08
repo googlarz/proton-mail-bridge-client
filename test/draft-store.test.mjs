@@ -76,7 +76,7 @@ test("two separate DraftStoreService instances against the same dataDir don't lo
       ["from-a", "from-b"],
     );
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -99,7 +99,7 @@ test("DraftStoreService serializes concurrent draft creation", async () => {
     assert.equal(drafts.length, 10);
     assert.equal(new Set(drafts.map((draft) => draft.id)).size, 10);
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -132,7 +132,7 @@ test("a sent draft older than the retention window is pruned on the next write, 
     const ids = remaining.map((draft) => draft.id).sort();
     assert.deepEqual(ids, [active.id, recentSent.id].sort());
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -151,7 +151,7 @@ test("updateDraft drops synced state on a local edit but keeps the remote ref", 
     assert.equal(edited.remoteSyncState, "local_only");
     assert.equal(edited.remoteDraft?.emailId, "Drafts::1", "remote ref must survive so the next sync updates the existing copy");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -164,7 +164,7 @@ test("updateDraft leaves a sync_failed state as sync_failed", async () => {
     const edited = await store.updateDraft(draft.id, { subject: "S2" });
     assert.equal(edited.remoteSyncState, "sync_failed");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -186,7 +186,7 @@ test("markRemoteSynced does not mark a newer local edit as synced", async () => 
     assert.equal(result.remoteSyncState, "local_only");
     assert.equal(result.remoteDraft?.emailId, "Drafts::1", "remote ref kept so the next sync updates that copy");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -204,7 +204,7 @@ test("markRemoteSynced marks synced when the uploaded version is still current, 
     // the older upload (A) finishing last: remote now holds A, local is B
     assert.equal((await store.markRemoteSynced(draft.id, ref, fpA)).remoteSyncState, "local_only");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -222,7 +222,7 @@ test("updateDraft refuses to edit a draft while it is being sent", async () => {
     await store.revertSending(draft.id);
     assert.equal((await store.updateDraft(draft.id, { subject: "B" })).subject, "B", "editable again once the send failed");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -253,7 +253,7 @@ test("withDraftSyncLock runs syncs of the same draft one at a time and lets diff
       store.withDraftSyncLock("d2", async () => { releaseY(); }),
     ]);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -269,7 +269,7 @@ test("an unreadable drafts.json is an error, not an empty store the next write c
     await assert.rejects(store.listDrafts());
     await assert.rejects(store.createDraft({ subject: "s", body: "b", to: ["a@example.com"] }));
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -281,7 +281,7 @@ test("corrupt drafts.json is still backed up to .corrupt and replaced by an empt
     assert.deepEqual(await store.listDrafts(), []);
     assert.equal(await readFile(join(dataDir, "drafts.json.corrupt"), "utf8"), "{not json");
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -290,7 +290,7 @@ test("missing drafts.json is an empty store", async () => {
   try {
     assert.deepEqual(await new DraftStoreService(createConfig(dataDir)).listDrafts(), []);
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -306,6 +306,6 @@ test("a draft that has been sent cannot be edited afterwards", async () => {
     await assert.rejects(store.updateDraft(draft.id, { body: "edited after send" }), /already been sent/);
     assert.equal((await store.getDraft(draft.id)).body, "original");
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

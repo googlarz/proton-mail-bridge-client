@@ -72,6 +72,6 @@ test("audit service persists and tails recent entries", async () => {
     assert.equal(latest.length, 1);
     assert.equal(latest[0].tool, "trash_email");
   } finally {
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
