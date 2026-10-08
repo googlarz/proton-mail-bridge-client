@@ -16,7 +16,7 @@ Housekeeping and hardening found by a full pass over the project: dependencies, 
 
 ### Added
 - `npm run test:coverage` (Node's built-in coverage, no new dependency). At this release 79% of lines are covered; `setup-claude-desktop` (32%) and `cli` (42%) are the least covered files.
-- A test that calls all 96 tools through the real MCP server, with arguments made from their schemas, against a Bridge that does not exist, with one account and with two. It fails on any crash inside a handler and reached no crash today; it executes about 55% of the handler code that no other test reaches.
+- A test that calls all 96 tools through the real MCP server, with arguments made from their schemas, against a Bridge that does not exist, with one account and with two. It fails on any crash inside a handler and found none today; on its own it runs about 55% of the lines of the tool handlers (the whole suite about 66%).
 
 ### Not changed
 - Installing the package without its lockfile (a global or `npx` install) resolves dependency ranges at install time. Pinning them means shipping `npm-shrinkwrap.json`, which would also pin them for anyone using the package as a library.
