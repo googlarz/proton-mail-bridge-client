@@ -22,6 +22,7 @@ Requires Proton Bridge running locally. See README for credential setup before b
 ```bash
 npm run build      # compile TypeScript
 npm test           # run tests
+npm run test:coverage   # the same tests with Node's built-in coverage report (about 79% of lines at 2.7.2)
 ```
 
 ## What to contribute

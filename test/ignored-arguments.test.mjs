@@ -81,3 +81,18 @@ test("a tool that takes no arguments says so", async () => {
     assert.deepEqual(ignoredArguments(none.name, { zzz: 1 }), ["zzz"]);
   });
 });
+
+test("the note stays short however many or however long the ignored names are", async () => {
+  await withServer(async (_call, client) => {
+    const many = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`extra${i}`, 1]));
+    const long = { ["x".repeat(500)]: 1 };
+    for (const args of [many, long]) {
+      const result = await client.callTool({ name: "get_threads", arguments: args });
+      const note = noteOf(result)[0];
+      assert.ok(note.length < 500, `${note.length} characters`);
+    }
+    const manyNote = noteOf(await client.callTool({ name: "get_threads", arguments: many }))[0];
+    assert.match(manyNote, /and 15 more/);
+    assert.ok(!manyNote.includes("x".repeat(100)));
+  });
+});

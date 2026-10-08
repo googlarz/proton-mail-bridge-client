@@ -41,8 +41,10 @@ jobs:
       - name: Update npm for Trusted Publishing support
         run: npm install -g npm@11
 
+      # This job holds id-token: write, so no dependency's install script may run in it. Nothing needs one:
+      # better-sqlite3 ships prebuilt binaries, and the build and the tests run in the steps below.
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build
         run: npm run build

@@ -2104,10 +2104,13 @@ function withIgnoredArgumentsNote<R extends { params: { name: string; arguments?
     if (ignored.length === 0) {
       return result;
     }
-    logger.warn("Tool call had arguments the tool does not accept", "MCPServer", { name: request.params.name, ignored });
+    // The names come from the caller; keep the note short however many or however long they are.
+    const shown = ignored.slice(0, 10).map((key) => `"${key.length > 64 ? `${key.slice(0, 64)}...` : key}"`);
+    if (ignored.length > shown.length) shown.push(`and ${ignored.length - shown.length} more`);
+    logger.warn("Tool call had arguments the tool does not accept", "MCPServer", { name: request.params.name, ignored: shown });
     const tool = TOOLS.find((candidate) => candidate.name === request.params.name);
     const accepted = Object.keys((tool?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {});
-    const note = `Note: ${request.params.name} does not accept ${ignored.map((key) => `"${key}"`).join(", ")}; ignored. ` +
+    const note = `Note: ${request.params.name} does not accept ${shown.join(", ")}; ignored. ` +
       (accepted.length > 0 ? `It accepts: ${accepted.join(", ")}.` : "It takes no arguments.");
     return { ...result, content: [...result.content, { type: "text", text: note }] };
   };

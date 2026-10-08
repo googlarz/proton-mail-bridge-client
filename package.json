@@ -29,6 +29,7 @@
     "repair:claude-desktop": "npm run install:claude-desktop",
     "test:unit": "npm run build && node --test test/*.test.mjs",
     "test": "npm run build && node --input-type=module -e \"import('./dist/index.js')\" && node --test test/*.test.mjs",
+    "test:coverage": "npm run build && node --test --experimental-test-coverage test/*.test.mjs",
     "smoke:bridge": "npm run build && node dist/scripts/bridge-smoke.js",
     "prepare": "npm run build",
     "lint": "tsc --noEmit",

@@ -1486,7 +1486,7 @@ export class LocalIndexService {
     // entirely out of recentSnapshot above. SQL-prefilter by date (any qualifying
     // thread's latest message necessarily satisfies this condition itself), then expand
     // to full, uncapped thread membership — mirrors getFollowUpCandidates()' fix.
-    const staleRanked = this.loadThreadStats(db, ownerEmail)
+    const staleRanked = this.loadThreadStats(db)
       .filter((stat) => {
         if (stat.pendingOn !== "you" || !stat.latestDate) {
           return false;
@@ -1552,7 +1552,7 @@ export class LocalIndexService {
     // expanding every match to its full thread_id membership (expandCandidatesToFullThreads)
     // is guaranteed not to miss a qualifying thread, unbounded by the snapshot cap.
     // Ranked from the per-thread stats of the whole index; only the page that is returned is built in full.
-    const ranked = this.loadThreadStats(db, ownerEmail)
+    const ranked = this.loadThreadStats(db)
       .map((stat) => ({
         stat,
         score: actionableScore(stat),
@@ -3010,15 +3010,11 @@ export class LocalIndexService {
 
   // For every thread, what the follow-up and digest rankings need, in buildThreads order. Costs one full
   // read per index version, like the map it is built beside.
-  private loadThreadStats(db: Database.Database, ownerEmail?: string): ThreadStat[] {
-    return this.loadThreadIndex(db, true, ownerEmail).stats as ThreadStat[];
+  private loadThreadStats(db: Database.Database): ThreadStat[] {
+    return this.loadThreadIndex(db, true).stats as ThreadStat[];
   }
 
-  private loadThreadIndex(
-    db: Database.Database,
-    withStats: boolean,
-    ownerArg?: string,
-  ): { map: ThreadMap; stats?: ThreadStat[] } {
+  private loadThreadIndex(db: Database.Database, withStats: boolean): { map: ThreadMap; stats?: ThreadStat[] } {
     const version = `${this.writeVersion}:${String(db.pragma("data_version", { simple: true }))}`;
     const cached = this.threadMapCache;
     if (cached?.version === version && (!withStats || cached.stats)) {
@@ -3053,7 +3049,7 @@ export class LocalIndexService {
           key: thread.id,
           latestDate: thread.latestDate,
           unreadCount: thread.unreadCount,
-          pendingOn: pendingOnForThread(thread, ownerEmail ?? ownerArg),
+          pendingOn: pendingOnForThread(thread, ownerEmail),
           isStarred: Boolean(latestMessage?.isStarred),
           hasAttachments: Boolean(latestMessage?.hasAttachments),
         };

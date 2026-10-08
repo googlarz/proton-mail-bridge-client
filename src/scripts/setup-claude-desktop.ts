@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { Socket } from "node:net";
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   installClaudeDesktopConfig,
@@ -103,6 +104,50 @@ export async function probePort(host: string, port: number, timeoutMs = 400): Pr
   });
 }
 
+// readline echoes what is typed to its output stream. Handing it this stream lets a prompt switch the echo off
+// (muted) for a password and back on, without touching the terminal's own mode.
+export function createMutableOutput(target: { write: (chunk: string | Uint8Array, encoding?: BufferEncoding) => unknown }): {
+  stream: Writable;
+  setMuted: (muted: boolean) => void;
+} {
+  let muted = false;
+  const stream = new Writable({
+    write(chunk, encoding, callback) {
+      if (!muted) {
+        target.write(chunk, encoding as BufferEncoding);
+      }
+      callback();
+    },
+  });
+  return { stream, setMuted: (value) => { muted = value; } };
+}
+
+export async function promptSecret(
+  rl: ReturnType<typeof createInterface>,
+  mutable: ReturnType<typeof createMutableOutput>,
+  message: string,
+  defaultValue = "",
+  write: (text: string) => void = (text) => { output.write(text); },
+): Promise<string> {
+  while (true) {
+    write(`${message}: `);
+    mutable.setMuted(true);
+    let answer: string;
+    try {
+      answer = (await rl.question("")).trim();
+    } finally {
+      mutable.setMuted(false);
+    }
+    // The Enter key's newline was swallowed with the echo.
+    write("\n");
+    const value = answer || defaultValue;
+    if (value) {
+      return value;
+    }
+    write("This value is required.\n");
+  }
+}
+
 async function promptRequired(
   rl: ReturnType<typeof createInterface>,
   message: string,
@@ -188,7 +233,8 @@ export async function runClaudeDesktopSetupWizard(): Promise<void> {
     "This wizard installs Proton Mail Bridge Client for Claude Desktop on this computer. It stages a stable local runtime for Claude Desktop to use across chats and workspaces. It does not create a remote URL connector.\n\n",
   );
 
-  const rl = createInterface({ input, output });
+  const mutableOutput = createMutableOutput(output);
+  const rl = createInterface({ input, output: mutableOutput.stream, terminal: Boolean(input.isTTY && output.isTTY) });
 
   try {
     const username = await promptRequired(
@@ -196,11 +242,11 @@ export async function runClaudeDesktopSetupWizard(): Promise<void> {
       "Proton Bridge username",
       process.env.PROTONMAIL_USERNAME?.trim() || "",
     );
-    const password = await promptRequired(
+    const password = await promptSecret(
       rl,
-      "Proton Bridge password (input is visible)",
+      mutableOutput,
+      "Proton Bridge password (input is hidden)",
       process.env.PROTONMAIL_PASSWORD || "",
-      false,
     );
     const useDefaultBridge = await promptYesNo(
       rl,
