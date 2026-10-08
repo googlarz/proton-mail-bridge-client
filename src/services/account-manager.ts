@@ -7,6 +7,7 @@ import { DraftStoreService } from "./draft-store-service.js";
 import { DeliveryQueueService } from "./delivery-queue-service.js";
 import { SnoozeService } from "./snooze-service.js";
 import { AuditService } from "./audit-service.js";
+import { ReplyReminderService } from "./reply-reminder-service.js";
 import { TemplateService } from "./template-service.js";
 import { BackgroundSyncService } from "./background-sync-service.js";
 
@@ -30,6 +31,7 @@ export interface AccountBundle {
   snoozeService: SnoozeService;
   auditService: AuditService;
   templateService: TemplateService;
+  replyReminderService: ReplyReminderService;
   backgroundSyncService: BackgroundSyncService;
 }
 
@@ -57,6 +59,7 @@ function buildAccountBundle(
   deliveryQueueService.setDraftStore(draftStore);
   const snoozeService = new SnoozeService(config, imapService, log);
   const templateService = new TemplateService(config, log);
+  const replyReminderService = new ReplyReminderService(config, log);
   const backgroundSyncService = new BackgroundSyncService(config, imapService, localIndexService, log);
 
   return {
@@ -70,6 +73,7 @@ function buildAccountBundle(
     snoozeService,
     auditService,
     templateService,
+    replyReminderService,
     backgroundSyncService,
   };
 }

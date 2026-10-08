@@ -261,6 +261,7 @@ const DRAFT_COPY_FLAGS = ["cc", "bcc", "notes"];
 const BULK_FILTER_FLAGS = ["from", "subject", "since", "before"];
 
 export const COMMAND_SPECS: Record<string, CommandSpec> = {
+  completion: { usage: "completion <zsh|bash|fish>", description: "Print a shell completion script for the commands and their flags", flags: [] },
   help: { usage: "help [command]", description: "Show the command list, or the help for one command", flags: [] },
   version: { usage: "version", description: "Print the version and exit", flags: [] },
   "setup-claude-desktop": { usage: "setup-claude-desktop", description: "Run the Claude Desktop setup wizard (works from any install)", flags: [] },
@@ -342,6 +343,88 @@ function specForCommand(command: string): CommandSpec | undefined {
     description: `${entry.help} (MCP tool ${entry.tool})`,
     flags: ["args", "args-file", ...fileFlag, ...(entry.boolFlags ?? [])],
   };
+}
+
+// Tab completion for the commands and flags above. The scripts are generated from the same tables the parser and
+// `--help` use, so they cannot drift from what the CLI accepts.
+export const COMPLETION_SHELLS = ["zsh", "bash", "fish"] as const;
+const CLI_BINARIES = ["proton-mail-bridge-client", "proton-mail-bridge"];
+
+export function completionCommands(): Array<{ name: string; description: string; flags: string[] }> {
+  const names = [...new Set([...Object.keys(COMMAND_SPECS), ...TOOL_ONLY_COMMANDS.map((entry) => entry.command)])].sort();
+  return names.flatMap((name) => {
+    const spec = specForCommand(name);
+    if (!spec) return [];
+    const description = spec.description.replace(/\s*\(MCP tool [a-z_]+\)\s*$/, "").replace(/\s+/g, " ").trim();
+    return [{ name, description, flags: [...new Set([...spec.flags, "json", "help"])].sort() }];
+  });
+}
+
+const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
+
+export function completionScript(shell: string): string {
+  const commands = completionCommands();
+  if (shell === "bash") {
+    const cases = commands
+      .map((command) => `    ${command.name}) COMPREPLY=( $(compgen -W ${shellQuote(command.flags.map((flag) => `--${flag}`).join(" "))} -- "$cur") ) ;;`)
+      .join("\n");
+    return [
+      "# bash completion for proton-mail-bridge-client. Load it with:",
+      "#   source <(proton-mail-bridge-client completion bash)",
+      "_proton_mail_bridge_client() {",
+      '  local cur="${COMP_WORDS[COMP_CWORD]}"',
+      "  if [ \"$COMP_CWORD\" -eq 1 ]; then",
+      `    COMPREPLY=( $(compgen -W ${shellQuote(commands.map((command) => command.name).join(" "))} -- "$cur") )`,
+      "    return",
+      "  fi",
+      '  case "${COMP_WORDS[1]}" in',
+      cases,
+      "  esac",
+      "}",
+      ...CLI_BINARIES.map((binary) => `complete -F _proton_mail_bridge_client ${binary}`),
+      "",
+    ].join("\n");
+  }
+  if (shell === "zsh") {
+    const list = commands.map((command) => `    ${shellQuote(`${command.name}:${command.description.replace(/:/g, " -")}`)}`).join("\n");
+    const cases = commands
+      .map((command) => `    ${command.name}) _arguments ${command.flags.map((flag) => shellQuote(`--${flag}`)).join(" ")} ;;`)
+      .join("\n");
+    return [
+      `#compdef ${CLI_BINARIES.join(" ")}`,
+      "# zsh completion for proton-mail-bridge-client. Load it with:",
+      "#   source <(proton-mail-bridge-client completion zsh)   (after compinit)",
+      "_proton_mail_bridge_client() {",
+      "  local -a commands",
+      "  commands=(",
+      list,
+      "  )",
+      "  if (( CURRENT == 2 )); then",
+      "    _describe -t commands 'command' commands",
+      "    return",
+      "  fi",
+      '  case "$words[2]" in',
+      cases,
+      "  esac",
+      "}",
+      `compdef _proton_mail_bridge_client ${CLI_BINARIES.join(" ")}`,
+      "",
+    ].join("\n");
+  }
+  if (shell === "fish") {
+    const lines: string[] = [];
+    for (const binary of CLI_BINARIES) {
+      lines.push(`complete -c ${binary} -f`);
+      for (const command of commands) {
+        lines.push(`complete -c ${binary} -n '__fish_use_subcommand' -a ${command.name} -d ${shellQuote(command.description)}`);
+        for (const flag of command.flags) {
+          lines.push(`complete -c ${binary} -n '__fish_seen_subcommand_from ${command.name}' -l ${flag}`);
+        }
+      }
+    }
+    return ["# fish completion for proton-mail-bridge-client. Load it with:", "#   proton-mail-bridge-client completion fish | source", ...lines, ""].join("\n");
+  }
+  throw new CliUsageError(`completion needs a shell: ${COMPLETION_SHELLS.join(", ")}.`);
 }
 
 export function commandHelpText(command: string): string | undefined {
@@ -1910,6 +1993,10 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "unsubscribe-info", tool: "get_unsubscribe_info", positionals: ["emailId"], help: "Read List-Unsubscribe details for a message" },
   { command: "unsubscribe-sender", tool: "unsubscribe_sender", positionals: ["emailId"], help: "Execute a mailto unsubscribe (--args '{\"confirmed\":true}' if required)" },
   { command: "reply-to-email", tool: "reply_to_email", positionals: ["emailId", "body"], help: "Immediately send a reply (full tool: attachments/dryRun via --args)" },
+  { command: "set-reply-reminder", tool: "set_reply_reminder", positionals: ["emailId"], help: "Remind me if nobody answers this message (--args '{\"afterDays\":5}')" },
+  { command: "list-reply-reminders", tool: "list_reply_reminders", positionals: [], help: "List reply reminders: waiting, due, answered" },
+  { command: "cancel-reply-reminder", tool: "cancel_reply_reminder", positionals: ["id"], help: "Delete a reply reminder" },
+  { command: "respond-to-invite", tool: "respond_to_invite", positionals: ["emailId", "response"], help: "Accept / decline / tentative a calendar invitation (--args '{\"dryRun\":true}' to preview)" },
   { command: "reply-all-email", tool: "reply_all_email", positionals: ["emailId", "body"], help: "Immediately reply to all recipients" },
   { command: "forward-email", tool: "forward_email", positionals: ["emailId", "to"], help: "Immediately forward a message, preserving attachments" },
   { command: "list-drafts", tool: "list_drafts", positionals: [], help: "List local drafts (tool form; see also `drafts`)" },
@@ -2062,6 +2149,9 @@ export async function main(): Promise<void> {
   switch (parsed.command) {
     case "help":
       printCommandHelp(parsed.positionals[0]);
+      return;
+    case "completion":
+      process.stdout.write(completionScript(parsed.positionals[0] ?? ""));
       return;
     case "-v":
     case "version":

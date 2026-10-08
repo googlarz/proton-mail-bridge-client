@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## [2.8.0] — 2026-10-08
+
+New functionality: four additions, found by looking at what the tool list does not cover for someone who works from several accounts and answers a lot of mail. The tool count goes from 96 to 100.
+
+### Added
+- **`respond_to_invite`: accept, decline or tentatively accept a calendar invitation in a message.** It reads the invitation attached to the message and sends the organizer a standard calendar reply (iTIP `METHOD:REPLY`, RFC 5546) from the address the invitation was sent to, so their calendar updates your status. It copies the event's UID, sequence, dates and time zone definitions, carries only your attendee line and an optional comment, and answers a repeating event as a whole series. It refuses a cancelled event, a message that is not an invitation and one with no organizer, and says why. `dryRun` shows who would be answered and the calendar reply without sending. It obeys the same settings as `reply_to_email` (`PROTONMAIL_ALLOW_SEND`, confirmation, `RESTRICT_OUTBOUND_TO_SELF`, send delay), and an invitation addressed to another of your accounts is answered through that account. Tested on Google and Exchange style invitations and on the real message structure (`text/calendar; method=REPLY` plus an `invite.ics`); **not yet checked against a live calendar server**, so the first real use is the real test.
+- **Reply reminders: `set_reply_reminder`, `list_reply_reminders`, `cancel_reply_reminder`.** "If nobody answers this by Friday, tell me." A reminder is a local note on a message (usually one you sent); its state is worked out from the local index each time you look: waiting, due (the date has passed and nobody but you has written in the thread) or answered (somebody else did). Reminders that are due appear in `get_inbox_digest` as `repliesDue`. Setting one again for the same message moves it. Stored per account next to the other local stores, with the same locking and damaged-file handling. Setting and cancelling are blocked in read-only mode; nothing in the mailbox is changed.
+- **`account` on the triage, statistics, draft and folder tools.** Until now only six tools could be pointed at one account; the rest covered all of them with no way to narrow it, so "the digest of my work account only" was impossible. `get_threads`, `get_thread_by_id` (through its id), `get_actionable_threads`, `get_inbox_digest`, `get_follow_up_candidates`, `find_document_threads`, `prepare_meeting_context`, `get_labels`, `get_folders`, `folder_stats`, `count_messages`, `top_senders`, `get_email_stats`, `get_email_analytics`, `get_contacts`, `get_volume_trends`, `get_emails`, `list_drafts`, `list_remote_drafts`, `list_scheduled_sends`, `list_snoozed` and `get_index_status` now take an optional `account` (address or slug); an unknown value is an error, also with a single account. Without it nothing changes.
+- **`proton-mail-bridge-client completion <zsh|bash|fish>`** prints a tab-completion script for the commands and each command's flags, generated from the tables the parser itself uses so it cannot drift. `source <(proton-mail-bridge-client completion bash)`; see `docs/cli.md`.
+
+### Changed
+- The README and `docs/cli.md` count 100 tools. The `core` tier is unchanged (25 tools); the full tool list grew by 3.7% (104,540 to 108,440 characters of definitions).
+- `get_inbox_digest` has an extra `repliesDue` and `repliesDueTotal` when a reply reminder is due; nothing is added when none is.
+
+### Not done, and why
+- **Undoing a bulk move from the audit log:** the log is redacted and truncated on purpose, so an undo could not be guaranteed.
+- **Saved searches:** a model can keep its own queries; the value is small against another tool definition.
+- **Exporting a folder to mbox:** cannot be checked without a live Bridge.
+
 ## [2.7.3] — 2026-10-08
 
 Fixes from two independent security reviews of everything changed since 2.3.2, plus housekeeping found along the way. Each fix has a test that fails without it.

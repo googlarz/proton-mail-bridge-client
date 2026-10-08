@@ -54,3 +54,20 @@ test("removing unshippable images stays linear on unclosed tags and quotes", () 
     assert.ok(ms < LIMIT_MS, `took ${Math.round(ms)} ms`);
   }
 });
+
+import { buildInviteReply, parseInvite } from "../dist/utils/ical-reply.js";
+
+test("reading an invitation stays linear on hostile calendar text", () => {
+  const head = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:u\r\nORGANIZER:mailto:a@b.c\r\n";
+  const tail = "END:VEVENT\r\nEND:VCALENDAR\r\n";
+  for (const text of [
+    "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\n" + "BEGIN:X\r\n".repeat(100_000) + head.slice(head.indexOf("BEGIN:VEVENT")) + tail,
+    head + "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:x@y.z\r\n".repeat(100_000) + tail,
+    head + "SUMMARY:x\r\n" + " y\r\n".repeat(200_000) + tail,
+    head + "ATTENDEE;CN=" + "\"".repeat(100_000) + ":mailto:x@y.z\r\n" + tail,
+    head + "ATTENDEE" + ";a=b".repeat(100_000) + ":mailto:x@y.z\r\n" + tail,
+  ]) {
+    const { ms } = timed(() => buildInviteReply(parseInvite(text), { attendeeAddress: "me@x.y", response: "accept" }));
+    assert.ok(ms < LIMIT_MS, `took ${Math.round(ms)} ms`);
+  }
+});

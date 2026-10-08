@@ -454,6 +454,7 @@ export class SMTPService {
       references,
       messageId,
       attachments,
+      icalEvent: input.icalEvent,
       priority: input.priority ?? "normal",
       // Requests an MDN (read receipt) from the recipient's mail client — most
       // clients ask the user before honoring it, this is a request not a guarantee.

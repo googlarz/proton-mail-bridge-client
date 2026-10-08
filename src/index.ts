@@ -85,6 +85,8 @@ import {
   resolveRemoteDraftSync,
   sanitizeRuntimeConfig,
 } from "./utils/runtime-policy.js";
+import type { ReplyReminderRecord } from "./services/reply-reminder-service.js";
+import { InviteError, buildInviteReply, findMyAttendee, parseInvite, type ParsedInvite } from "./utils/ical-reply.js";
 
 type ToolResult = {
   content: Array<
@@ -236,6 +238,61 @@ const TOOLS = [
         confirmed: { type: "boolean", description: "Set to true to confirm this send when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
       required: ["to"],
+    },
+  },
+  {
+    name: "set_reply_reminder",
+    description: "Remind yourself to follow up if nobody answers a message by a date. Usually used on a message you sent: it is kept as a local note, and get_inbox_digest and list_reply_reminders show it as due once the date has passed and nobody but you has written in the thread. A reply cancels the wait by itself. Setting a reminder again for the same message moves it to the new date. Changes nothing in the mailbox. Use get_follow_up_candidates instead to find sent threads that have been unanswered for a while without setting anything.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "The message to be answered (typically one from Sent)." },
+        afterDays: { type: "number", description: "Remind after this many days (1-365). Default 3. Give this or remindAt." },
+        remindAt: { type: "string", description: "Remind at this date and time (ISO 8601, in the future). Give this or afterDays." },
+        note: { type: "string", description: "Optional note shown with the reminder (up to 500 characters)." },
+      },
+      required: ["emailId"],
+    },
+  },
+  {
+    name: "list_reply_reminders",
+    description: "List your reply reminders with their state: waiting (the date has not come), due (the date has passed and nobody has answered) or answered (someone other than you wrote in the thread after the reminder was set). By default only waiting and due ones are listed, due first. The state is worked out from the local index when you ask; run sync_emails first if the index may be stale.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
+        status: { type: "string", enum: ["open", "due", "answered", "all"], description: "open = waiting and due (default).", default: "open" },
+        limit: { type: "number", description: "Maximum reminders to return.", default: 50 },
+      },
+    },
+  },
+  {
+    name: "cancel_reply_reminder",
+    description: "Delete a reply reminder by the id set_reply_reminder or list_reply_reminders gave.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Reminder id." } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "respond_to_invite",
+    description: "Answer a calendar invitation in a message: accept, decline or tentatively accept. Reads the invitation (the text/calendar attachment of emailId), then sends the organizer a standard calendar reply (iTIP METHOD:REPLY) from the address the invitation was sent to, so their calendar updates your status. Refuses a cancelled event, a message that is not an invitation, and an invitation without an organizer. Use dryRun to see who would be answered and what the reply says before sending. Subject to the same send settings as reply_to_email (PROTONMAIL_ALLOW_SEND, confirmation, RESTRICT_OUTBOUND_TO_SELF, send delay). Use get_email_by_id or list_attachments first if unsure whether a message holds an invitation.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "The message that holds the invitation." },
+        response: { type: "string", enum: ["accept", "decline", "tentative"], description: "Your answer." },
+        comment: { type: "string", description: "Optional note to the organizer (up to 1000 characters)." },
+        dryRun: { type: "boolean", description: "Show who would be answered and what the reply says, without sending.", default: false },
+        undoWindowSeconds: { type: "number", description: "Override PROTONMAIL_SEND_DELAY_SECONDS for this one send: queue it for this many seconds (cancelable via cancel_send). 0 sends immediately." },
+        confirmed: { type: "boolean", description: "Set to true to confirm this irreversible send when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
+      },
+      required: ["emailId", "response"],
     },
   },
   {
@@ -4241,6 +4298,38 @@ export function createServer(
     return one ? [one] : accountManager.all();
   }
 
+  // A reminder as a caller sees it: ids carry the account's prefix, like every other id.
+  function presentReminder(bundle: AccountBundle, record: ReplyReminderRecord) {
+    const slug = responseSlug(bundle);
+    return { ...record, id: withAccountPrefix(slug, record.id), emailId: withAccountPrefix(slug, record.emailId) };
+  }
+
+  // Each open reminder with its state, from the local index: answered (somebody else wrote in the thread since it
+  // was set), due (the date has passed) or waiting.
+  async function evaluateReminders(bundles: AccountBundle[]) {
+    const own = allAccountAddresses();
+    const now = Date.now();
+    const perAccount = await Promise.all(
+      bundles.map(async (bundle) => {
+        const records = await bundle.replyReminderService.list();
+        return Promise.all(
+          records.map(async (record) => {
+            const replies = await bundle.localIndexService.getRepliesSince(record.messageId, record.createdAt, own);
+            const first = [...replies].sort((left, right) => (left.internalDate || left.date || "").localeCompare(right.internalDate || right.date || ""))[0];
+            const state: "waiting" | "due" | "answered" = first ? "answered" : new Date(record.remindAt).getTime() <= now ? "due" : "waiting";
+            return {
+              ...presentReminder(bundle, record),
+              state,
+              ...(state === "due" ? { daysOverdue: Math.floor((now - new Date(record.remindAt).getTime()) / 86_400_000) } : {}),
+              ...(first ? { answeredAt: first.internalDate || first.date, answeredBy: first.from[0]?.address } : {}),
+            };
+          }),
+        );
+      }),
+    );
+    return perAccount.flat();
+  }
+
   // Every configured account address — reply helpers treat all of them as "self".
   function allAccountAddresses(): string[] {
     return accountManager.all().map((bundle) => bundle.account.address);
@@ -5019,6 +5108,153 @@ export function createServer(
             response: resultRa.response,
             sentCopy: sentCopyTokenRa,
           }, false, [emailSource({ ...detailRa, id: prefixedIdFor(readBundleRa, detailRa.id) })]);
+        }
+
+        case "set_reply_reminder": {
+          ensureMailboxWriteAllowed(config.runtime);
+          const { bundle: reminderBundle, rest: reminderEmailId } = resolveAccountForEmailId(requireString(args, "emailId"));
+          const afterDays = optionalNumber(args.afterDays, 1, 365);
+          const remindAtArg = optionalString(args, "remindAt");
+          if (afterDays !== undefined && remindAtArg !== undefined) {
+            throw new McpError(ErrorCode.InvalidParams, "Give afterDays or remindAt, not both.");
+          }
+          const now = new Date();
+          const remindAt = remindAtArg !== undefined ? new Date(remindAtArg) : new Date(now.getTime() + (afterDays ?? 3) * 24 * 60 * 60 * 1000);
+          if (Number.isNaN(remindAt.getTime())) {
+            throw new McpError(ErrorCode.InvalidParams, "remindAt must be a date and time such as 2026-10-20T09:00:00Z.");
+          }
+          const reminderDetail = await reminderBundle.imapService.getEmailById(reminderEmailId);
+          if (!reminderDetail.messageId) {
+            throw new McpError(ErrorCode.InvalidParams, "This message has no Message-ID header, so replies to it cannot be recognised.");
+          }
+          const record = await withAudit(reminderBundle.auditService, name, args, () =>
+            reminderBundle.replyReminderService.set({
+              emailId: reminderEmailId,
+              messageId: reminderDetail.messageId as string,
+              subject: reminderDetail.subject,
+              to: reminderDetail.to.map((address) => address.address ?? "").filter(Boolean),
+              remindAt,
+              note: optionalString(args, "note"),
+              now,
+            }),
+          );
+          return createTextResult({ ...presentReminder(reminderBundle, record), state: "waiting" });
+        }
+
+        case "list_reply_reminders": {
+          const status = optionalString(args, "status") ?? "open";
+          if (!["open", "due", "answered", "all"].includes(status)) {
+            throw new McpError(ErrorCode.InvalidParams, "status must be open, due, answered or all.");
+          }
+          const limit = normalizeLimit(args.limit, 50, 1, 500);
+          const bundles = selectedBundles(args);
+          await Promise.all(bundles.map((bundle) => maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, { force: false, folder: "INBOX", limitPerFolder: 100 })));
+          const all = await evaluateReminders(bundles);
+          const wanted = all.filter((reminder) => (status === "all" ? true : status === "open" ? reminder.state !== "answered" : reminder.state === status));
+          const rank = { due: 0, waiting: 1, answered: 2 } as const;
+          wanted.sort((left, right) => rank[left.state] - rank[right.state] || left.remindAt.localeCompare(right.remindAt));
+          return createTextResult({
+            total: wanted.length,
+            due: all.filter((reminder) => reminder.state === "due").length,
+            reminders: wanted.slice(0, limit),
+          });
+        }
+
+        case "cancel_reply_reminder": {
+          ensureMailboxWriteAllowed(config.runtime);
+          const { bundle: cancelBundle, rest: reminderId } = resolveAccountForEmailId(requireString(args, "id"));
+          const result = await withAudit(cancelBundle.auditService, name, args, () => cancelBundle.replyReminderService.cancel(reminderId));
+          return createTextResult({ id: requireString(args, "id"), canceled: result.canceled });
+        }
+
+        case "respond_to_invite": {
+          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Answer calendar invitation ${String(args.emailId ?? "?")}`);
+          ensureSendAllowed(config.runtime);
+          const { bundle: inviteBundle, rest: inviteEmailId } = resolveAccountForEmailId(requireString(args, "emailId"));
+          const responseArg = requireString(args, "response");
+          if (responseArg !== "accept" && responseArg !== "decline" && responseArg !== "tentative") {
+            throw new McpError(ErrorCode.InvalidParams, "response must be accept, decline or tentative.");
+          }
+          const inviteComment = optionalString(args, "comment");
+          if (inviteComment !== undefined && inviteComment.length > 1000) {
+            throw new McpError(ErrorCode.InvalidParams, "comment must be at most 1000 characters.");
+          }
+          const inviteDetail = await inviteBundle.imapService.getEmailById(inviteEmailId);
+          const candidates = (inviteDetail.attachments ?? []).filter(
+            (attachment) =>
+              Boolean(attachment.id) &&
+              (attachment.isCalendarInvite || attachment.kind === "calendar" || /text\/calendar/i.test(attachment.contentType ?? "") || /\.ics$/i.test(attachment.filename ?? "")),
+          );
+          if (candidates.length === 0) {
+            throw new McpError(ErrorCode.InvalidParams, "This message has no calendar invitation attachment.");
+          }
+          let invite: ParsedInvite | undefined;
+          let inviteProblem: string | undefined;
+          for (const candidate of candidates) {
+            const content = await inviteBundle.imapService.getAttachmentContent(inviteEmailId, candidate.id as string, { includeBase64: true });
+            try {
+              invite = parseInvite(Buffer.from(content.base64 ?? "", "base64").toString("utf8"));
+              break;
+            } catch (error) {
+              if (!(error instanceof InviteError)) throw error;
+              inviteProblem ??= error.message;
+            }
+          }
+          if (!invite) {
+            throw new McpError(ErrorCode.InvalidParams, inviteProblem ?? "No invitation could be read from this message.");
+          }
+          // Answer as the address the invitation was sent to; when none of the attendees is one of ours (a list,
+          // a forwarded invitation), answer as the account that holds the message.
+          const myAddresses = allAccountAddresses();
+          const myAttendee = findMyAttendee(invite, (address) => myAddresses.some((own) => isSelfAddress(address, own)));
+          const answeringAs = myAttendee?.address ?? inviteBundle.config.smtp.username;
+          const inviteSendBundle = (myAttendee ? accountManager.byAddress(answeringAs) : undefined) ?? inviteBundle;
+          const inviteReply = buildInviteReply(invite, {
+            attendeeAddress: answeringAs,
+            attendeeName: myAttendee?.name,
+            response: responseArg,
+            comment: inviteComment,
+          });
+          const inviteTo = [inviteReply.to];
+          ensureValidEmails(inviteTo, "to");
+          ensureOutboundRecipientsAllowed(config.runtime, inviteSendBundle.config.smtp.username, inviteTo);
+          const inviteSummary = {
+            event: invite.summary ?? "(no title)",
+            organizer: invite.organizer.address,
+            answeringAs,
+            response: responseArg,
+            previousStatus: myAttendee?.partstat,
+            ...(invite.hasRecurrence ? { note: "This invitation repeats; the answer applies to the whole series." } : {}),
+          };
+          if (normalizeBoolean(args.dryRun, false)) {
+            return createTextResult({ dryRun: true, wouldSendTo: inviteTo, subject: inviteReply.subject, ...inviteSummary, replyCalendar: inviteReply.ics.split("\r\n").filter(Boolean), note: "No email was sent." });
+          }
+          const invitePayload: SendEmailInput = {
+            to: inviteTo,
+            subject: inviteReply.subject,
+            body: inviteReply.body,
+            from: inviteSendBundle.config.smtp.username === answeringAs ? undefined : answeringAs,
+            inReplyTo: inviteDetail.messageId,
+            references: replyReferences(inviteDetail),
+            icalEvent: { method: "REPLY", content: inviteReply.ics },
+            appendSignature: false,
+          };
+          const inviteUndo = resolveUndoWindowSeconds(args);
+          if (inviteUndo > 0) {
+            return queueUndoSend(inviteSendBundle, invitePayload, inviteUndo, name, args, { to: inviteTo, ...inviteSummary });
+          }
+          const inviteResult = await withAudit(auditService, name, args, async () =>
+            inviteSendBundle.smtpService.sendEmail(invitePayload),
+          );
+          return createTextResult({
+            ...inviteSummary,
+            to: inviteTo,
+            subject: inviteReply.subject,
+            messageId: inviteResult.messageId,
+            accepted: inviteResult.accepted,
+            rejected: inviteResult.rejected,
+            response_: inviteResult.response,
+          }, false, [emailSource({ ...inviteDetail, id: prefixedIdFor(inviteBundle, inviteDetail.id) })]);
         }
 
         case "forward_email": {
@@ -8218,6 +8454,8 @@ export function createServer(
           for (const key of countKeys) {
             counts[key] = perAccount.reduce((sum, entry) => sum + (entry.counts[key] ?? 0), 0);
           }
+          // Reply reminders whose date has passed with no answer: they belong in a triage summary.
+          const dueReminders = (await evaluateReminders(selectedBundles(args))).filter((reminder) => reminder.state === "due");
           const result = {
             generatedAt: new Date().toISOString(),
             indexUpdatedAt: perAccount.map((entry) => entry.indexUpdatedAt).filter(Boolean).sort().reverse()[0],
@@ -8227,6 +8465,7 @@ export function createServer(
               : {}),
             topThreads,
             staleAwaitingYou,
+            ...(dueReminders.length > 0 ? { repliesDue: dueReminders.slice(0, 10), repliesDueTotal: dueReminders.length } : {}),
             // Each section pages independently with the same offset/limit: pass nextOffset back as
             // `offset` to continue (a section with hasMore:false is exhausted).
             paging: {

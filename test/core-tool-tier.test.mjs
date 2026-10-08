@@ -26,6 +26,6 @@ test("core tool tier includes the draft review/edit step and multi-account visib
   }
 });
 
-test("core tool tier stays a small, deliberate subset — not creeping back toward the full 96", () => {
+test("core tool tier stays a small, deliberate subset — not creeping back toward the full 100", () => {
   assert.ok(CORE_TOOL_NAMES.size <= 30, `core tier has ${CORE_TOOL_NAMES.size} tools — if this grew past 30, check whether it's still serving its "reduce context burn" purpose`);
 });

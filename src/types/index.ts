@@ -151,6 +151,8 @@ export interface SendEmailInput {
   requestReadReceipt?: boolean;
   /** Append PROTONMAIL_SIGNATURE (if configured) to the body. Defaults to true. */
   appendSignature?: boolean;
+  /** A calendar message sent as an alternative part of the mail (an answer to an invitation uses method REPLY). */
+  icalEvent?: { method: string; content: string };
 }
 
 export interface EmailAttachmentSummary {

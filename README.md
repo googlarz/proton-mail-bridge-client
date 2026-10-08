@@ -24,7 +24,7 @@
 
 ---
 
-Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 96 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
+Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 100 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
 
 > **Using Proton Drive too?** See [**proton-drive-mcp**](https://github.com/googlarz/proton-drive-mcp), the companion MCP server and CLI for Proton Drive (upload, download, share and manage your encrypted files from Claude). Run both side by side to handle mail and files in one conversation, for example save an attachment from here, then upload it to Drive. More in [Related projects](#related-projects).
 
@@ -42,14 +42,14 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
    - "Find the last email from `alice@example.com` and draft a reply for me to review." (nothing is sent until you say so)
    - "Which of my emails have attachments from this month?"
    - "Show me my drafts and tighten the oldest one."
-5. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 96), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
+5. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 100), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
 
 ---
 
 ## What you get
 
 - **Claude reads and manages your Proton Mail** — triage, reply, draft, archive, search, move, batch-act on threads, pull attachments
-- **Full CLI** — a dedicated command for every one of the 96 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable, works in cron and shell scripts
+- **Full CLI** — a dedicated command for every one of the 100 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable, works in cron and shell scripts
 - **Fast local search** — full-text search across your inbox without hitting IMAP on every query
 - **Safety controls** — read-only mode, send gate, destructive-action confirmation, per-action allowlist
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
@@ -326,6 +326,7 @@ First, enable **Split Addresses** in Proton Bridge and configure each address as
 - **Additional accounts:** each has an auto-generated slug (e.g., `alias`, `business`). Email IDs carry an account prefix: `alias::message-id`, `business::message-id`.
 - **Sending:** `send_email`, `reply_to_email`, etc. route through the account matching the `from` address. If no account matches, the primary connection is used with a header override (for non-configured aliases).
 - **Search and read:** all read tools (search, threads, analytics, digest) automatically fan out across all configured accounts and merge results, preserving the account prefix in returned IDs.
+- **One account only:** the triage, statistics, draft and folder tools (`get_threads`, `get_inbox_digest`, `get_follow_up_candidates`, `get_labels`, `list_drafts`, `get_folders`, `top_senders`, ...) take an optional `account` (address or slug) to look at a single account instead of all of them; an unknown value is an error.
 
 ### Tools across accounts
 
@@ -381,6 +382,12 @@ Output:
 **Draft review**
 > "Show me my drafts, pick the oldest one, and suggest a better subject line and closing paragraph."
 
+**Calendar invitations**
+> "Do I have any unanswered meeting invitations this week? Accept the ones that don't clash with each other and show me the rest."
+
+**Follow-up**
+> "I just sent the proposal to Ann. If she hasn't answered in five days, remind me."
+
 > **Tip:** When creating folders, use `Folders/Name` (not just `Name`) — that's the Proton Bridge namespace for real folders vs. labels.
 
 More recipes — expanded triage prompts, cron scripts for scheduled digests, and a Claude Code `/mail-triage` slash command — are in [examples/](examples/).
@@ -421,7 +428,7 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 
 `<command> --help` prints that command's usage without running it. Flags accept `--flag value` or `--flag=value` (a value starting with `--` needs the `=` form, or must come after a bare `--`); unknown flags are an error. Exit codes: `0` success, `1` failure (including a failed `doctor` or `connection-status` check, or a failed item in a `batch`/`bulk-*` run), `2` usage error.
 
-**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 96 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
+**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 100 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
 
 ---
 
@@ -430,7 +437,7 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 All flags work in both the MCP server and CLI:
 
 ```bash
-PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 96 — saves context window
+PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 100 — saves context window
 PROTONMAIL_READ_ONLY=true            # disable all write operations
 PROTONMAIL_ALLOW_SEND=false          # disable SMTP sends only (other writes still work)
 PROTONMAIL_CONFIRM_DESTRUCTIVE=true  # require confirmed:true on send, reply, forward, delete
@@ -474,7 +481,7 @@ PROTONMAIL_PASSWORD_COMMAND='pass proton/password'
 PROTONMAIL_DATA_DIR="$HOME/.proton-mail-bridge-client"
 
 # Tools
-PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 96
+PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 100
 
 # Safety
 PROTONMAIL_READ_ONLY='false'
@@ -535,7 +542,7 @@ With several accounts or a signature, the server sends from whichever `from` the
 ## Tool surface
 
 ### Send
-`send_email` · `send_test_email` · `reply_to_email` · `reply_all_email` · `forward_email`
+`send_email` · `send_test_email` · `reply_to_email` · `reply_all_email` · `forward_email` · `respond_to_invite` (answer a calendar invitation)
 
 ### Drafts
 `create_draft` · `create_reply_draft` · `create_forward_draft` · `create_thread_reply_draft` · `list_drafts` · `list_remote_drafts` · `get_draft` · `update_draft` · `sync_draft_to_remote` · `send_draft` · `delete_draft`
@@ -544,7 +551,7 @@ With several accounts or a signature, the server sends from whichever `from` the
 `get_emails` · `get_email_by_id` · `count_messages` · `search_emails` · `search_indexed_emails` · `list_attachments` · `get_attachment_content` · `save_attachment` · `save_attachments`
 
 ### Triage
-`get_folders` · `sync_folders` · `get_labels` · `get_threads` · `get_thread_by_id` · `get_thread_brief` · `get_actionable_threads` · `get_inbox_digest` · `get_follow_up_candidates` · `find_document_threads` · `prepare_meeting_context` · `delete_thread` · `flag_thread` · `move_thread`
+`get_folders` · `sync_folders` · `get_labels` · `get_threads` · `get_thread_by_id` · `get_thread_brief` · `get_actionable_threads` · `get_inbox_digest` · `get_follow_up_candidates` · `set_reply_reminder` · `list_reply_reminders` · `cancel_reply_reminder` · `find_document_threads` · `prepare_meeting_context` · `delete_thread` · `flag_thread` · `move_thread`
 
 ### Actions
 `mark_email_read` · `star_email` · `move_email` · `archive_email` · `trash_email` · `restore_email` · `delete_email` · `batch_email_action` · `apply_thread_action` · `empty_folder` · `bulk_delete` · `bulk_move` · `bulk_update_flags` · `bulk_update_labels` · `update_message_flags` · `update_message_labels`
@@ -643,7 +650,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - Defaults are bounded: `search_emails`/`search_indexed_emails` return 50 (pass `limit` for more), `list_drafts` 20, `list_scheduled_sends` 50 newest first. Each reports `hasMore`; page with `offset`.
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_BYTES`.
-- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 96: about 7k tokens of tool definitions instead of about 20k (roughly 65% less, reference tokenizer), paid on every conversation that loads the server.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 100: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 
 **Working with drafts**

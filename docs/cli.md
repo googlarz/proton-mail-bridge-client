@@ -77,6 +77,19 @@ proton-mail-bridge-client document-threads --category invoice
 proton-mail-bridge-client meeting-context alice@example.com
 ```
 
+Every triage command above covers all configured accounts; add `--args '{"account":"work@example.com"}'` (or the account slug) to the tool forms to look at one.
+
+### Reply reminders
+
+Ask to be told when a message goes unanswered by a date. A reminder is a local note; its state (waiting, due, answered) is worked out from the local index each time you look, and a reply from anyone but you settles it. Due reminders also appear in `digest`.
+
+```bash
+proton-mail-bridge-client set-reply-reminder Sent::5195::f6a63249 --args '{"afterDays":5,"note":"ask about the budget"}'
+proton-mail-bridge-client list-reply-reminders                  # waiting and due, due first
+proton-mail-bridge-client list-reply-reminders --args '{"status":"all"}'
+proton-mail-bridge-client cancel-reply-reminder <id>
+```
+
 ## Compose & send
 
 ```bash
@@ -97,6 +110,16 @@ proton-mail-bridge-client send --to bob@example.com --subject "Hey" --body "Hell
 proton-mail-bridge-client reply INBOX::25642 --body "On it."
 proton-mail-bridge-client reply INBOX::25642 --reply-all --body "On it."
 proton-mail-bridge-client forward INBOX::25642 --to carol@example.com
+```
+
+### Calendar invitations
+
+Answer an invitation in a message. `respond-to-invite` reads the invitation, then sends the organizer a calendar reply from the address it was sent to; `--args '{"dryRun":true}'` shows who would be answered and what the reply says without sending. It follows the same send settings as `reply`.
+
+```bash
+proton-mail-bridge-client respond-to-invite INBOX::25642 accept
+proton-mail-bridge-client respond-to-invite INBOX::25642 decline --args '{"comment":"Out that week"}'
+proton-mail-bridge-client respond-to-invite INBOX::25642 tentative --args '{"dryRun":true}'
 ```
 
 ## Mailbox actions
@@ -182,6 +205,16 @@ proton-mail-bridge-client sync --folder INBOX --limit 150
 # you want cleaned up.
 proton-mail-bridge-client sync --folder INBOX --full
 ```
+
+## Shell completion
+
+```bash
+source <(proton-mail-bridge-client completion bash)     # bash
+source <(proton-mail-bridge-client completion zsh)      # zsh, after compinit
+proton-mail-bridge-client completion fish | source      # fish
+```
+
+Completes the command names and each command's flags. The scripts are generated from the same tables the parser uses, so they match the installed version. Put the line in your shell's startup file to keep it.
 
 ## Ambient notifications
 

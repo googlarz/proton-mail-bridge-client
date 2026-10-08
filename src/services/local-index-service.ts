@@ -28,6 +28,7 @@ import {
   lowerCaseAddress,
   nextDay,
   normalizeMailboxLabel,
+  isSelfAddress,
   normalizeMessageId,
   normalizeSubjectForThread,
   searchEquals,
@@ -1250,6 +1251,22 @@ export class LocalIndexService {
       ...this.indexFreshnessFields(snapshot.updatedAt),
       ...(messagesCapped ? { messagesCapped: true } : {}),
     };
+  }
+
+  // The answers a reply reminder waits for: messages in the same thread as `messageId`, newer than `sinceIso`,
+  // that none of `ownAddresses` wrote.
+  async getRepliesSince(messageId: string, sinceIso: string, ownAddresses: string[]): Promise<EmailSummary[]> {
+    const db = await this.ensureDb();
+    const key = normalizeMessageId(messageId);
+    if (!key) return [];
+    const map = this.loadThreadMap(db);
+    const threadKey = map.keyByMessage.get(key);
+    if (threadKey === undefined) return [];
+    const emailIds = (map.messagesByKey.get(threadKey) ?? []).flatMap((canonicalId) => map.emailIdsByMessage.get(canonicalId) ?? []);
+    const since = new Date(sinceIso).getTime();
+    return this.loadMessagesByEmailIds(db, emailIds)
+      .filter((email) => new Date(email.internalDate || email.date || 0).getTime() > since)
+      .filter((email) => !email.from.some((sender) => ownAddresses.some((own) => isSelfAddress(sender.address, own))));
   }
 
   async getThreadById(threadId: string): Promise<ThreadDetail> {
