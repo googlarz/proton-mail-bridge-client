@@ -118,6 +118,12 @@ const ALL_EMAIL_ACTIONS: EmailAction[] = [
   "delete",
 ];
 
+// Triage and statistics tools cover every configured account unless told which one.
+const ACCOUNT_FILTER_PROPERTY = {
+  type: "string",
+  description: "Only this account (its address or slug). Without it the tool covers every configured account.",
+} as const;
+
 const TOOLS = [
   {
     name: "send_email",
@@ -185,6 +191,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         status: { type: "string", enum: ["pending", "sending", "sent", "canceled", "failed"], description: "Filter to one status. Omit to list everything." },
         limit: { type: "number", description: "Records per page, newest first. Default 50.", default: 50 },
         offset: { type: "number", description: "Skip this many records (paging). Check hasMore for more." },
@@ -481,6 +488,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         includeSent: { type: "boolean", description: "Include drafts already sent.", default: false },
         limit: { type: "number", description: "Maximum drafts to return. Defaults to 20; check hasMore and page with offset for more." },
         offset: { type: "number", description: "Number of drafts to skip, newest-updated first.", default: 0 },
@@ -494,6 +502,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         limit: { type: "number", description: "Maximum drafts to return.", default: 50 },
         offset: { type: "number", description: "Pagination offset.", default: 0 },
       },
@@ -627,6 +636,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         folder: { type: "string", description: "Folder name.", default: "INBOX" },
         limit: { type: "number", description: "Number of emails to return (1-250; larger values are capped at 250, use hasMore and offset/beforeUid to page).", default: 50, maximum: 250 },
         offset: { type: "number", description: "Pagination offset from newest first.", default: 0 },
@@ -708,7 +718,7 @@ const TOOLS = [
     name: "get_folders",
     description: "Return all mailbox folders with message counts and unseen counts from the live IMAP session. Use to discover available folder names before targeting get_emails, move_email, or create_folder. Prefer sync_folders to force a fresh fetch when the folder list appears stale. Folders with noselect:true cannot be used for IMAP operations.",
     annotations: { readOnlyHint: true },
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: { account: ACCOUNT_FILTER_PROPERTY } },
   },
   {
     name: "sync_folders",
@@ -873,6 +883,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         status: { type: "string", enum: ["pending", "waking", "woken", "canceled", "failed"], description: "Filter to one status. Omit to list everything (waking = being moved back right now)." },
       },
     },
@@ -1003,6 +1014,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         folder: { type: "string", description: "Folder to count in. Defaults to INBOX." },
         query: { type: "string", description: "Free-text filter." },
         from: { type: "string", description: "Sender filter." },
@@ -1027,6 +1039,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         folder: { type: "string", description: "Folder path. Defaults to INBOX.", default: "INBOX" },
       },
     },
@@ -1120,6 +1133,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         folder: { type: "string", description: "Folder to analyse. Defaults to INBOX." },
         since: { type: "string", description: "ISO date lower bound." },
         before: { type: "string", description: "ISO date upper bound." },
@@ -1314,6 +1328,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         days: { type: "number", description: "Trailing days window.", default: 30 },
         limit: { type: "number", description: "Maximum messages to sample.", default: 2000 },
       },
@@ -1326,6 +1341,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         days: { type: "number", description: "Trailing days window.", default: 30 },
         limit: { type: "number", description: "Maximum messages to sample.", default: 2000 },
       },
@@ -1338,6 +1354,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         limit: { type: "number", description: "Maximum contacts to return.", default: 100 },
       },
     },
@@ -1349,6 +1366,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         days: { type: "number", description: "Number of trailing days to include.", default: 30 },
       },
     },
@@ -1445,7 +1463,7 @@ const TOOLS = [
     name: "get_index_status",
     description: "Return metadata about the local SQLite email index: row count, last sync timestamp, index schema version, and per-folder coverage. Use to verify the index is fresh and complete before querying it with search_indexed_emails or get_threads. If the index is empty or stale, call sync_emails first.",
     annotations: { readOnlyHint: true },
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: { type: "object", properties: { account: ACCOUNT_FILTER_PROPERTY } },
   },
   {
     name: "search_indexed_emails",
@@ -1483,6 +1501,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         limit: { type: "number", description: "Maximum labels to return. Capped at 250; use get_folders for the complete live folder list.", default: 250 },
       },
     },
@@ -1494,6 +1513,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         query: { type: "string", description: "Free-text filter across subject, participants, and labels." },
         label: { type: "string", description: "Require a normalized label on the thread." },
         folder: { type: "string", description: "Only threads with a message in this folder, by its exact path as get_folders lists it (e.g. INBOX, Archive, Trash, Folders/Receipts). With several accounts it applies to each." },
@@ -1510,6 +1530,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         query: { type: "string", description: "Free-text filter across subject, latest preview, senders, and labels." },
         label: { type: "string", description: "Require a normalized label on the thread." },
         pendingOn: {
@@ -1540,6 +1561,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         limit: { type: "number", description: "Maximum threads per digest section.", default: 10 },
         offset: { type: "number", description: "Skip this many threads in each section (use paging.<section>.nextOffset from the previous response to continue).", default: 0 },
         minAgeHours: {
@@ -1562,6 +1584,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         limit: { type: "number", description: "Maximum candidate threads to return.", default: 25 },
         offset: { type: "number", description: "Skip this many candidates (use nextOffset from the previous response to page).", default: 0 },
         minAgeHours: { type: "number", description: "Minimum thread age in hours.", default: 24 },
@@ -1586,6 +1609,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         category: {
           type: "string",
           enum: ["document", "invoice", "contract", "travel", "calendar"],
@@ -1609,6 +1633,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
         person: { type: "string", description: "Person name or email fragment to match." },
         domain: { type: "string", description: "Domain to match, such as example.com." },
         limit: { type: "number", description: "Maximum threads to include.", default: 10 },
@@ -4210,6 +4235,12 @@ export function createServer(
     return found;
   }
 
+  // The accounts a triage or statistics tool covers: the one named by `account`, else all of them.
+  function selectedBundles(args: Record<string, unknown>): AccountBundle[] {
+    const one = resolveAccountArg(args);
+    return one ? [one] : accountManager.all();
+  }
+
   // Every configured account address — reply helpers treat all of them as "self".
   function allAccountAddresses(): string[] {
     return accountManager.all().map((bundle) => bundle.account.address);
@@ -4662,7 +4693,7 @@ export function createServer(
           // stayed just as bloated once queued).
           const perAccount = await withAudit(auditService, name, args, async () =>
             Promise.all(
-              accountManager.all().map(async (bundle) => ({
+              selectedBundles(args).map(async (bundle) => ({
                 bundle,
                 items: await bundle.deliveryQueueService.list(),
               })),
@@ -5445,11 +5476,12 @@ export function createServer(
           // account's own list already arrives that way). Single-account guard
           // keeps byte-identical output for the common case.
           const includeSent = normalizeBoolean(args.includeSent, false);
+          resolveAccountArg(args);
           const allDrafts = accountManager.all().length === 1
             ? (await draftStore.listDrafts(includeSent)).map((draft) => ({ bundle: primaryBundle, draft }))
             : (
                 await Promise.all(
-                  accountManager.all().map(async (bundle) => {
+                  selectedBundles(args).map(async (bundle) => {
                     const drafts = await bundle.draftStore.listDrafts(includeSent);
                     return drafts.map((draft) => ({ bundle, draft: presentDraft(bundle, draft) }));
                   }),
@@ -5483,10 +5515,14 @@ export function createServer(
         case "list_remote_drafts": {
           // Scope limitation (follow-up round): stays scoped to the primary account's
           // remote Drafts mailbox only — see list_drafts' identical note.
-          const result = await imapService.listRemoteDrafts(
+          // `account` picks another account's Drafts mailbox; its ids carry that account's prefix like everywhere else.
+          const draftsBundle = resolveAccountArg(args) ?? primaryBundle;
+          const draftsSlug = responseSlug(draftsBundle);
+          const rawResult = await draftsBundle.imapService.listRemoteDrafts(
             normalizeLimit(args.limit, 50),
             normalizeLimit(args.offset, 0, 0, 10_000),
           );
+          const result = { ...rawResult, emails: rawResult.emails.map((email) => ({ ...email, id: withAccountPrefix(draftsSlug, email.id) })) };
           // projectFields (called with no fields arg) still trims each email's
           // attachments to the essentials — same fix as every other list-style
           // tool, this one just didn't route through projectFields at all before.
@@ -6053,6 +6089,7 @@ export function createServer(
             includeSnippet: normalizeBoolean(args.includeSnippet, false),
           };
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const result = await imapService.getEmails(getEmailsInput);
             return createTextResult(
               {
@@ -6099,7 +6136,7 @@ export function createServer(
           // filter-blind depending on which one you pick.
           const perAccountFetchLimit = requestedOffset + effectiveLimit + 1;
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               const result = await bundle.imapService.getEmails({ ...getEmailsInput, offset: 0, limit: perAccountFetchLimit });
               return { bundle, result };
             }),
@@ -6349,6 +6386,7 @@ export function createServer(
             sizeSmaller: optionalNumber(args.sizeSmaller, 0, Number.MAX_SAFE_INTEGER),
           };
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const result = await imapService.countMessages(countInput);
             return createTextResult(result);
           }
@@ -6358,7 +6396,7 @@ export function createServer(
           // One account lacking the folder or label (or unreachable) must not fail the whole count, as in
           // search_emails: report it and return the rest. Every account failing still throws.
           const settled = await Promise.allSettled(
-            accountManager.all().map(async (bundle) => ({
+            selectedBundles(args).map(async (bundle) => ({
               slug: bundle.account.slug,
               ...(await bundle.imapService.countMessages(countInput)),
             })),
@@ -6369,7 +6407,7 @@ export function createServer(
           }
           const failedAccounts = settled.flatMap((entry, index) =>
             entry.status === "rejected"
-              ? [{ account: accountManager.all()[index].account.slug, error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }]
+              ? [{ account: selectedBundles(args)[index].account.slug, error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }]
               : [],
           );
           return createTextResult({
@@ -6384,6 +6422,7 @@ export function createServer(
         case "folder_stats": {
           const folderStatsFolder = optionalString(args, "folder");
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const result = await imapService.getFolderStats(folderStatsFolder);
             return createTextResult(result);
           }
@@ -6391,7 +6430,7 @@ export function createServer(
           // sum the numeric fields (total/unseen); uidNext/uidValidity are
           // per-account concepts and only make sense in the breakdown.
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => ({
+            selectedBundles(args).map(async (bundle) => ({
               slug: bundle.account.slug,
               ...(await bundle.imapService.getFolderStats(folderStatsFolder)),
             })),
@@ -6745,6 +6784,7 @@ export function createServer(
             excludeSelf: normalizeBoolean(args.excludeSelf, true),
           };
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const result = await imapService.topSenders(topSendersInput);
             return createTextResult(result);
           }
@@ -6754,7 +6794,7 @@ export function createServer(
           // Each account is asked for its WHOLE table, not just its own top N: a sender in the middle of every
           // account's table can still be first in total, and cutting each table first made it disappear.
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => ({
+            selectedBundles(args).map(async (bundle) => ({
               bundle,
               result: await bundle.imapService.topSenders({ ...topSendersInput, limit: 10_000 }),
             })),
@@ -6886,6 +6926,7 @@ export function createServer(
 
         case "get_folders": {
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             return createTextResult(await imapService.getFolders());
           }
           // Merge strategy: fetch each account's own folder list (LIVE IMAP) and
@@ -6894,7 +6935,7 @@ export function createServer(
           // single-account setup's own folder paths are completely untouched.
           const primarySlug = accountManager.primary().account.slug;
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => ({ bundle, folders: await bundle.imapService.getFolders() })),
+            selectedBundles(args).map(async (bundle) => ({ bundle, folders: await bundle.imapService.getFolders() })),
           );
           const merged = perAccount.flatMap(({ bundle, folders }) =>
             folders.map((folder) => {
@@ -7143,13 +7184,14 @@ export function createServer(
           // independent snoozeService/JSON file. Single-account guard keeps
           // byte-identical output for the common case.
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const all = await withAudit(auditService, name, args, async () => snoozeService.list());
             const filtered = statusFilter ? all.filter((item) => item.status === statusFilter) : all;
             return createTextResult(filtered);
           }
           const perAccount = await withAudit(auditService, name, args, async () =>
             Promise.all(
-              accountManager.all().map(async (bundle) => ({
+              selectedBundles(args).map(async (bundle) => ({
                 bundle,
                 items: await bundle.snoozeService.list(),
               })),
@@ -7309,6 +7351,7 @@ export function createServer(
           const statsDays = normalizeLimit(args.days, 30, 1, 365);
           const statsLimit = normalizeLimit(args.limit, 2000, 1, 10_000);
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const folders = await imapService.getFolders();
             const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, statsDays, statsLimit);
             return createTextResult(analyticsService.getEmailStats(sample, folders, config.smtp.username));
@@ -7319,7 +7362,7 @@ export function createServer(
           // folder paths tagged with their account slug to avoid collisions).
           const primarySlugForStats = accountManager.primary().account.slug;
           const statsPerAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               const folders = await bundle.imapService.getFolders();
               const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, statsDays, statsLimit);
               return {
@@ -7353,6 +7396,7 @@ export function createServer(
           const analyticsDays = normalizeLimit(args.days, 30, 1, 365);
           const analyticsLimit = normalizeLimit(args.limit, 2000, 1, 10_000);
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, analyticsDays, analyticsLimit);
             return createTextResult(analyticsService.getEmailAnalytics(sample, config.smtp.username, analyticsDays));
           }
@@ -7362,7 +7406,7 @@ export function createServer(
           // and re-sorting, and recompute busiestDay/insights from the merged
           // results.
           const analyticsPerAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, analyticsDays, analyticsLimit);
               return analyticsService.getEmailAnalytics(sample, bundle.config.smtp.username, analyticsDays);
             }),
@@ -7415,6 +7459,7 @@ export function createServer(
           // meant limit: 5 silently ranked contacts from only 5 messages total.
           const limit = normalizeLimit(args.limit, 100);
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const sample = await getAnalyticsSampleFromIndex(imapService, localIndexService, 30, 3000);
             return createTextResult(analyticsService.getContacts(sample, limit, config.smtp.username));
           }
@@ -7424,7 +7469,7 @@ export function createServer(
           // and keeping the most recent lastContactAt, and re-apply the
           // requested limit over the merged, re-sorted set.
           const contactsPerAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               const sample = await getAnalyticsSampleFromIndex(bundle.imapService, bundle.localIndexService, 30, 3000);
               return analyticsService.getContacts(sample, Number.MAX_SAFE_INTEGER, bundle.config.smtp.username);
             }),
@@ -7436,6 +7481,7 @@ export function createServer(
           const days = normalizeLimit(args.days, 30, 1, 365);
           // Counted in SQL over the whole index (a sample of the newest 3000 messages cut the older days short).
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             await maybeRefreshLocalIndex(imapService, localIndexService, {});
             return createTextResult(await localIndexService.getDailyVolume(days));
           }
@@ -7443,7 +7489,7 @@ export function createServer(
           // independently, then sum count/unreadCount/starredCount/attachmentCount
           // for matching dates across accounts.
           const trendsPerAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {});
               return bundle.localIndexService.getDailyVolume(days);
             }),
@@ -7883,8 +7929,9 @@ export function createServer(
 
         case "get_index_status":
         {
-          const indexStatus = await localIndexService.getStatus();
-          const syncCfg = backgroundSyncService.getStatus();
+          const statusBundle = resolveAccountArg(args) ?? primaryBundle;
+          const indexStatus = await statusBundle.localIndexService.getStatus();
+          const syncCfg = statusBundle.backgroundSyncService.getStatus();
           return createTextResult({
             ...indexStatus,
             // What keeps this index current, so a stale/missing message can be explained:
@@ -7970,6 +8017,7 @@ export function createServer(
         {
           const labelsLimit = normalizeLimit(args.limit, 250);
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             const labels = await localIndexService.getLabels(labelsLimit);
             return createTextResult({
               total: labels.length,
@@ -7981,7 +8029,7 @@ export function createServer(
           // name+type across accounts, so e.g. "INBOX" folders from two accounts
           // combine into one row rather than appearing as unrelated duplicates.
           const perAccountLabels = await Promise.all(
-            accountManager.all().map((bundle) => bundle.localIndexService.getLabels(labelsLimit)),
+            selectedBundles(args).map((bundle) => bundle.localIndexService.getLabels(labelsLimit)),
           );
           const mergedLabels = mergeMailboxLabels(perAccountLabels).slice(0, labelsLimit);
           return createTextResult({
@@ -8000,6 +8048,7 @@ export function createServer(
             offset: optionalInteger(args.offset, 0, 1_000_000),
           };
           if (accountManager.all().length === 1) {
+            resolveAccountArg(args);
             await maybeRefreshLocalIndex(imapService, localIndexService, {
               folder: "INBOX",
               limitPerFolder: 100,
@@ -8018,7 +8067,7 @@ export function createServer(
           // limit across the merged set and sum totals/hasMore.
           const primarySlugForThreads = accountManager.primary().account.slug;
           const threadsPerAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
                 folder: "INBOX",
                 limitPerFolder: 100,
@@ -8071,7 +8120,7 @@ export function createServer(
           // rank within its own account's top-`limit`, since a lower rank there would mean
           // at least `limit` better-or-equal threads exist ahead of it account-wide alone.
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               const refresh = await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
                 force: normalizeBoolean(args.syncBefore, false),
                 folder: "INBOX",
@@ -8134,7 +8183,7 @@ export function createServer(
           // for why requesting `limit`, not limit/accounts, per account is what makes this
           // correct). `counts` is summed across accounts field-by-field.
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
                 force: normalizeBoolean(args.syncBefore, false),
                 folder: "INBOX",
@@ -8203,7 +8252,7 @@ export function createServer(
           // (ageHours, then score) order, and take the top `limit` of the MERGED set —
           // same correctness argument as get_actionable_threads' fan-out.
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
                 force: normalizeBoolean(args.syncBefore, false),
                 folder: "INBOX",
@@ -8272,7 +8321,7 @@ export function createServer(
               ? args.category
               : "document";
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
                 force: normalizeBoolean(args.syncBefore, false),
                 folder: "INBOX",
@@ -8323,7 +8372,7 @@ export function createServer(
           // re-sort by that same recency order, and take the top `limit` of the
           // MERGED set — same correctness argument as get_actionable_threads' fan-out.
           const perAccount = await Promise.all(
-            accountManager.all().map(async (bundle) => {
+            selectedBundles(args).map(async (bundle) => {
               await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, {
                 force: normalizeBoolean(args.syncBefore, false),
                 folder: "INBOX",
