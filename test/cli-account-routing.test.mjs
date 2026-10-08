@@ -81,7 +81,7 @@ test("single-message CLI shortcuts route a <slug>:: id to that account, like the
       assert.equal(secondary.state.connections, 0, `${args[0]} with a plain id must not reach ${slug}`);
     }
   } finally {
-    await Promise.all([primary.close(), secondary.close(), rm(dir, { recursive: true, force: true })]);
+    await Promise.all([primary.close(), secondary.close(), rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })]);
   }
 });
 
@@ -107,6 +107,6 @@ test("runtime policy still gates the shortcuts after routing through the tool ha
     assert.equal(unconfirmed.code, 1);
     assert.match(unconfirmed.stderr, /confirm/i);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

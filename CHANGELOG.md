@@ -18,6 +18,7 @@ Fixes from two independent security reviews of everything changed since 2.3.2, p
 
 ### Changed
 - **A tool result now says when an argument was ignored.** Arguments a tool does not declare were dropped silently, which is why `folder` on `get_threads` did nothing for a long time. The result is unchanged; one extra text block after it names the ignored arguments (at most 10, 64 characters each) and lists what the tool accepts. Nothing is refused, so clients that send extra fields keep working. A test checks that no handler reads an argument its schema leaves out.
+- **Tests that start the CLI clean up with retries.** On Windows the SQLite file can stay locked for a moment after the process exits; one CI run failed on that (`EBUSY` removing the temp directory), not on any behaviour.
 - **Dependencies:** `imapflow` 2.2.11, `mailparser` 3.9.37, `nodemailer` 10.0.16 (lockfile only).
 - **CI** also runs on `ubuntu-26.04` (the `ubuntu-latest` label moves to it between 2026-10-19 and 2026-11-19) and on Node 26 (`engines` says `>=24`; the whole suite passes on 26.11).
 - **Homebrew formula:** the generated formula used `Language::Node.std_npm_install_args`, which `brew audit --strict` rejects; it now uses `std_npm_args`. `brew audit --strict --online` and `brew style` pass, a build from the formula succeeds and the installed binary reports its version.

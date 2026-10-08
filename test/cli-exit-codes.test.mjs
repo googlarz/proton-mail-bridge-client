@@ -47,7 +47,7 @@ test("health commands exit 1 when Bridge is unreachable, with their JSON unchang
     assert.equal(runCli(["runtime-status", "--json"], dir).code, 0);
     assert.equal(runCli(["status", "--json"], dir).code, 0);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

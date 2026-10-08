@@ -50,7 +50,7 @@ test("--help / -h after a command prints help and never runs the command", async
       assert.doesNotMatch(result.stderr, /ECONNREFUSED|Could not connect/);
     }
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -90,7 +90,7 @@ test("get-logs --limit=5 is parsed (the = form reaches the handler)", async () =
     const good = runCli(["get-logs", "--limit=5", "--json"], env);
     assert.equal(good.code, 0, good.stderr);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -111,7 +111,7 @@ test("an unknown flag is a usage error (exit 2) that names it and lists the vali
     const accounts = runCli(["list-accounts", "--checkConnections", "--json"], env);
     assert.notEqual(accounts.code, 2, accounts.stderr);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -130,7 +130,7 @@ test("numeric flags are strict: 5x, 1.5, -1 and a missing value are usage errors
     const offset = runCli(["emails", "--offset=2x"], env);
     assert.equal(offset.code, 2);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -148,7 +148,7 @@ test("bulk-delete and bulk-move refuse to run without a filter (exit 2, before c
     assert.equal(withFilter.code, 1);
     assert.match(withFilter.stderr, /connect/i);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -171,7 +171,7 @@ test("body text is passed through untrimmed (flag, = form and stdin)", async () 
     // All-whitespace stdin is "no body", not an empty draft.
     assert.equal(runCli(["draft-create", "--to=a@b.c", "--subject=s"], env, "  \n\n").code, 1);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -195,7 +195,7 @@ test("a closed stdout pipe (| head) exits 0 without logging an uncaught EPIPE", 
     assert.doesNotMatch(stderr, /EPIPE|Uncaught/);
     assert.equal(code, 0);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 

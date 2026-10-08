@@ -37,7 +37,7 @@ test("with a lock left by a dead process, concurrent waiters still exclude each 
       assert.equal(Number(await readFile(store, "utf8")), callers, `trial ${trial}: an update was lost`);
     }
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -60,7 +60,7 @@ test("a live lock is never stolen, however many waiters there are", async () => 
     );
     assert.equal(maxInside, 1);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -75,6 +75,6 @@ test("an empty lock file left by a holder that died before writing its token is 
     await withFileLock(store, async () => undefined);
     assert.ok(Date.now() - started < 3_000, "waited for the 30 s staleness limit instead of taking the empty lock over");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });

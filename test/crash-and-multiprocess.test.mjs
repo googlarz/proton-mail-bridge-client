@@ -30,7 +30,7 @@ function config(dataDir) {
 
 async function withDir(fn) {
   const dir = await mkdtemp(join(tmpdir(), "crash-test-"));
-  try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true }); }
+  try { await fn(dir); } finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 }
 
 async function waitForFile(path, ms = 15000) {
