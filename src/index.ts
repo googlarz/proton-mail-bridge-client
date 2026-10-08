@@ -2083,6 +2083,36 @@ function parseBodyEdits(value: unknown): BodyEdit[] {
   });
 }
 
+// Arguments a tool does not declare are ignored (clients send extra fields, and refusing them would break
+// those clients), but silently: `folder` on get_threads did nothing for a long time and nobody was told. The
+// result now carries a note naming them, so the caller (usually a model) learns the argument had no effect.
+export function ignoredArguments(toolName: string, args: unknown): string[] {
+  const tool = TOOLS.find((candidate) => candidate.name === toolName);
+  if (!tool || !args || typeof args !== "object" || Array.isArray(args)) {
+    return [];
+  }
+  const declared = new Set(Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}));
+  return Object.keys(args).filter((key) => !declared.has(key));
+}
+
+function withIgnoredArgumentsNote<R extends { params: { name: string; arguments?: unknown } }, T extends { content: unknown[] }>(
+  handler: (request: R) => Promise<T>,
+): (request: R) => Promise<T> {
+  return async (request) => {
+    const result = await handler(request);
+    const ignored = ignoredArguments(request.params.name, request.params.arguments);
+    if (ignored.length === 0) {
+      return result;
+    }
+    logger.warn("Tool call had arguments the tool does not accept", "MCPServer", { name: request.params.name, ignored });
+    const tool = TOOLS.find((candidate) => candidate.name === request.params.name);
+    const accepted = Object.keys((tool?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {});
+    const note = `Note: ${request.params.name} does not accept ${ignored.map((key) => `"${key}"`).join(", ")}; ignored. ` +
+      (accepted.length > 0 ? `It accepts: ${accepted.join(", ")}.` : "It takes no arguments.");
+    return { ...result, content: [...result.content, { type: "text", text: note }] };
+  };
+}
+
 function asObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
@@ -4438,7 +4468,7 @@ export function createServer(
     }
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, withIgnoredArgumentsNote(async (request) => {
     const name = request.params.name;
     const args = asObject(request.params.arguments);
     logger.debug("Handling tool call", "MCPServer", { name, argKeys: Object.keys(args || {}) });
@@ -8835,7 +8865,7 @@ export function createServer(
         ?? "An internal error occurred. Check get_logs for details, or run run_doctor for a full connectivity check.";
       throw new McpError(ErrorCode.InternalError, message);
     }
-  });
+  }));
 
   return {
     server,

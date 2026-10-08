@@ -17,6 +17,10 @@ jobs:
         os: [ubuntu-latest]
         node-version: [24]
         include:
+          # ubuntu-latest moves from Ubuntu 24.04 to 26.04 between 2026-10-19 and 2026-11-19 (actions/runner-images
+          # issue 14748); test the new image now instead of finding out when the label moves.
+          - os: ubuntu-26.04
+            node-version: 24
           # The darwin .mcpb bundle ships to users, so test on macOS too.
           - os: macos-latest
             node-version: 24
