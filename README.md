@@ -682,7 +682,7 @@ To check a real Bridge yourself, run the read-only smoke test: `PROTONMAIL_USERN
 Make sure you're using the **Bridge password**, not your Proton account password. Find it in the Bridge app under Account → Copy password. Bridge must be running before the MCP server or CLI can connect.
 
 **Every tool answers "not configured"**
-`PROTONMAIL_USERNAME` and `PROTONMAIL_PASSWORD` are not set for the server. Since 2.8.0 it still starts without them, lists its tools and answers each call with that message (it used to exit at once, which clients showed as "Connection closed"). Set both (the password is the Bridge password) and restart; `proton-mail-bridge-client setup-claude-desktop` does it for Claude Desktop. Any other configuration mistake, such as a bad port, still stops the server at start.
+`PROTONMAIL_USERNAME` and `PROTONMAIL_PASSWORD` are not set for the server. Since 2.7.2 it still starts without them, lists its tools and answers each call with that message (it used to exit at once, which clients showed as "Connection closed"). Set both (the password is the Bridge password) and restart; `proton-mail-bridge-client setup-claude-desktop` does it for Claude Desktop. Any other configuration mistake, such as a bad port, still stops the server at start.
 
 **macOS native module crash after update**
 `better-sqlite3` is a native binary built for your machine. After a major Node.js upgrade or environment change, rebuild it:
