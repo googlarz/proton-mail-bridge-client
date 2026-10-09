@@ -723,6 +723,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 Bug reports and pull requests welcome: [github.com/googlarz/proton-mail-bridge-client/issues](https://github.com/googlarz/proton-mail-bridge-client/issues)
 
+Testers wanted: some things (answering invitations from Outlook, Proton Calendar and Apple Calendar, Windows and Linux with a real Bridge, `brew install`) could not be verified by the maintainer. See [issue #32](https://github.com/googlarz/proton-mail-bridge-client/issues/32).
+
 ## License
 
 MIT
