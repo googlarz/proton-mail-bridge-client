@@ -801,6 +801,7 @@ const TOOLS = [
           description:
             "Full mailbox path. In Proton Bridge, user folders live under 'Folders/' and labels under 'Labels/'.",
         },
+        account: { type: "string", description: "Account address or slug to act on. A '<slug>::' prefix on the path (as get_folders shows it) does the same. Defaults to the primary account." },
       },
       required: ["path"],
     },
@@ -814,6 +815,7 @@ const TOOLS = [
       properties: {
         path: { type: "string", description: "Existing folder path." },
         newPath: { type: "string", description: "New folder path." },
+        account: { type: "string", description: "Account address or slug to act on. A '<slug>::' prefix on the path (as get_folders shows it) does the same. Defaults to the primary account." },
       },
       required: ["path", "newPath"],
     },
@@ -827,6 +829,7 @@ const TOOLS = [
       type: "object",
       properties: {
         path: { type: "string", description: "Folder path to delete." },
+        account: { type: "string", description: "Account address or slug to act on. A '<slug>::' prefix on the path (as get_folders shows it) does the same. Defaults to the primary account." },
         confirmed: { type: "boolean", description: "Pass true to confirm permanent deletion of the folder and all its messages. Required when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
       required: ["path"],
@@ -1109,6 +1112,7 @@ const TOOLS = [
       type: "object",
       properties: {
         folder: { type: "string", description: "Folder path to empty (e.g. 'Trash', 'Spam')." },
+        account: { type: "string", description: "Account address or slug to act on. A '<slug>::' prefix on the path (as get_folders shows it) does the same. Defaults to the primary account." },
         confirmed: { type: "boolean", description: "Must be true to execute. Call with confirmed:false first to see a preview of what would be deleted." },
       },
       required: ["folder"],
@@ -4292,6 +4296,25 @@ export function createServer(
     return found;
   }
 
+  // The account a folder tool acts on, and its paths without the account prefix. A path may carry the "<slug>::"
+  // prefix get_folders puts on non-primary folders, or the `account` argument names it; with neither it is the
+  // primary account. Two different accounts in one call (a prefix against `account`, or two prefixes) are refused.
+  function resolveFolderTarget(args: Record<string, unknown>, ...paths: string[]): { bundle: AccountBundle; paths: string[] } {
+    let bundle = resolveAccountArg(args);
+    const rests = paths.map((path) => {
+      const { accountSlug, rest } = splitAccountPrefix(path, accountManager.additionalSlugs());
+      if (accountSlug) {
+        const named = accountManager.bySlugOrPrimary(accountSlug);
+        if (bundle && bundle !== named) {
+          throw new McpError(ErrorCode.InvalidParams, "The folder paths and the account argument name different accounts.");
+        }
+        bundle = named;
+      }
+      return rest;
+    });
+    return { bundle: bundle ?? primaryBundle, paths: rests };
+  }
+
   // The accounts a triage or statistics tool covers: the one named by `account`, else all of them.
   function selectedBundles(args: Record<string, unknown>): AccountBundle[] {
     const one = resolveAccountArg(args);
@@ -6693,11 +6716,11 @@ export function createServer(
             );
           }
           ensureEmailActionAllowed(config.runtime, "delete");
-          const folder = requireString(args, "folder");
+          const { bundle: emptyBundle, paths: [folder] } = resolveFolderTarget(args, requireString(args, "folder"));
           const confirmed = normalizeBoolean(args.confirmed, false);
           if (!confirmed) {
             ensureDestructiveConfirmed(config.runtime, confirmed, "Delete all messages in folder " + folder);
-            const stats = await imapService.getFolderStats(folder);
+            const stats = await emptyBundle.imapService.getFolderStats(folder);
             return createTextResult({
               preview: true,
               folder,
@@ -6706,8 +6729,8 @@ export function createServer(
             });
           }
           ensureDestructiveConfirmed(config.runtime, confirmed, "Delete all messages in folder " + folder);
-          const result = await withAudit(auditService, name, args, async () =>
-            imapService.emptyFolder(folder),
+          const result = await withAudit(emptyBundle.auditService, name, args, async () =>
+            emptyBundle.imapService.emptyFolder(folder),
           );
           return createTextResult(result);
         }
@@ -7191,33 +7214,36 @@ export function createServer(
         case "sync_folders":
           return createTextResult(await (resolveAccountArg(args) ?? primaryBundle).imapService.syncFolders());
 
-        case "create_folder":
+        case "create_folder": {
           ensureMailboxWriteAllowed(config.runtime);
+          const { bundle: folderBundle, paths: [folderPath] } = resolveFolderTarget(args, requireString(args, "path"));
           return createTextResult(
-            await withAudit(auditService, name, args, async () =>
-              imapService.createFolder(requireString(args, "path")),
+            await withAudit(folderBundle.auditService, name, args, async () =>
+              folderBundle.imapService.createFolder(folderPath),
             ),
           );
+        }
 
-        case "rename_folder":
+        case "rename_folder": {
           ensureMailboxWriteAllowed(config.runtime);
+          const { bundle: folderBundle, paths: [fromPath, toPath] } = resolveFolderTarget(args, requireString(args, "path"), requireString(args, "newPath"));
           return createTextResult(
-            await withAudit(auditService, name, args, async () =>
-              imapService.renameFolder(
-                requireString(args, "path"),
-                requireString(args, "newPath"),
-              ),
+            await withAudit(folderBundle.auditService, name, args, async () =>
+              folderBundle.imapService.renameFolder(fromPath, toPath),
             ),
           );
+        }
 
-        case "delete_folder":
+        case "delete_folder": {
           ensureEmailActionAllowed(config.runtime, "delete");
+          const { bundle: folderBundle, paths: [folderPath] } = resolveFolderTarget(args, requireString(args, "path"));
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args?.confirmed, false), "Permanently delete folder and all messages in it: " + requireString(args, "path"));
           return createTextResult(
-            await withAudit(auditService, name, args, async () =>
-              imapService.deleteFolder(requireString(args, "path")),
+            await withAudit(folderBundle.auditService, name, args, async () =>
+              folderBundle.imapService.deleteFolder(folderPath),
             ),
           );
+        }
 
         case "mark_email_read": {
           ensureEmailActionAllowed(

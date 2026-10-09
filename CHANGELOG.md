@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [2.8.2] — 2026-10-09
+
+`create_folder`, `rename_folder`, `delete_folder` and `empty_folder` now act on the account you name: with the `<slug>::` prefix `get_folders` shows on a non-primary account's folders (`dawid-piaskowski-pm-me::Folders/Receipts`), or with the `account` argument. They used to read the prefix as part of the folder name and always worked on the primary account, so the call was refused by Bridge. A prefix and an `account` that name different accounts are refused before anything is touched; text that only looks like a prefix stays part of the path. Found while testing folders with accents and three levels of nesting on a real Bridge. Also: the `.dockerignore` build-hygiene test passes when the file is absent (the OSS Scanner checkout has none), and the README links the call for testers.
+
 ## [2.8.1] — 2026-10-08
 
 Hardening found by a second review of the 2.8.0 invitation code: copied calendar lines lose control characters and the Unicode line separators and are capped at 500 characters; the ORGANIZER line is rebuilt (its foreign parameters and `?cc=` part are not passed on); an invitation that names another of your accounts is still answered from the account that holds the message; a reply reminder is settled only by a message from one of the people you wrote to, so a forged In-Reply-To cannot silence it. The digest's `countsNote` now says that `staleAwaitingYou` covers the whole index while the other counts cover the newest 5000 messages.
