@@ -110,7 +110,8 @@ test("every package the source imports is a runtime dependency, not a devDepende
 test(".dockerignore does not exclude what the image build compiles", async () => {
   // The Dockerfile copies the context and runs `npm run build`, which compiles src/ with tsconfig.json.
   // Ignoring src made the build fail with "No inputs were found in config file".
-  const ignored = (await read(".dockerignore")).split(/\r?\n/).map((line) => line.trim().replace(/\/$/, ""));
+  // No .dockerignore (the scanner's checkout has none) excludes nothing, which is fine.
+  const ignored = (await read(".dockerignore").catch((error) => (error.code === "ENOENT" ? "" : Promise.reject(error)))).split(/\r?\n/).map((line) => line.trim().replace(/\/$/, ""));
   for (const needed of ["src", "tsconfig.json", "package.json", "package-lock.json"]) {
     assert.equal(ignored.includes(needed), false, `${needed} must not be in .dockerignore`);
   }
