@@ -1075,11 +1075,11 @@ export function decodeAttachmentText(content: Buffer, declaredCharset?: string):
 }
 
 export function isTextLikeMimeType(mimeType?: string): boolean {
-  if (!mimeType) {
+  const normalized = mimeHeaderString(mimeType).toLowerCase();
+  if (!normalized) {
     return false;
   }
 
-  const normalized = mimeType.toLowerCase();
   return (
     normalized.startsWith("text/") ||
     normalized.includes("json") ||
@@ -1089,16 +1089,36 @@ export function isTextLikeMimeType(mimeType?: string): boolean {
   );
 }
 
+// MIME header values that are typed as strings are not always strings at runtime: for some
+// malformed legacy messages the parsed attachment carries a structured value instead (an object
+// with `value`, or an array). Calling `.toLowerCase()` on that threw "contentType?.toLowerCase is
+// not a function" and aborted the whole folder's index sync. Reduce such a value to its string
+// form, and to "" when there is none.
+export function mimeHeaderString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const text = mimeHeaderString(entry);
+      if (text) return text;
+    }
+    return "";
+  }
+  if (value && typeof value === "object" && typeof (value as { value?: unknown }).value === "string") {
+    return (value as { value: string }).value;
+  }
+  return "";
+}
+
 export function classifyAttachment(input: {
   filename?: string;
   contentType?: string;
   disposition?: string;
   cid?: string;
 }): Pick<EmailAttachmentSummary, "kind" | "isCalendarInvite" | "isSignature"> {
-  const filename = input.filename?.toLowerCase() || "";
-  const contentType = input.contentType?.toLowerCase() || "";
-  const disposition = input.disposition?.toLowerCase() || "";
-  const cid = input.cid?.toLowerCase() || "";
+  const filename = mimeHeaderString(input.filename).toLowerCase();
+  const contentType = mimeHeaderString(input.contentType).toLowerCase();
+  const disposition = mimeHeaderString(input.disposition).toLowerCase();
+  const cid = mimeHeaderString(input.cid).toLowerCase();
 
   const isCalendarInvite =
     contentType === "text/calendar" || filename.endsWith(".ics") || filename.endsWith(".ifb");

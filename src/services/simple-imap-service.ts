@@ -26,6 +26,7 @@ import {
   extractMessageIdList,
   isSelfAddress,
   isTextLikeMimeType,
+  mimeHeaderString,
   mapEnvelopeAddresses,
   mapParsedAddresses,
   labelMatchesFolder,
@@ -1944,7 +1945,7 @@ export class SimpleIMAPService {
     if (!attachment.content || attachment.content.length === 0 || attachment.content.length > MAX_ATTACHMENT_TEXT_BYTES) {
       return undefined;
     }
-    const contentType = attachment.contentType?.toLowerCase();
+    const contentType = mimeHeaderString(attachment.contentType).toLowerCase() || undefined;
     if (contentType === "text/html" || contentType === "text/calendar" || isTextLikeMimeType(attachment.contentType)) {
       const text = decodeAttachmentText(attachment.content, attachment.charset);
       if (text === undefined) return undefined;
@@ -4299,7 +4300,7 @@ export class SimpleIMAPService {
           return [];
         }
 
-        const contentType = attachment.contentType?.toLowerCase();
+        const contentType = mimeHeaderString(attachment.contentType).toLowerCase() || undefined;
         if (contentType === "text/html") {
           return [stripHtmlToText(attachment.content.toString("utf8")) || ""];
         }
