@@ -623,6 +623,12 @@ export function planFolderSync(input: {
       startUid: Math.max(1, Math.min(highestKnownUid, knownHighUid) - overlap + 1),
       endUid: highestKnownUid,
       highestKnownUid,
+      // Keep the full-sync backfill floor. An incremental sync never walks history, so it
+      // has no business resetting it — but the checkpoint is written from this plan, and
+      // without the field it was stored as NULL. A background sync tick in the middle of
+      // a full:true backfill then sent the next full call back to the newest UIDs, and on
+      // a large folder the backfill never finished.
+      backfilledToUid: input.checkpoint.backfilledToUid,
     };
   }
 
@@ -645,6 +651,8 @@ export function planFolderSync(input: {
     endUid,
     highestKnownUid,
     incrementalResumeUid: reachesTop ? undefined : endUid,
+    // Same as the incremental window above: carry the backfill floor through.
+    backfilledToUid: input.checkpoint.backfilledToUid,
   };
 }
 

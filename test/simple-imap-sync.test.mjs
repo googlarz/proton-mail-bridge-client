@@ -193,6 +193,87 @@ test("planFolderSync full:true continues backfilling older than the last window 
   assert.equal(plan.backfilledToUid, 44750);
 });
 
+test("planFolderSync incremental sync keeps the backfill floor of a running full:true backfill", () => {
+  // A background (incremental) sync tick between two full:true backfill calls used to
+  // plan without backfilledToUid; the checkpoint was then stored with a NULL floor and
+  // the next full:true call restarted at the newest UIDs, so a large folder never
+  // finished backfilling.
+  const checkpoint = {
+    folder: "INBOX",
+    uidValidity: "999",
+    uidNext: 96613,
+    highestUid: 96612,
+    total: 96610,
+    lastSyncAt: "2026-10-14T04:00:00.000Z",
+    backfilledToUid: 93613,
+  };
+  const windowPlan = planFolderSync({
+    folder: "INBOX",
+    exists: 96610,
+    uidNext: 96613,
+    uidValidity: "999",
+    full: false,
+    limit: 100,
+    checkpoint,
+  });
+  assert.equal(windowPlan.strategy, "incremental_window");
+  assert.equal(windowPlan.backfilledToUid, 93613);
+
+  const newMailPlan = planFolderSync({
+    folder: "INBOX",
+    exists: 96612,
+    uidNext: 96615,
+    uidValidity: "999",
+    full: false,
+    limit: 100,
+    checkpoint,
+  });
+  assert.equal(newMailPlan.strategy, "incremental");
+  assert.equal(newMailPlan.backfilledToUid, 93613);
+});
+
+test("planFolderSync bounded incremental catch-up keeps the backfill floor", () => {
+  const plan = planFolderSync({
+    folder: "INBOX",
+    exists: 2000,
+    uidNext: 5001,
+    uidValidity: "999",
+    full: false,
+    limit: 50,
+    checkpoint: {
+      folder: "INBOX",
+      uidValidity: "999",
+      uidNext: 1001,
+      highestUid: 1000,
+      lastSyncAt: "2026-10-14T04:00:00.000Z",
+      backfilledToUid: 400,
+    },
+  });
+  assert.equal(plan.strategy, "incremental");
+  assert.notEqual(plan.incrementalResumeUid, undefined);
+  assert.equal(plan.backfilledToUid, 400);
+});
+
+test("planFolderSync full:true backfill continues below the floor after an incremental tick in between", () => {
+  const base = { folder: "INBOX", exists: 96610, uidNext: 96613, uidValidity: "999", limit: 500 };
+  const toCheckpoint = (plan) => ({
+    folder: "INBOX",
+    uidValidity: "999",
+    uidNext: 96613,
+    highestUid: plan.highestKnownUid,
+    total: 96610,
+    lastSyncAt: "2026-10-14T04:00:00.000Z",
+    lastFullSyncAt: "2026-10-14T04:00:00.000Z",
+    backfilledToUid: plan.backfilledToUid,
+  });
+  const first = planFolderSync({ ...base, full: true });
+  const tick = planFolderSync({ ...base, full: false, limit: 100, checkpoint: toCheckpoint(first) });
+  const second = planFolderSync({ ...base, full: true, checkpoint: toCheckpoint(tick) });
+  assert.equal(first.startUid, 96113);
+  assert.equal(second.endUid, 96112, "the next backfill window must continue right below the previous one");
+  assert.equal(second.startUid, 95613);
+});
+
 test("planFolderSync full:true reports no more work once backfilled to UID 1 and no new mail arrived", () => {
   const plan = planFolderSync({
     folder: "Archive",
