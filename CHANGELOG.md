@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.11.0] — 2026-10-16
+
 **`get_attachment_text` reads PDFs** (#39, idea 1). The text comes back page by page, each page headed `--- Page N of M ---`. PDFs have their own limits instead of the 512 KB text cap: `PROTONMAIL_PDF_MAX_MB` (default 10) and `PROTONMAIL_PDF_MAX_PAGES` (default 50). A longer PDF is cut off with a closing line saying how many pages are missing, and the result's `pdf` field reports `totalPages`, `extractedPages`, `omittedPages` and `truncated`. A password-protected PDF, a damaged file and a scan without a text layer each fail with one plain sentence instead of a pdf.js stack. A PDF sent as `application/octet-stream` is recognised by its `%PDF-` header. Extraction uses `unpdf` (pure JavaScript, no native module or install script), runs in memory, makes no network request and stops after 30 seconds. `get_attachment_content`'s `text` field is unchanged.
 
 From reports by zotabee (#38) and Ch7os (#34, #35, #41):
