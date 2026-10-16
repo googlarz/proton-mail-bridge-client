@@ -35,8 +35,8 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
 > **No terminal?** Follow the [step-by-step guide](docs/install-for-non-developers.md) instead.
 
 1. **Install and sign in to [Proton Mail Bridge](https://proton.me/mail/bridge)**, and leave it running. In the Bridge app, open your account and copy the **Bridge password** (it is not your Proton password).
-2. **Connect Claude Desktop**, either way:
-   - **Bundle:** download the `proton-mail-bridge-client-<your-os>.mcpb` for macOS (`darwin-arm64` Apple silicon, `darwin-x64` Intel), Linux (`linux-x64`, `linux-arm64`) or Windows (`win32-x64`) from the [latest release](https://github.com/googlarz/proton-mail-bridge-client/releases/latest) and open it. Claude Desktop asks for your Proton address and the Bridge password, plus optional settings (Bridge IMAP/SMTP host and port, read-only, allow sending, signature, extra accounts, data and download folders, tool tier); the defaults match a standard Bridge install.
+2. **Connect Claude Desktop**, either way (quit Claude Desktop completely first, so it does not overwrite the config on exit):
+   - **Bundle** (needs Node.js 24 or later on the machine): download the `proton-mail-bridge-client-<your-os>.mcpb` for macOS (`darwin-arm64` Apple silicon, `darwin-x64` Intel), Linux (`linux-x64`, `linux-arm64`) or Windows (`win32-x64`) from the [latest release](https://github.com/googlarz/proton-mail-bridge-client/releases/latest) and open it. Claude Desktop asks for your Proton address and the Bridge password, plus optional settings (Bridge IMAP/SMTP host and port, read-only, allow sending, signature, extra accounts, data and download folders, tool tier); the defaults match a standard Bridge install.
    - **npm:** `npm install -g proton-mail-bridge-client`, then `proton-mail-bridge-client setup-claude-desktop` (it checks your Bridge ports and writes the config). Fully quit and reopen Claude Desktop afterwards.
 3. **Check it works:** run `proton-mail-bridge-client doctor`, or ask Claude "run the Proton Mail doctor".
 4. **Try these prompts:**
@@ -81,7 +81,7 @@ Download: [proton.me/mail/bridge](https://proton.me/mail/bridge)
 
 **3. Your Bridge credentials** — from the Bridge app:
 - IMAP host/port (default: `127.0.0.1:1143`)
-- SMTP host/port (default: `127.0.0.1:1025`)
+- SMTP host/port (default: `127.0.0.1:1025`); the IMAP and SMTP password is the same Bridge password
 - Username (your Proton email address)
 - Bridge password (see note above)
 
@@ -479,7 +479,7 @@ PROTONMAIL_IMAP_PORT='1143'
 PROTONMAIL_IMAP_SECURE='false'
 PROTONMAIL_SMTP_HOST='127.0.0.1'
 PROTONMAIL_SMTP_PORT='1025'
-PROTONMAIL_SMTP_SECURE='true'         # Bridge's local SMTP port requires implicit TLS from the first byte; set false only for a non-Bridge SMTP relay
+PROTONMAIL_SMTP_SECURE='true'         # true = implicit TLS, false = STARTTLS. Unset, the server tries the other mode itself if Bridge's SMTP mode differs
 PROTONMAIL_IMAP_USERNAME=''           # optional: log in to IMAP as a different user than PROTONMAIL_USERNAME (default: the same). The send identity, and RESTRICT_OUTBOUND_TO_SELF, still use PROTONMAIL_USERNAME.
 PROTONMAIL_IMAP_PASSWORD=''           # optional: a different IMAP password than PROTONMAIL_PASSWORD (default: the same)
 

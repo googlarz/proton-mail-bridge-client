@@ -16,6 +16,7 @@ From reports by zotabee (#38) and Ch7os (#34, #35, #41):
 - **`*_COMMAND` variables work again** with commands that need a shell (`PROTONMAIL_PASSWORD_COMMAND` and friends).
 - **Claude Desktop installer finds the Microsoft Store (MSIX) config** on Windows; no more writing to a path the app ignores.
 - **The README multi-account example is valid**: `PROTONMAIL_ACCOUNTS_JSON` lists only the additional accounts, and a duplicated primary address now says so in the error.
+- **README:** the bundle needs Node.js 24+, quit Claude Desktop before setup, the Bridge password serves IMAP and SMTP, and the `PROTONMAIL_SMTP_SECURE` description matches the new fallback.
 - **No more `chmod` warning for a missing `-wal`/`-shm` file.**
 - **Multi-account sync no longer fails on a folder one account lacks** (#40): a folder missing from an explicit list is skipped and reported as `skippedFolders`. Each entry in `PROTONMAIL_ACCOUNTS_JSON` can also set its own `autoSyncFolder`.
 - **Passwords for additional accounts can come from a file or a command** (#37): `passwordFile` / `passwordCommand` instead of `password`.
