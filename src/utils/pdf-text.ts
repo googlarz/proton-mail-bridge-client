@@ -1,0 +1,142 @@
+import { getDocumentProxy } from "unpdf";
+
+// PDF text extraction for get_attachment_text. unpdf ships a serverless build of
+// pdf.js: pure JavaScript, no native module, no worker thread. Everything happens
+// in memory; nothing is written to disk and nothing is fetched (no font or CMap
+// URLs are configured, so pdf.js has nothing to download).
+
+export const DEFAULT_PDF_MAX_MB = 10;
+export const DEFAULT_PDF_MAX_PAGES = 50;
+export const PDF_EXTRACTION_TIMEOUT_MS = 30_000;
+
+export interface PdfTextOptions {
+  maxPages?: number;
+  timeoutMs?: number;
+}
+
+export interface PdfTextResult {
+  text: string;
+  totalPages: number;
+  extractedPages: number;
+  /** Pages past maxPages that were not read. 0 when the whole document was read. */
+  omittedPages: number;
+  truncated: boolean;
+}
+
+/** A PDF that cannot be read as text, with a message meant for the user, not a stack trace. */
+export class PdfTextError extends Error {
+  constructor(
+    readonly reason: "encrypted" | "invalid" | "no-text-layer" | "timeout",
+    message: string,
+  ) {
+    super(message);
+    this.name = "PdfTextError";
+  }
+}
+
+export function looksLikePdf(content: Buffer, contentType?: string, filename?: string): boolean {
+  if (contentType === "application/pdf" || contentType === "application/x-pdf") return true;
+  // Mail clients often send PDFs as application/octet-stream; trust the file's own header then.
+  const hasPdfHeader = content.subarray(0, 1024).includes("%PDF-");
+  return hasPdfHeader && (!contentType || contentType === "application/octet-stream" || /\.pdf$/i.test(filename ?? ""));
+}
+
+export async function extractPdfText(content: Buffer, options: PdfTextOptions = {}): Promise<PdfTextResult> {
+  const maxPages = options.maxPages ?? DEFAULT_PDF_MAX_PAGES;
+  const timeoutMs = options.timeoutMs ?? PDF_EXTRACTION_TIMEOUT_MS;
+  let timer: NodeJS.Timeout | undefined;
+  let timedOut = false;
+  let destroy: (() => Promise<void>) | undefined;
+
+  const work = (async (): Promise<PdfTextResult> => {
+    let pdf: Awaited<ReturnType<typeof getDocumentProxy>>;
+    try {
+      // pdf.js may detach the buffer it is given, so it gets a copy.
+      pdf = await getDocumentProxy(new Uint8Array(content), {
+        useSystemFonts: false,
+        disableFontFace: true,
+        useWorkerFetch: false,
+        isOffscreenCanvasSupported: false,
+        enableXfa: false,
+        verbosity: 0,
+      });
+    } catch (error) {
+      throw toPdfTextError(error);
+    }
+    destroy = () => pdf.loadingTask.destroy();
+    try {
+      const totalPages = pdf.numPages;
+      const extractedPages = Math.min(totalPages, maxPages);
+      const pages: string[] = [];
+      let anyText = false;
+      for (let pageNumber = 1; pageNumber <= extractedPages; pageNumber += 1) {
+        if (timedOut) break;
+        const page = await pdf.getPage(pageNumber);
+        const content = await page.getTextContent();
+        const pageText = textContentToString(content.items);
+        page.cleanup();
+        if (pageText.trim()) anyText = true;
+        pages.push(`--- Page ${pageNumber} of ${totalPages} ---\n${pageText.trim()}`);
+      }
+      if (!anyText) {
+        throw new PdfTextError(
+          "no-text-layer",
+          "The PDF has no text layer (it is probably a scan or contains only images), so there is no text to extract.",
+        );
+      }
+      const omittedPages = totalPages - extractedPages;
+      if (omittedPages > 0) {
+        pages.push(
+          `--- Truncated: read ${extractedPages} of ${totalPages} pages; ${omittedPages} page${omittedPages === 1 ? "" : "s"} not included (limit PROTONMAIL_PDF_MAX_PAGES=${maxPages}) ---`,
+        );
+      }
+      return { text: pages.join("\n\n"), totalPages, extractedPages, omittedPages, truncated: omittedPages > 0 };
+    } catch (error) {
+      throw toPdfTextError(error);
+    } finally {
+      await pdf.loadingTask.destroy().catch(() => {});
+    }
+  })();
+
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      void destroy?.().catch(() => {});
+      reject(new PdfTextError("timeout", `Reading the PDF took longer than ${Math.round(timeoutMs / 1000)} seconds and was stopped.`));
+    }, timeoutMs);
+    timer.unref?.();
+  });
+
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    // The losing promise must not surface as an unhandled rejection.
+    work.catch(() => {});
+  }
+}
+
+type TextItem = { str?: string; hasEOL?: boolean };
+
+function textContentToString(items: readonly unknown[]): string {
+  let out = "";
+  for (const raw of items) {
+    const item = raw as TextItem;
+    if (typeof item.str !== "string") continue;
+    out += item.str;
+    if (item.hasEOL) out += "\n";
+  }
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
+}
+
+function toPdfTextError(error: unknown): Error {
+  if (error instanceof PdfTextError) return error;
+  const name = (error as { name?: string } | undefined)?.name ?? "";
+  if (name === "PasswordException") {
+    return new PdfTextError("encrypted", "The PDF is password-protected, so its text cannot be read.");
+  }
+  // InvalidPDFException, FormatError, MissingPDFException, UnknownErrorException and
+  // anything else pdf.js throws on a damaged file: one plain message, no stack.
+  const detail = error instanceof Error && error.message ? ` (${error.message})` : "";
+  return new PdfTextError("invalid", `The PDF could not be read; the file looks damaged or is not a valid PDF${detail}.`);
+}

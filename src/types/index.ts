@@ -556,6 +556,10 @@ export interface ProtonRuntimeConfig {
   restrictOutboundToSelf: boolean;
   allowFileDownloadDir?: string;
   maxInlineBytes: number;
+  /** Size limit in MB for PDF text extraction in get_attachment_text (PROTONMAIL_PDF_MAX_MB, default 10). */
+  pdfMaxMb?: number;
+  /** Pages read from a PDF before the text is cut off (PROTONMAIL_PDF_MAX_PAGES, default 50). */
+  pdfMaxPages?: number;
   opDelayMs: number;
   // Undo-send window: 0 disables (send immediately, current default behavior).
   // When >0, send_email queues instead of sending immediately, cancelable via

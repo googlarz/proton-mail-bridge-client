@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+**`get_attachment_text` reads PDFs** (#39, idea 1). The text comes back page by page, each page headed `--- Page N of M ---`. PDFs have their own limits instead of the 512 KB text cap: `PROTONMAIL_PDF_MAX_MB` (default 10) and `PROTONMAIL_PDF_MAX_PAGES` (default 50). A longer PDF is cut off with a closing line saying how many pages are missing, and the result's `pdf` field reports `totalPages`, `extractedPages`, `omittedPages` and `truncated`. A password-protected PDF, a damaged file and a scan without a text layer each fail with one plain sentence instead of a pdf.js stack. A PDF sent as `application/octet-stream` is recognised by its `%PDF-` header. Extraction uses `unpdf` (pure JavaScript, no native module or install script), runs in memory, makes no network request and stops after 30 seconds. `get_attachment_content`'s `text` field is unchanged.
+
 ## [2.10.0] — 2026-10-15
 
 **`PROTONMAIL_MODE` is now a floor, and the Claude Desktop bundle has a *Safety mode* setting.** In 2.9.0 a flag you set explicitly won over the mode; the bundle always sends read-only and allow-sending explicitly, so a mode picked there would have been ignored. Now the other flags can make a mode stricter but never looser (`drafts` with `PROTONMAIL_ALLOW_SEND=true` still does not send; `assisted` drops `delete` from an allowlist that names it). If you want a combination no mode gives you, leave the mode unset and use the flags. An unfilled `${user_config.mode}` from a host that does not substitute it counts as no mode.

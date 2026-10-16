@@ -78,6 +78,7 @@ import {
 } from "./utils/helpers.js";
 import { AccountManager, type AccountBundle } from "./services/account-manager.js";
 import { logger } from "./utils/logger.js";
+import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES } from "./utils/pdf-text.js";
 import {
   ensureDestructiveConfirmed,
   ensureEmailActionAllowed,
@@ -1822,7 +1823,7 @@ const TOOLS = [
   },
   {
     name: "get_attachment_text",
-    description: "Extract plain text from a text-like attachment (text/plain, text/csv, text/markdown, application/json, application/xml, text/html stripped of markup, text/calendar summarized) without dealing with base64 encoding. Not gated by the smaller inline-base64 size limit that get_attachment_content uses — bounded separately at 512KB of raw content. Fails clearly for non-text formats (e.g. PDF, images) — use get_attachment_content or save_attachment for those.",
+    description: "Extract plain text from a text-like attachment (text/plain, text/csv, text/markdown, application/json, application/xml, text/html stripped of markup, text/calendar summarized) or a PDF, without dealing with base64 encoding. PDF text comes back page by page with a \"--- Page N of M ---\" marker before each page; a PDF is bounded by PROTONMAIL_PDF_MAX_MB (default 10) and PROTONMAIL_PDF_MAX_PAGES (default 50), and a longer one is cut off with a note saying how many pages are missing (the pdf field reports totalPages and omittedPages). Password-protected, damaged and scanned PDFs without a text layer fail with a plain explanation. Other text formats are not gated by the smaller inline-base64 size limit that get_attachment_content uses — bounded separately at 512KB of raw content. Fails clearly for images and other non-text formats — use get_attachment_content or save_attachment for those.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -4283,6 +4284,8 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       restrictOutboundToSelf,
       allowFileDownloadDir,
       maxInlineBytes: parseIntegerEnv("PROTONMAIL_MAX_INLINE_BYTES", 40, 1, 10240),
+      pdfMaxMb: parseIntegerEnv("PROTONMAIL_PDF_MAX_MB", DEFAULT_PDF_MAX_MB, 1, 100),
+      pdfMaxPages: parseIntegerEnv("PROTONMAIL_PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, 1, 2000),
       opDelayMs,
       sendDelaySeconds,
     },

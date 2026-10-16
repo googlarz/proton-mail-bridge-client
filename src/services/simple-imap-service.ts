@@ -52,6 +52,7 @@ import {
 } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
+import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES, extractPdfText, looksLikePdf, PdfTextError } from "../utils/pdf-text.js";
 
 const FETCH_SUMMARY_QUERY = {
   uid: true,
@@ -108,6 +109,22 @@ const FETCH_INDEX_DETAIL_QUERY = {
 } as const;
 
 const MAX_ATTACHMENT_TEXT_BYTES = 512_000;
+
+function attachmentSummary(attachment: AttachmentContentResult["attachment"]): AttachmentContentResult["attachment"] {
+  return {
+    id: attachment.id,
+    filename: attachment.filename,
+    contentType: attachment.contentType,
+    size: attachment.size,
+    disposition: attachment.disposition,
+    cid: attachment.cid,
+    checksum: attachment.checksum,
+    isInline: attachment.isInline,
+    kind: attachment.kind,
+    isCalendarInvite: attachment.isCalendarInvite,
+    isSignature: attachment.isSignature,
+  };
+}
 // searchEmails' local-filter branch batches its detail fetch independently of the
 // caller's result `limit` (see the comment above that loop) — this is the floor on
 // each network batch so a small limit (e.g. 1) can't degrade into one `fetch` call
@@ -2043,15 +2060,21 @@ export class SimpleIMAPService {
   // maxInlineBytes limit (assertAttachmentWithinInlineLimit) — that guard exists
   // to bound base64 payload size, which is a different (larger) concern than
   // returning plain extracted text. Gated instead by MAX_ATTACHMENT_TEXT_BYTES,
-  // same as getAttachmentContent's own text field. text/* MIME types only for
-  // now (PDF extraction would need a new dependency — deliberately out of scope,
-  // avoids re-triggering the CI allowScripts/native-binding issues just fixed).
+  // same as getAttachmentContent's own text field. PDFs have their own size
+  // limit (PROTONMAIL_PDF_MAX_MB) and page limit (PROTONMAIL_PDF_MAX_PAGES) and
+  // go through unpdf, which is pure JavaScript (no native binding, no install
+  // script). Only this tool extracts PDF text; getAttachmentContent's text field
+  // stays text/* only.
   async getAttachmentText(emailId: string, attachmentId: string): Promise<{
     emailId: string;
     attachment: AttachmentContentResult["attachment"];
     text?: string;
+    pdf?: { totalPages: number; extractedPages: number; omittedPages: number; truncated: boolean };
   }> {
     const attachment = await this.getParsedAttachment(emailId, attachmentId);
+    if (attachment.content && attachment.content.length > 0 && looksLikePdf(attachment.content, mimeHeaderString(attachment.contentType).toLowerCase() || undefined, attachment.filename)) {
+      return { emailId, attachment: attachmentSummary(attachment), ...(await this.extractPdfAttachmentText(attachment, attachmentId)) };
+    }
     const text = this.extractAttachmentText(attachment);
     if (text === undefined) {
       const reason =
@@ -2065,21 +2088,41 @@ export class SimpleIMAPService {
 
     return {
       emailId,
-      attachment: {
-        id: attachment.id,
-        filename: attachment.filename,
-        contentType: attachment.contentType,
-        size: attachment.size,
-        disposition: attachment.disposition,
-        cid: attachment.cid,
-        checksum: attachment.checksum,
-        isInline: attachment.isInline,
-        kind: attachment.kind,
-        isCalendarInvite: attachment.isCalendarInvite,
-        isSignature: attachment.isSignature,
-      },
+      attachment: attachmentSummary(attachment),
       text,
     };
+  }
+
+  private async extractPdfAttachmentText(
+    attachment: { content: Buffer },
+    attachmentId: string,
+  ): Promise<{ text: string; pdf: { totalPages: number; extractedPages: number; omittedPages: number; truncated: boolean } }> {
+    const maxMb = this.config.runtime?.pdfMaxMb ?? DEFAULT_PDF_MAX_MB;
+    if (attachment.content.length > maxMb * 1024 * 1024) {
+      const sizeMb = (attachment.content.length / (1024 * 1024)).toFixed(1);
+      throw new Error(
+        `Cannot extract text from attachment ${attachmentId}: the PDF is ${sizeMb} MB, above the ${maxMb} MB limit for PDF text extraction (PROTONMAIL_PDF_MAX_MB). Use save_attachment instead.`,
+      );
+    }
+    try {
+      const result = await extractPdfText(attachment.content, {
+        maxPages: this.config.runtime?.pdfMaxPages ?? DEFAULT_PDF_MAX_PAGES,
+      });
+      return {
+        text: result.text,
+        pdf: {
+          totalPages: result.totalPages,
+          extractedPages: result.extractedPages,
+          omittedPages: result.omittedPages,
+          truncated: result.truncated,
+        },
+      };
+    } catch (error) {
+      if (error instanceof PdfTextError) {
+        throw new Error(`Cannot extract text from attachment ${attachmentId}: ${error.message} Use get_attachment_content or save_attachment instead.`);
+      }
+      throw error;
+    }
   }
 
   async saveAttachment(

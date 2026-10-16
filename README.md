@@ -528,6 +528,11 @@ PROTONMAIL_SYNC_INTERVAL_MINUTES='5'
 PROTONMAIL_IDLE_WATCH='true'
 PROTONMAIL_IDLE_MAX_SECONDS='30'
 
+# Attachments
+PROTONMAIL_MAX_INLINE_BYTES='40'      # in KB: largest attachment get_attachment_content returns inline as base64
+PROTONMAIL_PDF_MAX_MB='10'            # largest PDF get_attachment_text extracts text from (1-100 MB); bigger ones are refused with a message
+PROTONMAIL_PDF_MAX_PAGES='50'         # pages get_attachment_text reads from a PDF (1-2000); a longer PDF is cut off with a note saying how many pages are missing
+
 # Tuning and diagnostics
 PROTONMAIL_OP_DELAY_MS='0'            # minimum gap in ms between IMAP mailbox operations (0-5000); raise it to be gentler on a slow Bridge. 0 = no throttling
 PROTONMAIL_DEBUG='false'              # true: get_connection_status and run_doctor include the raw underlying connection error text (otherwise only a classified cause and suggestion)
@@ -548,7 +553,7 @@ With several accounts or a signature, the server sends from whichever `from` the
 | Search and read | Native Claude UX | IMAP + local index |
 | Send email | No | Yes |
 | Draft workflows | Better first-party UX | Full control incl. remote draft sync |
-| Attachment content | Limited | Fetch and save to disk |
+| Attachment content | Limited | Fetch, save to disk, read text from PDFs |
 | Mailbox actions | Limited | Full (star, move, archive, trash, restore, delete, batch) |
 | Folder management | No | Yes (create, rename, delete) |
 | CLI access | No | Full parity with MCP |
@@ -593,6 +598,8 @@ With several accounts or a signature, the server sends from whichever `from` the
 
 ### Import/export & attachments
 `export_email` · `import_email` · `get_attachment_text` · `get_emails_by_ids`
+
+`get_attachment_text` reads text-like attachments and PDFs. A PDF comes back page by page, each page headed `--- Page N of M ---`, and the result has a `pdf` field with `totalPages`, `extractedPages`, `omittedPages` and `truncated`. It is limited by `PROTONMAIL_PDF_MAX_MB` (default 10) and `PROTONMAIL_PDF_MAX_PAGES` (default 50); past the page limit the text ends with a line saying how many pages were left out. A password-protected PDF, a damaged file and a scan without a text layer each fail with a short explanation. The PDF is read in memory with [unpdf](https://github.com/unjs/unpdf) (pure JavaScript, no native module): nothing is written to disk, nothing is downloaded, and a document that takes longer than 30 seconds is stopped.
 
 ---
 
