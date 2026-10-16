@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { createServer } from "../dist/index.js";
+import { throwOnToolError } from "./helpers/throw-on-tool-error.mjs";
 
 // Found live (read-only audit): create_draft/create_reply_draft/create_forward_draft/
 // update_draft/delete_draft/create_template/delete_template all write local state
@@ -49,6 +50,7 @@ async function withServer(readOnly, fn) {
   const client = new Client({ name: "test", version: "0" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(st), client.connect(ct)]);
+  throwOnToolError(client);
   const call = (name, args) => client.callTool({ name, arguments: args });
   try {
     await fn({ call });

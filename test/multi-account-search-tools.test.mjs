@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/index.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
+import { throwOnToolError } from "./helpers/throw-on-tool-error.mjs";
 
 net.Socket.prototype.connect = () => { throw new Error("Network disabled in this test file"); };
 
@@ -68,6 +69,7 @@ async function withServer(fn) {
   const client = new Client({ name: "test", version: "0" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(st), client.connect(ct)]);
+  throwOnToolError(client);
   const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
   try {
     await fn({ call, calls, secondarySlug: secondary.slug, maxInFlight: () => maxInFlight, primaryBundle: p, secondBundle: s });
@@ -176,6 +178,7 @@ test("search_emails on a single-account server keeps the service's own hasMore",
   const client = new Client({ name: "test", version: "0" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(st), client.connect(ct)]);
+  throwOnToolError(client);
   try {
     const result = JSON.parse((await client.callTool({ name: "search_emails", arguments: { limit: 10 } })).content[0].text);
     assert.equal(result.hasMore, true);

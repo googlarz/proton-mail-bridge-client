@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { createServer } from "../dist/index.js";
+import { throwOnToolError } from "./helpers/throw-on-tool-error.mjs";
 
 // A test that reaches past the policy check would otherwise hang trying to
 // really connect to 127.0.0.1:1143/1025 — fail fast instead.
@@ -50,6 +51,7 @@ async function withServer(overrides, fn) {
   const client = new Client({ name: "test", version: "0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  throwOnToolError(client);
   try {
     await fn(client);
   } finally {

@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, open, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { ImapFlow, type FetchMessageObject, type ListResponse, type SearchObject } from "imapflow";
 import { simpleParser, type ParsedMail } from "mailparser";
 import type {
@@ -4759,7 +4759,7 @@ export class SimpleIMAPService {
         isCalendarInvite: attachment.isCalendarInvite,
         isSignature: attachment.isSignature,
       },
-      outputPath: basename(outputFilePath),
+      outputPath: outputFilePath,
     };
   }
 
@@ -4911,7 +4911,7 @@ export class SimpleIMAPService {
     await mkdir(dirname(resolvedPath), { recursive: true, mode: 0o700 });
     await writeFile(resolvedPath, source, { mode: 0o600 });
 
-    return { emailId, outputPath: basename(resolvedPath) };
+    return { emailId, outputPath: resolvedPath };
   }
 
   // Imports a raw RFC822 message (e.g. a .eml exported from another provider)

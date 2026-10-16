@@ -631,9 +631,11 @@ async function withMcpClient<T>(run: (client: Client) => Promise<T>): Promise<T>
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [cliEntryPath()],
-    env: Object.fromEntries(
-      Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-    ),
+    env: {
+      ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+      // The CLI reports a failed tool on stderr with its own exit codes; MCP clients get an isError result instead.
+      PROTONMAIL_TOOL_ERRORS: "protocol",
+    },
     stderr: "ignore",
   });
 

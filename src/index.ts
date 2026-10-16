@@ -9266,22 +9266,35 @@ export function createServer(
           throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${name}`);
       }
     } catch (error) {
+      // A tool that ran and failed is a tool result with isError (MCP spec), not a protocol error: clients such as
+      // Claude Desktop pass a protocol error to the user as a generic "connector returned an error" and never to the
+      // model, which then cannot read what went wrong or adjust (an inline limit, a missing setting). Only a tool
+      // that does not exist stays a protocol error.
+      // The CLI starts this server as a child with PROTONMAIL_TOOL_ERRORS=protocol: it reports a failure on stderr
+      // with its own exit codes, which scripts rely on.
+      const asProtocolError = process.env.PROTONMAIL_TOOL_ERRORS?.trim().toLowerCase() === "protocol";
+      const failed = (message: string, code: ErrorCode = ErrorCode.InternalError): ToolResult => {
+        if (asProtocolError) throw new McpError(code, message);
+        return createTextResult(message, true);
+      };
       if (error instanceof McpError) {
-        throw error;
+        const message = error.message.replace(/^MCP error -?\d+: /, "");
+        if (error.code === ErrorCode.InvalidParams && message.startsWith("Unknown tool")) {
+          throw error;
+        }
+        return failed(message, error.code);
       }
       if (error instanceof InvalidArgumentError) {
-        throw new McpError(ErrorCode.InvalidParams, error.message);
+        return failed(error.message, ErrorCode.InvalidParams);
       }
       logger.error("Tool call failed", "MCPServer", { name, error });
       if (isLikelyAuthenticationError(error)) {
-        throw new McpError(
-          ErrorCode.InternalError,
+        return failed(
           "IMAP authentication failed. Check that PROTONMAIL_PASSWORD is your Proton Bridge password (not your Proton account password) and that you're signed in inside the Bridge app. Run run_doctor for a full connectivity check.",
         );
       }
       if (isLikelyConnectionError(error)) {
-        throw new McpError(
-          ErrorCode.InternalError,
+        return failed(
           "Could not connect to Proton Bridge. Make sure the Bridge app is running, and that PROTONMAIL_IMAP_HOST/PORT and PROTONMAIL_SMTP_HOST/PORT match the ports shown in Bridge's settings. Run run_doctor for a full connectivity check.",
         );
       }
@@ -9296,7 +9309,7 @@ export function createServer(
       // IMAP NO/BAD response bubble up as a bare "Command failed".
       const message = describeImapError(error)
         ?? "An internal error occurred. Check get_logs for details, or run run_doctor for a full connectivity check.";
-      throw new McpError(ErrorCode.InternalError, message);
+      return failed(message);
     }
   }));
 

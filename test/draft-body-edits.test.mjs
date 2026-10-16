@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/index.js";
 import { DraftStoreService, applyBodyEdits } from "../dist/services/draft-store-service.js";
+import { throwOnToolError } from "./helpers/throw-on-tool-error.mjs";
 
 // Working on a long draft through Claude used to mean resending the WHOLE body for every
 // small change (a real draft here is ~14,500 characters of HTML). bodyEdits lets the model
@@ -76,6 +77,7 @@ async function withServer(fn) {
   const client = new Client({ name: "t", version: "0" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(st), client.connect(ct)]);
+  throwOnToolError(client);
   const call = async (name, args) => {
     const result = await client.callTool({ name, arguments: args });
     return { result, text: result.content[0].text, data: (() => { try { return JSON.parse(result.content[0].text); } catch { return undefined; } })() };

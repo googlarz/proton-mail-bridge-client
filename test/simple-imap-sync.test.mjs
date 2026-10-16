@@ -1283,10 +1283,11 @@ test("saveAttachments does not silently overwrite two same-named attachments sav
   // filename twice.
   const paths = result.saved.map((entry) => entry.outputPath);
   assert.notEqual(paths[0], paths[1]);
+  // The full path, not just the file name: the model has to be able to find the file.
+  for (const path of paths) assert.ok(path.startsWith(join(dataDir, "attachments", encodeURIComponent("INBOX::1"))), path);
 
-  const dir = join(dataDir, "attachments", encodeURIComponent("INBOX::1"));
-  const firstContent = await readFile(join(dir, paths[0]), "utf8");
-  const secondContent = await readFile(join(dir, paths[1]), "utf8");
+  const firstContent = await readFile(paths[0], "utf8");
+  const secondContent = await readFile(paths[1], "utf8");
   // Read back the exact reported path for each — content must match its own
   // source attachment, not have been clobbered by the other.
   assert.deepEqual(new Set([firstContent, secondContent]), new Set(["FIRST", "SECOND"]));
@@ -1305,8 +1306,7 @@ test("saveAttachments does not silently overwrite a file left over from a prior 
   assert.equal(firstResult.saved.length, 1);
   const firstPath = firstResult.saved[0].outputPath;
 
-  const dir = join(dataDir, "attachments", encodeURIComponent("INBOX::1"));
-  assert.equal(await readFile(join(dir, firstPath), "utf8"), "ORIGINAL");
+  assert.equal(await readFile(firstPath, "utf8"), "ORIGINAL");
 
   // Second, separate saveAttachments() call against the SAME emailId
   // directory, with a different attachment that sanitizes to the same
@@ -1320,9 +1320,9 @@ test("saveAttachments does not silently overwrite a file left over from a prior 
   // Must not silently overwrite: the second save gets a different path...
   assert.notEqual(secondPath, firstPath);
   // ...and the pre-existing file's content is unchanged.
-  assert.equal(await readFile(join(dir, firstPath), "utf8"), "ORIGINAL");
+  assert.equal(await readFile(firstPath, "utf8"), "ORIGINAL");
   // ...while the new file holds the new content, at its own reported path.
-  assert.equal(await readFile(join(dir, secondPath), "utf8"), "NEWER");
+  assert.equal(await readFile(secondPath, "utf8"), "NEWER");
 
   await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });

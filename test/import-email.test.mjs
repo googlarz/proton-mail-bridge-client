@@ -6,10 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { SimpleIMAPService } from "../dist/services/simple-imap-service.js";
 import { createServer } from "../dist/index.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
+import { throwOnToolError } from "./helpers/throw-on-tool-error.mjs";
 
 net.Socket.prototype.connect = () => { throw new Error("Network disabled in this test file"); };
 
@@ -89,11 +89,12 @@ test("import_email refuses a message larger than the limit", async () => {
   const client = new Client({ name: "t", version: "0" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(b), client.connect(a)]);
+  throwOnToolError(client);
   try {
     const tooBig = Buffer.alloc(51 * 1024 * 1024, 65).toString("base64");
     await assert.rejects(
       client.callTool({ name: "import_email", arguments: { rawBase64: tooBig, targetFolder: "Archive" } }),
-      (error) => error instanceof McpError && error.code === -32602 && /larger than|too large|limit/i.test(error.message),
+      (error) => /larger than|too large|limit/i.test(error.message),
     );
     assert.equal(called, 0);
     await client.callTool({ name: "import_email", arguments: { rawBase64: Buffer.from("Subject: s\r\n\r\nx").toString("base64"), targetFolder: "Archive" } });

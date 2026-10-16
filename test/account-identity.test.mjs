@@ -545,7 +545,8 @@ test("saveAttachment (no outputPath): matching account still writes successfully
     const result = await service.saveAttachment(emailId, "test.txt");
     assert.equal(result.attachment.filename, "test.txt");
 
-    const written = await readFile(join(dataDir, "attachments", encodeURIComponent(emailId), result.outputPath));
+    assert.ok(result.outputPath.startsWith(join(dataDir, "attachments", encodeURIComponent(emailId))), "the full path is reported");
+    const written = await readFile(result.outputPath);
     assert.equal(written.toString("utf8"), "hello world");
   });
 });

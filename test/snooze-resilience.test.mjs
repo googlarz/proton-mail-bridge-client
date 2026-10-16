@@ -6,11 +6,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { SnoozeService } from "../dist/services/snooze-service.js";
 import { createServer } from "../dist/index.js";
 import { createEmailId } from "../dist/utils/helpers.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
+import { throwOnToolError } from "./helpers/throw-on-tool-error.mjs";
 
 net.Socket.prototype.connect = () => { throw new Error("Network disabled in this test file"); };
 
@@ -179,11 +179,12 @@ test("snooze_email refuses a wake time further away than ten years, and a date w
   const client = new Client({ name: "t", version: "0" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(b), client.connect(a)]);
+  throwOnToolError(client);
   const emailId = createEmailId("INBOX", 5, "100");
   try {
     await assert.rejects(
       client.callTool({ name: "snooze_email", arguments: { emailId, wakeAt: "+275760-09-13T00:00:00.000Z" } }),
-      (error) => error instanceof McpError && error.code === -32602,
+      (error) => /wake|date|time|year|far/i.test(error.message),
     );
     const year = new Date().getUTCFullYear() + 1;
     await client.callTool({ name: "snooze_email", arguments: { emailId, wakeAt: `${year}-03-05T09:30:00` } });

@@ -6,10 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { createServer } from "../dist/index.js";
 import { normalizeBoolean, normalizeLimit, InvalidArgumentError, createEmailId } from "../dist/utils/helpers.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
+import { throwOnToolError } from "./helpers/throw-on-tool-error.mjs";
 
 const EMAIL_ID = createEmailId("INBOX", 5, "114504891");
 
@@ -63,6 +63,7 @@ async function withServer(fn) {
   const client = new Client({ name: "t", version: "0" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(b), client.connect(a)]);
+  throwOnToolError(client);
   try { await fn(client, imapService); } finally {
     await client.close(); await server.close(); await closeTrackedIndexes();
     await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -92,17 +93,17 @@ test('batch_email_action with dryRun:"true" does not touch the mailbox, and dryR
   });
 });
 
-test("a boolean argument that cannot be read is an InvalidParams error, not a silent default", async () => {
+test("a boolean argument that cannot be read is refused with an explanation, not read as a silent default", async () => {
   await withServer(async (client, imapService) => {
     imapService.markEmailRead = async () => { throw new Error("must not be reached"); };
     await assert.rejects(
       client.callTool({ name: "mark_email_read", arguments: { emailId: EMAIL_ID, isRead: "perhaps" } }),
-      (error) => error instanceof McpError && error.code === -32602 && /true or false/i.test(error.message),
+      (error) => /true or false/i.test(error.message),
     );
   });
 });
 
-test("bulk_delete and bulk_move with an empty or misspelled match are InvalidParams errors that touch nothing", async () => {
+test("bulk_delete and bulk_move with an empty or misspelled match are refused and touch nothing", async () => {
   await withServer(async (client, imapService) => {
     let searched = 0;
     imapService.getMailboxUidValidity = async () => "100";
@@ -111,7 +112,7 @@ test("bulk_delete and bulk_move with an empty or misspelled match are InvalidPar
       for (const match of [{}, { sender: "a@b.c" }, { from: "" }]) {
         await assert.rejects(
           client.callTool({ name, arguments: { folder: "INBOX", match, ...base } }),
-          (error) => error instanceof McpError && error.code === -32602,
+          (error) => /match|filter|at least one/i.test(error.message),
           `${name} ${JSON.stringify(match)}`,
         );
       }

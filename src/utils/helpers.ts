@@ -269,6 +269,25 @@ function removeHtmlBlocks(value: string, tag: string): string {
   return out + value.slice(position);
 }
 
+// <!-- ... --> including conditional comments (<!--[if mso]>...<![endif]-->). An unclosed comment runs to the end of
+// the text, as it does in a browser. Linear: each search starts where the last one ended.
+function removeHtmlComments(value: string): string {
+  let out = "";
+  let position = 0;
+  for (;;) {
+    const start = value.indexOf("<!--", position);
+    if (start === -1) break;
+    out += `${value.slice(position, start)} `;
+    const end = value.indexOf("-->", start + 4);
+    if (end === -1) {
+      position = value.length;
+      break;
+    }
+    position = end + 3;
+  }
+  return out + value.slice(position);
+}
+
 export function stripHtmlToText(value?: string): string | undefined {
   if (!value) {
     return undefined;
@@ -276,7 +295,7 @@ export function stripHtmlToText(value?: string): string | undefined {
 
   // `[^<>]*` (not `[^>]+`): a tag cannot contain another `<`, so an unclosed `<` stops at the next one
   // instead of scanning to the end of the text.
-  const withoutTags = removeHtmlBlocks(removeHtmlBlocks(value, "style"), "script")
+  const withoutTags = removeHtmlBlocks(removeHtmlBlocks(removeHtmlComments(value), "style"), "script")
     .replace(/<[^<>]*>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
@@ -294,6 +313,9 @@ function getMarkdownConverter(): TurndownService {
   }
 
   markdownConverter = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+  // Turndown keeps the text inside these, so a styled bank or newsletter mail started with its whole stylesheet and
+  // the body limit then cut off the real text.
+  markdownConverter.remove(["style", "script"]);
   // Inline image syntax (![alt](src)) would dump the raw src URL into the
   // token stream — often a long tracking-pixel URL with no value to a
   // model reading the message. Keep the alt text as a plain marker instead.
