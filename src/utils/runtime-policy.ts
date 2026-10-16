@@ -18,7 +18,8 @@ export function sanitizeRuntimeConfig(runtime: ProtonRuntimeConfig): Record<stri
     allowEmptyFolder: runtime.allowEmptyFolder,
     restrictOutboundToSelf: runtime.restrictOutboundToSelf,
     allowFileDownloadDir: runtime.allowFileDownloadDir ?? null,
-    maxInlineBytes: runtime.maxInlineBytes,
+    maxInlineKB: runtime.maxInlineBytes,
+    maxInlineBytes: runtime.maxInlineBytes, // same number in KB; kept for compatibility, prefer maxInlineKB
     opDelayMs: runtime.opDelayMs,
     sendDelaySeconds: runtime.sendDelaySeconds,
   };

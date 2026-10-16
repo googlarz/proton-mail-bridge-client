@@ -48,6 +48,7 @@ function buildAccountBundle(
     imap: account.imap,
     smtp: account.smtp,
     dataDir: account.dataDir,
+    runtime: account.autoSyncFolder ? { ...baseConfig.runtime, autoSyncFolder: account.autoSyncFolder } : baseConfig.runtime,
   };
 
   const smtpService = new SMTPService(config);

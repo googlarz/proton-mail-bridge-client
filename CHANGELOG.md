@@ -17,6 +17,9 @@ From reports by zotabee (#38) and Ch7os (#34, #35, #41):
 - **Claude Desktop installer finds the Microsoft Store (MSIX) config** on Windows; no more writing to a path the app ignores.
 - **The README multi-account example is valid**: `PROTONMAIL_ACCOUNTS_JSON` lists only the additional accounts, and a duplicated primary address now says so in the error.
 - **No more `chmod` warning for a missing `-wal`/`-shm` file.**
+- **Multi-account sync no longer fails on a folder one account lacks** (#40): a folder missing from an explicit list is skipped and reported as `skippedFolders`. Each entry in `PROTONMAIL_ACCOUNTS_JSON` can also set its own `autoSyncFolder`.
+- **Passwords for additional accounts can come from a file or a command** (#37): `passwordFile` / `passwordCommand` instead of `password`.
+- **`PROTONMAIL_MAX_INLINE_KB`** (#39): the clear name for the inline attachment limit, which was always in KB; `get_runtime_status` reports `maxInlineKB`. The old name still works.
 
 ## [2.10.0] — 2026-10-15
 

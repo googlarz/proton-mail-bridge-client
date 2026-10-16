@@ -22,6 +22,8 @@ export interface AccountConfig {
   imap: ProtonConnectionConfig;
   smtp: ProtonConnectionConfig;
   dataDir: string;
+  // Overrides PROTONMAIL_AUTO_SYNC_FOLDER for this account (folder names differ between accounts).
+  autoSyncFolder?: string;
 }
 
 export interface ProtonMailConfig {

@@ -311,6 +311,8 @@ In Proton Bridge, make each address or account its own login: with **Split Addre
 }
 ```
 
+Instead of `password` an entry can use `passwordFile` (path to a file with the Bridge password) or `passwordCommand` (a command that prints it), so the password need not sit in the client config; use only one of the three. `autoSyncFolder` sets that account's folders for background sync (default `PROTONMAIL_AUTO_SYNC_FOLDER`). Folders in a list that an account does not have are skipped and reported as `skippedFolders`.
+
 Listing the primary address again is refused at startup ("duplicate address"). Host, ports and the TLS mode default to the primary account's; an entry can override them with `imapHost`, `imapPort`, `imapSecure`, `smtpHost`, `smtpPort` and `smtpSecure`.
 
 **Note:** The password is the **Bridge password for each login**, not your Proton account password.
@@ -522,7 +524,7 @@ PROTONMAIL_IDLE_WATCH='true'
 PROTONMAIL_IDLE_MAX_SECONDS='30'
 
 # Attachments
-PROTONMAIL_MAX_INLINE_BYTES='40'      # in KB: largest attachment get_attachment_content returns inline as base64
+PROTONMAIL_MAX_INLINE_KB='40'         # in KB (older name PROTONMAIL_MAX_INLINE_BYTES still works, also in KB): largest attachment get_attachment_content returns inline as base64
 PROTONMAIL_PDF_MAX_MB='10'            # largest PDF get_attachment_text extracts text from (1-100 MB); bigger ones are refused with a message
 PROTONMAIL_PDF_MAX_PAGES='50'         # pages get_attachment_text reads from a PDF (1-2000); a longer PDF is cut off with a note saying how many pages are missing
 
@@ -666,7 +668,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - List and search results are compact by default: attachments are metadata only, and empty or derivable fields are left out. Pass `fields: ["subject","from","date"]` to trim further — 10 results is roughly 800 tokens that way, versus about 11,000 for 50 full results.
 - Defaults are bounded: `search_emails`/`search_indexed_emails` return 50 (pass `limit` for more), `list_drafts` 20, `list_scheduled_sends` 50 newest first. Each reports `hasMore`; page with `offset`.
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
-- Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_BYTES`.
+- Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_KB`.
 - **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 100: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 

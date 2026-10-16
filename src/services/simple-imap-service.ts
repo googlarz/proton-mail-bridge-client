@@ -3568,8 +3568,19 @@ export class SimpleIMAPService {
     complete: boolean;
     remainingFolders: string[];
     failedFolders: Array<{ folder: string; error: string }>;
+    skippedFolders: string[];
   }> {
     let folders = await this.resolveFolders(input.folder);
+    // A list such as "INBOX,Sent" is shared by every account, but folder names differ between them: a folder
+    // an account lacks is skipped (and reported), not a failure of the whole sync. A single named folder
+    // that is missing is still an error.
+    const skippedFolders: string[] = [];
+    if (input.folder?.trim() && folders.length > 1) {
+      const existing = new Set((await this.getFolderStructure()).map((entry) => entry.path));
+      for (const folder of folders) if (!existing.has(folder)) skippedFolders.push(folder);
+      folders = folders.filter((folder) => existing.has(folder));
+      if (folders.length === 0) throw new Error(`None of the folders exist: ${skippedFolders.join(", ")}`);
+    }
     if (!input.folder?.trim() && input.checkpoints) {
       // All-folders sync under a time budget: visit never-synced / least-recently-synced
       // folders first so a follow-up call after a deadline continues where the last one
@@ -3629,6 +3640,7 @@ export class SimpleIMAPService {
       complete: remainingFolders.length === 0 && failedFolders.length === 0,
       remainingFolders,
       failedFolders,
+      skippedFolders,
     };
   }
 

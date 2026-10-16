@@ -4126,13 +4126,10 @@ function parseAdditionalAccountsEnv(primary: AccountConfig): AccountConfig[] {
     }
     const value = entry as Record<string, unknown>;
     const address = typeof value.address === "string" ? value.address.trim() : "";
-    const password = typeof value.password === "string" ? value.password : "";
     if (!address || !isValidEmail(address)) {
       throw new Error(`PROTONMAIL_ACCOUNTS_JSON[${index}].address must be a valid email address.`);
     }
-    if (!password) {
-      throw new Error(`PROTONMAIL_ACCOUNTS_JSON[${index}].password is required.`);
-    }
+    const password = readAccountPassword(value, index);
     const lowerAddress = address.toLowerCase();
     if (seenAddresses.has(lowerAddress)) {
       const isPrimary = lowerAddress === primary.address.toLowerCase();
@@ -4177,8 +4174,34 @@ function parseAdditionalAccountsEnv(primary: AccountConfig): AccountConfig[] {
         username: stringField("smtpUsername", address),
         password: stringField("smtpPassword", password),
       },
+      ...(typeof value.autoSyncFolder === "string" && value.autoSyncFolder.trim()
+        ? { autoSyncFolder: value.autoSyncFolder.trim() }
+        : {}),
     };
   });
+}
+
+// An additional account's Bridge password: inline, or read from a file / a command so it need not sit in the
+// client config (same idea as PROTONMAIL_PASSWORD_FILE / _COMMAND for the primary account).
+function readAccountPassword(value: Record<string, unknown>, index: number): string {
+  const where = `PROTONMAIL_ACCOUNTS_JSON[${index}]`;
+  const inline = typeof value.password === "string" ? value.password : "";
+  const file = typeof value.passwordFile === "string" ? value.passwordFile.trim() : "";
+  const command = typeof value.passwordCommand === "string" ? value.passwordCommand.trim() : "";
+  if ([inline, file, command].filter(Boolean).length > 1) {
+    throw new Error(`${where}: use only one of password, passwordFile, passwordCommand.`);
+  }
+  let password = inline;
+  try {
+    if (file) password = readFileSync(file, "utf8").trim();
+    else if (command) password = execSync(command, { encoding: "utf-8" }).trim();
+  } catch (error) {
+    throw new Error(`${where}: could not read the password from ${file ? "passwordFile" : "passwordCommand"}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!password) {
+    throw new Error(`${where}.password is required (or passwordFile / passwordCommand).`);
+  }
+  return password;
 }
 
 // The one configuration error the server can still answer: without a login it cannot reach Bridge, but it can
@@ -4292,7 +4315,8 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       allowEmptyFolder,
       restrictOutboundToSelf,
       allowFileDownloadDir,
-      maxInlineBytes: parseIntegerEnv("PROTONMAIL_MAX_INLINE_BYTES", 40, 1, 10240),
+      // The value is in KB despite the historical name; PROTONMAIL_MAX_INLINE_KB is the clear spelling and wins.
+      maxInlineBytes: parseIntegerEnv("PROTONMAIL_MAX_INLINE_KB", parseIntegerEnv("PROTONMAIL_MAX_INLINE_BYTES", 40, 1, 10240), 1, 10240),
       pdfMaxMb: parseIntegerEnv("PROTONMAIL_PDF_MAX_MB", DEFAULT_PDF_MAX_MB, 1, 100),
       pdfMaxPages: parseIntegerEnv("PROTONMAIL_PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, 1, 2000),
       opDelayMs,
@@ -8227,6 +8251,7 @@ export function createServer(
               complete: snapshot.complete,
               remainingFolders: snapshot.remainingFolders,
               ...(snapshot.failedFolders.length > 0 ? { failedFolders: snapshot.failedFolders } : {}),
+              ...(snapshot.skippedFolders.length > 0 ? { skippedFolders: snapshot.skippedFolders } : {}),
               elapsedMs: Date.now() - startedAtMs,
               budgetMs,
               ...(snapshot.complete
