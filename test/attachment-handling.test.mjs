@@ -234,3 +234,34 @@ test("get_attachment_content is no longer declared read-only, since saveTo write
     });
   });
 });
+
+test("get_attachment_content with asImage returns a picture as MCP image content", async () => {
+  await withDirs(async ({ downloads }) => {
+    await withServer(downloads, async (client, imapService) => {
+      const png = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
+      imapService.getAttachmentContent = async (emailId, attachmentId) => ({
+        emailId, attachment: { id: attachmentId, filename: "a.png", contentType: "image/png" }, base64: png,
+      });
+      const emailId = createEmailId("INBOX", 5, "100");
+      const result = await client.callTool({ name: "get_attachment_content", arguments: { emailId, attachmentId: "a1", asImage: true } });
+      assert.ok(!result.isError);
+      const image = result.content.find((block) => block.type === "image");
+      assert.deepEqual({ data: image?.data, mimeType: image?.mimeType }, { data: png, mimeType: "image/png" });
+      assert.ok(!result.content[0].text.includes(png), "the picture must not also be repeated as base64 text");
+    });
+  });
+});
+
+test("asImage leaves non-image attachments as base64 text", async () => {
+  await withDirs(async ({ downloads }) => {
+    await withServer(downloads, async (client, imapService) => {
+      imapService.getAttachmentContent = async (emailId, attachmentId) => ({
+        emailId, attachment: { id: attachmentId, filename: "a.pdf", contentType: "application/pdf" }, base64: "AAAA",
+      });
+      const emailId = createEmailId("INBOX", 5, "100");
+      const result = await client.callTool({ name: "get_attachment_content", arguments: { emailId, attachmentId: "a1", asImage: true } });
+      assert.ok(!result.content.some((block) => block.type === "image"));
+      assert.equal(JSON.parse(result.content[0].text).base64, "AAAA");
+    });
+  });
+});

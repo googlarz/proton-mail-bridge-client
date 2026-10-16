@@ -104,6 +104,7 @@ type ToolResult = {
         description?: string;
         mimeType?: string;
       }
+    | { type: "image"; data: string; mimeType: string }
   >;
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
@@ -1816,6 +1817,7 @@ const TOOLS = [
         emailId: { type: "string", description: "Composite email id in FOLDER::UID format, as returned by get_emails or search_emails." },
         attachmentId: { type: "string", description: "Stable attachment id returned by list_attachments." },
         includeBase64: { type: "boolean", description: "Include base64 payload in the response.", default: false },
+        asImage: { type: "boolean", description: "For png, jpeg, gif and webp attachments: return the picture as MCP image content (which a vision-capable client shows to the model) instead of base64 text. Subject to the same inline size limit.", default: false },
         saveTo: { type: "string", description: "Relative path within PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR to save attachment to disk. Returns file path and size instead of inline base64. Requires env var to be set. Set PROTONMAIL_MAX_INLINE_BYTES (in KB, default 40) to configure the inline size threshold." },
       },
       required: ["emailId", "attachmentId"],
@@ -9133,7 +9135,7 @@ export function createServer(
           const result = await bundle.imapService.getAttachmentContent(
             emailId,
             requireString(args, "attachmentId"),
-            normalizeBoolean(args.includeBase64, false),
+            normalizeBoolean(args.includeBase64, false) || normalizeBoolean(args.asImage, false),
           );
           result.emailId = prefixedIdFor(bundle, result.emailId);
           if (result.base64) {
@@ -9145,6 +9147,13 @@ export function createServer(
                 `Attachment is ~${Math.round(decodedSize / 1024)}KB decoded. Inline limit is ${config.runtime.maxInlineBytes ?? 40}KB. Set PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR and pass saveTo to write to disk instead, or increase the limit with PROTONMAIL_MAX_INLINE_BYTES.`,
               );
             }
+          }
+          const imageType = String(result.attachment?.contentType ?? "").toLowerCase();
+          if (normalizeBoolean(args.asImage, false) && result.base64 && /^image\/(png|jpeg|gif|webp)$/.test(imageType)) {
+            const { base64, ...metadata } = result;
+            const text = createTextResult({ ...metadata, returnedAs: "image" }, false, [attachmentSource(result.emailId, result.attachment)]);
+            text.content.push({ type: "image", data: base64, mimeType: imageType });
+            return text;
           }
           return createTextResult(result, false, [attachmentSource(result.emailId, result.attachment)]);
         }

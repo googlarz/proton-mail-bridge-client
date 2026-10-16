@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`get_attachment_content` can return a picture as MCP image content** (#44): pass `asImage: true` for a png, jpeg, gif or webp attachment. Same inline size limit; other types and the default behaviour are unchanged.
+- **PDF text is read in a `worker_thread`** (#43), so a heavy file cannot stall the server, and the timeout now really stops the parse.
+- **CLI `doctor` explains the failure** (`cause` and `suggestion`: TLS mode mismatch, wrong password, Bridge unreachable), the same way the `run_doctor` tool does.
+
 ## [2.11.0] — 2026-10-16
 
 **`get_attachment_text` reads PDFs** (#39, idea 1). The text comes back page by page, each page headed `--- Page N of M ---`. PDFs have their own limits instead of the 512 KB text cap: `PROTONMAIL_PDF_MAX_MB` (default 10) and `PROTONMAIL_PDF_MAX_PAGES` (default 50). A longer PDF is cut off with a closing line saying how many pages are missing, and the result's `pdf` field reports `totalPages`, `extractedPages`, `omittedPages` and `truncated`. A password-protected PDF, a damaged file and a scan without a text layer each fail with one plain sentence instead of a pdf.js stack. A PDF sent as `application/octet-stream` is recognised by its `%PDF-` header. Extraction uses `unpdf` (pure JavaScript, no native module or install script), runs in memory, makes no network request and stops after 30 seconds. `get_attachment_content`'s `text` field is unchanged.

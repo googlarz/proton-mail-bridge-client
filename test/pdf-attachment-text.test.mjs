@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { extractPdfText, looksLikePdf, PdfTextError } from "../dist/utils/pdf-text.js";
+import { extractPdfText, extractPdfTextDirect, looksLikePdf, PdfTextError } from "../dist/utils/pdf-text.js";
 import { SimpleIMAPService } from "../dist/services/simple-imap-service.js";
 
 // get_attachment_text refused every PDF, so a statement or an invoice sent as a PDF could not be
@@ -119,7 +119,8 @@ test("extraction makes no network request", async () => {
     throw new Error("network is not allowed in this test");
   };
   try {
-    const result = await extractPdfText(buildPdf(["Offline only"]));
+    // In-process on purpose: fetch is only intercepted in this thread, not in the worker.
+    const result = await extractPdfTextDirect(buildPdf(["Offline only"]));
     assert.match(result.text, /Offline only/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -183,4 +184,15 @@ test("getAttachmentText turns an unreadable PDF into one clear error", async () 
     assert.match(error.message, /Use get_attachment_content or save_attachment instead\.$/);
     return true;
   });
+});
+
+test("the parse runs off the main thread, so the event loop keeps ticking", async () => {
+  let ticks = 0;
+  const timer = setInterval(() => { ticks += 1; }, 1);
+  try {
+    await extractPdfText(buildPdf(Array.from({ length: 40 }, (_, i) => `Page ${i} ${"lorem ipsum ".repeat(200)}`)));
+  } finally {
+    clearInterval(timer);
+  }
+  assert.ok(ticks > 0, "no timer fired while the PDF was being read");
 });

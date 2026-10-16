@@ -1,8 +1,10 @@
+import { Worker } from "node:worker_threads";
 import { getDocumentProxy } from "unpdf";
 
 // PDF text extraction for get_attachment_text. unpdf ships a serverless build of
-// pdf.js: pure JavaScript, no native module, no worker thread. Everything happens
-// in memory; nothing is written to disk and nothing is fetched (no font or CMap
+// pdf.js: pure JavaScript, no native module. The parse runs in a worker_thread of
+// this process (pdf-text-worker.js), so a heavy file cannot stall the server's event
+// loop and a timeout can really stop it. Everything happens in memory; nothing is written to disk and nothing is fetched (no font or CMap
 // URLs are configured, so pdf.js has nothing to download).
 
 export const DEFAULT_PDF_MAX_MB = 10;
@@ -42,6 +44,35 @@ export function looksLikePdf(content: Buffer, contentType?: string, filename?: s
 }
 
 export async function extractPdfText(content: Buffer, options: PdfTextOptions = {}): Promise<PdfTextResult> {
+  const timeoutMs = options.timeoutMs ?? PDF_EXTRACTION_TIMEOUT_MS;
+  return new Promise<PdfTextResult>((resolve, reject) => {
+    // The worker gets a copy: the caller keeps its buffer.
+    const worker = new Worker(new URL("./pdf-text-worker.js", import.meta.url), {
+      workerData: { content: new Uint8Array(content), maxPages: options.maxPages ?? DEFAULT_PDF_MAX_PAGES, timeoutMs },
+    });
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      action();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new PdfTextError("timeout", `Reading the PDF took longer than ${Math.round(timeoutMs / 1000)} seconds and was stopped.`))),
+      timeoutMs + 2000,
+    );
+    timer.unref?.();
+    worker.once("message", (message: { ok: true; result: PdfTextResult } | { ok: false; reason: PdfTextError["reason"]; message: string }) =>
+      finish(() => (message.ok ? resolve(message.result) : reject(new PdfTextError(message.reason, message.message)))),
+    );
+    worker.once("error", (error) => finish(() => reject(toPdfTextError(error))));
+    worker.once("exit", (code) => finish(() => reject(new PdfTextError("invalid", `The PDF reader stopped unexpectedly (exit code ${code}).`))));
+  });
+}
+
+/** The actual parse. Runs inside the worker; exported for it only. */
+export async function extractPdfTextDirect(content: Buffer | Uint8Array, options: PdfTextOptions = {}): Promise<PdfTextResult> {
   const maxPages = options.maxPages ?? DEFAULT_PDF_MAX_PAGES;
   const timeoutMs = options.timeoutMs ?? PDF_EXTRACTION_TIMEOUT_MS;
   let timer: NodeJS.Timeout | undefined;

@@ -9,7 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { buildConfigFromEnv, createServer, withAudit } from "./index.js";
 import { isMainModule } from "./is-main.js";
-import { SimpleIMAPService } from "./services/simple-imap-service.js";
+import { isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService } from "./services/simple-imap-service.js";
 import type { EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
 import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
 import { isValidEmail, parseEmails } from "./utils/helpers.js";
@@ -820,6 +820,26 @@ async function runStatus(parsed: ParsedCliArgs): Promise<void> {
   });
 }
 
+// Same classification as the run_doctor tool, so the CLI explains a failure instead of printing the raw error.
+export function diagnoseConnectionFailure(reason: unknown): { cause: string; suggestion: string } | undefined {
+  if (isLikelyAuthenticationError(reason)) {
+    return {
+      cause: "authentication_failed",
+      suggestion: "PROTONMAIL_PASSWORD must be the Bridge password (Bridge app -> account -> Mailbox details), not your Proton account password.",
+    };
+  }
+  if (isLikelyTlsMismatchError(reason)) {
+    return {
+      cause: "tls_mismatch",
+      suggestion: "TLS handshake failed: PROTONMAIL_IMAP_SECURE / PROTONMAIL_SMTP_SECURE probably does not match the connection mode of that port in Bridge (implicit TLS vs STARTTLS).",
+    };
+  }
+  if (isLikelyConnectionError(reason)) {
+    return { cause: "bridge_unreachable", suggestion: "Bridge is not reachable: check that it is running and that the host and ports match Bridge's Mailbox details." };
+  }
+  return undefined;
+}
+
 async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ config, smtpService, imapService, localIndexService }) => {
@@ -832,6 +852,7 @@ async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
     let smtpOk = false;
     let folderCount = 0;
     let error: string | undefined;
+    let diagnosis: ReturnType<typeof diagnoseConnectionFailure>;
 
     try {
       await imapService.ping();
@@ -841,6 +862,7 @@ async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
       smtpOk = true;
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
+      diagnosis = diagnoseConnectionFailure(err);
     }
 
     const result = {
@@ -857,6 +879,7 @@ async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
       indexUpdatedAt: index.updatedAt,
       claudeDesktopInstalled: claudeDesktop.installed,
       error,
+      ...(diagnosis ? { cause: diagnosis.cause, suggestion: diagnosis.suggestion } : {}),
     };
 
     process.stdout.write(wantJson ? json(result) : `${result.ok ? "Doctor OK" : "Doctor failed"}\n${json(result)}`);
