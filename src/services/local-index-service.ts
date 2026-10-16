@@ -1925,6 +1925,8 @@ export class LocalIndexService {
       try {
         chmodSync(path, 0o600);
       } catch (error) {
+        // WAL/SHM sidecars come and go with the journal; a missing one is not a problem.
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
         this.log.warn("Failed to set restrictive permissions on database file", "LocalIndexService", {
           path,
           error,

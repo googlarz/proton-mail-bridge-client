@@ -4,6 +4,7 @@ import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import sanitizeHtml from "sanitize-html";
 import type { ProtonMailConfig, SendEmailInput } from "../types/index.js";
 import { htmlToMarkdown, isValidEmail } from "../utils/helpers.js";
+import { isLikelyTlsMismatchError } from "./simple-imap-service.js";
 import { logger } from "../utils/logger.js";
 
 const DATA_IMAGE_SRC = /^data:image\/(png|jpe?g|gif);base64,[a-z0-9+/=\s]+$/i;
@@ -153,17 +154,44 @@ export function normalizeSendResult(info: { messageId?: string; accepted?: unkno
 
 export class SMTPService {
   private transporter?: Transporter;
+  // Implicit TLS unless told otherwise; see withTlsFallback.
+  private secure: boolean;
+  private mayDetectTlsMode: boolean;
 
-  constructor(private readonly config: ProtonMailConfig) {}
+  constructor(private readonly config: ProtonMailConfig) {
+    this.secure = config.smtp.secure;
+    this.mayDetectTlsMode = config.smtp.secure && config.smtp.secureExplicit !== true;
+  }
 
   async verifyConnection(): Promise<void> {
-    const transporter = this.getTransporter();
-    await transporter.verify();
+    await this.withTlsFallback((transporter) => transporter.verify());
   }
 
   async sendEmail(input: SendEmailInput): Promise<SendResult> {
-    const transporter = this.getTransporter();
-    return normalizeSendResult(await transporter.sendMail(this.buildMailOptions(input)));
+    return this.withTlsFallback(async (transporter) => normalizeSendResult(await transporter.sendMail(this.buildMailOptions(input))));
+  }
+
+  // Bridge's SMTP port speaks implicit TLS or STARTTLS depending on a setting in the Bridge app. With
+  // PROTONMAIL_SMTP_SECURE unset the first attempt is implicit TLS; a port that answers in plaintext fails that
+  // handshake ("wrong version number") before any data is sent, so trying again with STARTTLS cannot send a mail
+  // twice. The switch is remembered for the rest of the run. A value set on purpose is never second-guessed.
+  private async withTlsFallback<T>(run: (transporter: Transporter) => Promise<T>): Promise<T> {
+    try {
+      return await run(this.getTransporter());
+    } catch (error) {
+      if (!this.mayDetectTlsMode || !isLikelyTlsMismatchError(error)) {
+        throw error;
+      }
+      logger.info("The SMTP port answered in plaintext; switching to STARTTLS. Set PROTONMAIL_SMTP_SECURE=false to skip the first attempt.", "SMTPService", {
+        host: this.config.smtp.host,
+        port: this.config.smtp.port,
+      });
+      this.mayDetectTlsMode = false;
+      this.secure = false;
+      this.transporter?.close();
+      this.transporter = undefined;
+      return run(this.getTransporter());
+    }
   }
 
   // preserveBcc: only ever true for syncDraftToRemote's own call (saving to the
@@ -231,7 +259,7 @@ export class SMTPService {
       this.transporter = nodemailer.createTransport({
         host: this.config.smtp.host,
         port: this.config.smtp.port,
-        secure: this.config.smtp.secure,
+        secure: this.secure,
         auth: {
           user: this.config.smtp.username,
           pass: this.config.smtp.password,

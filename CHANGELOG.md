@@ -6,14 +6,17 @@ All notable changes to this project are documented here.
 
 **`get_attachment_text` reads PDFs** (#39, idea 1). The text comes back page by page, each page headed `--- Page N of M ---`. PDFs have their own limits instead of the 512 KB text cap: `PROTONMAIL_PDF_MAX_MB` (default 10) and `PROTONMAIL_PDF_MAX_PAGES` (default 50). A longer PDF is cut off with a closing line saying how many pages are missing, and the result's `pdf` field reports `totalPages`, `extractedPages`, `omittedPages` and `truncated`. A password-protected PDF, a damaged file and a scan without a text layer each fail with one plain sentence instead of a pdf.js stack. A PDF sent as `application/octet-stream` is recognised by its `%PDF-` header. Extraction uses `unpdf` (pure JavaScript, no native module or install script), runs in memory, makes no network request and stops after 30 seconds. `get_attachment_content`'s `text` field is unchanged.
 
-## [Unreleased]
-
 From reports by zotabee (#38) and Ch7os (#34, #35, #41):
 
 - **A tool that fails now answers with an `isError` result carrying the real message**, instead of a protocol error. Claude Desktop does not pass protocol errors to the model (it shows a generic "connector returned an error"), so the model never read, for example, that an attachment was over the inline limit or what `saveTo` is for. Only a call to a tool that does not exist is still a protocol error. The CLI is unchanged: it starts the server with `PROTONMAIL_TOOL_ERRORS=protocol` and keeps its stderr output and exit codes.
 - **The Markdown body of an HTML-only mail no longer starts with its stylesheet.** `<style>` and `<script>` are dropped; a bank mail had 30,000 characters of CSS ahead of one sentence. The preview also drops HTML comments, conditional ones included (`<!-- 96 <!-- Our ...`).
 - **`save_attachment` and `save_attachments` report the full path** they wrote, not just the file name.
 - **PDF text in `get_attachment_text`** (#41, Ch7os): page by page, with `PROTONMAIL_PDF_MAX_MB` (default 10) and `PROTONMAIL_PDF_MAX_PAGES` (default 50) limits. It uses `unpdf`, pinned to an exact version.
+- **SMTP picks implicit TLS or STARTTLS by itself** (#36): when the first connection fails with a TLS mismatch and you did not set `PROTONMAIL_SMTP_SECURE`, the other mode is tried and remembered. An explicit value is never overridden.
+- **`*_COMMAND` variables work again** with commands that need a shell (`PROTONMAIL_PASSWORD_COMMAND` and friends).
+- **Claude Desktop installer finds the Microsoft Store (MSIX) config** on Windows; no more writing to a path the app ignores.
+- **The README multi-account example is valid**: `PROTONMAIL_ACCOUNTS_JSON` lists only the additional accounts, and a duplicated primary address now says so in the error.
+- **No more `chmod` warning for a missing `-wal`/`-shm` file.**
 
 ## [2.10.0] — 2026-10-15
 

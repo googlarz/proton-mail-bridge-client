@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { constants as fsConstants, realpathSync } from "node:fs";
+import { constants as fsConstants, existsSync, readdirSync, realpathSync } from "node:fs";
 import { access, chmod, copyFile, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -129,10 +129,29 @@ export function resolveClaudeDesktopConfigPath(explicitPath?: string): string {
     case "darwin":
       return join(homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
     case "win32":
-      return join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
+      return (
+        findMsixClaudeConfig() ??
+        join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "Claude", "claude_desktop_config.json")
+      );
     default:
       return join(homedir(), ".config", "Claude", "claude_desktop_config.json");
   }
+}
+
+// The Microsoft Store (MSIX) build of Claude Desktop virtualises %APPDATA%, so its config
+// lives under the package folder instead of the classic Roaming path.
+function findMsixClaudeConfig(): string | undefined {
+  const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
+  try {
+    for (const entry of readdirSync(join(localAppData, "Packages"))) {
+      if (!/^(Claude|AnthropicPBC\.Claude)_/i.test(entry)) continue;
+      const candidate = join(localAppData, "Packages", entry, "LocalCache", "Roaming", "Claude", "claude_desktop_config.json");
+      if (existsSync(candidate)) return candidate;
+    }
+  } catch {
+    // No Packages folder (non-Store install): fall back to the classic path.
+  }
+  return undefined;
 }
 
 export function resolveClaudeDesktopRuntimeDir(explicitPath?: string): string {

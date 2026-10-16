@@ -205,3 +205,17 @@ test("buildConfigFromEnv lets PROTONMAIL_SMTP_PORT/PROTONMAIL_SMTP_SECURE overri
     }
   }
 });
+
+// Runs on every platform: the command goes through the platform's own shell (cmd.exe on Windows, /bin/sh elsewhere).
+// `node -p 42` needs no quoting in either.
+test("buildConfigFromEnv reads *_COMMAND secrets through the platform shell", () => {
+  const saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+  for (const key of KEYS) delete process.env[key];
+  process.env.PROTONMAIL_USERNAME = "owner@example.com";
+  process.env.PROTONMAIL_PASSWORD_COMMAND = "node -p 42";
+  try {
+    assert.equal(buildConfigFromEnv().smtp.password, "42");
+  } finally {
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  }
+});

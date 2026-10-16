@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFileSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -3978,7 +3978,8 @@ function readEnvValue(name: string): string | undefined {
 
   const command = process.env[`${name}_COMMAND`]?.trim();
   if (command) {
-    return execFileSync("/bin/sh", ["-c", command], { encoding: "utf-8" }).trim();
+    // The platform shell: /bin/sh on macOS and Linux (as before), cmd.exe on Windows, which has no /bin/sh.
+    return execSync(command, { encoding: "utf-8" }).trim();
   }
 
   const filePath = process.env[`${name}_FILE`]?.trim();
@@ -4134,7 +4135,11 @@ function parseAdditionalAccountsEnv(primary: AccountConfig): AccountConfig[] {
     }
     const lowerAddress = address.toLowerCase();
     if (seenAddresses.has(lowerAddress)) {
-      throw new Error(`PROTONMAIL_ACCOUNTS_JSON[${index}]: duplicate address "${address}".`);
+      const isPrimary = lowerAddress === primary.address.toLowerCase();
+      throw new Error(
+        `PROTONMAIL_ACCOUNTS_JSON[${index}]: duplicate address "${address}".` +
+          (isPrimary ? " The primary account (PROTONMAIL_USERNAME) is already configured: list only the additional accounts here." : ""),
+      );
     }
     seenAddresses.add(lowerAddress);
 
@@ -4168,6 +4173,7 @@ function parseAdditionalAccountsEnv(primary: AccountConfig): AccountConfig[] {
         host: stringField("smtpHost", primary.smtp.host),
         port: numberField("smtpPort", primary.smtp.port),
         secure: boolField("smtpSecure", primary.smtp.secure),
+        secureExplicit: typeof value.smtpSecure === "boolean" || primary.smtp.secureExplicit === true,
         username: stringField("smtpUsername", address),
         password: stringField("smtpPassword", password),
       },
@@ -4199,6 +4205,9 @@ export function buildConfigFromEnv(): ProtonMailConfig {
   // plaintext greeting, no STARTTLS) — confirmed against a live Bridge
   // instance. Overridable for non-Bridge SMTP setups.
   const smtpSecure = parseBooleanEnv("PROTONMAIL_SMTP_SECURE", true);
+  // Set by the user (a non-empty value that is not an unfilled "${user_config...}" placeholder), as opposed to the default.
+  const smtpSecureRaw = process.env.PROTONMAIL_SMTP_SECURE?.trim() ?? "";
+  const smtpSecureExplicit = smtpSecureRaw !== "" && !smtpSecureRaw.startsWith("${");
   validatePortEnv("PROTONMAIL_IMAP_PORT");
   const imapPort = parseIntegerEnv("PROTONMAIL_IMAP_PORT", 1143, 1, 65_535);
   const debug = parseBooleanEnv("DEBUG", false);
@@ -4241,7 +4250,7 @@ export function buildConfigFromEnv(): ProtonMailConfig {
     logger.warn("TLS verification is disabled for local Bridge IMAP connections.", "MCPServer", { host: imapHost });
   }
 
-  const primarySmtp = { host: smtpHost, port: smtpPort, secure: smtpSecure, username, password };
+  const primarySmtp = { host: smtpHost, port: smtpPort, secure: smtpSecure, secureExplicit: smtpSecureExplicit, username, password };
   const primaryImap = { host: imapHost, port: imapPort, secure: imapSecure, username: imapUsername, password: imapPassword };
   const primaryAccount: AccountConfig = {
     address: username,

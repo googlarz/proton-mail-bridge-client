@@ -2,6 +2,11 @@ export interface ProtonConnectionConfig {
   host: string;
   port: number;
   secure: boolean;
+  /**
+   * True when `secure` was set on purpose (PROTONMAIL_SMTP_SECURE, or smtpSecure on an account). Without it the SMTP
+   * service starts with implicit TLS and, if the port answers in plaintext (Bridge's STARTTLS mode), switches once.
+   */
+  secureExplicit?: boolean;
   username: string;
   password: string;
 }

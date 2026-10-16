@@ -290,11 +290,11 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 
 ## Multi-account support (v2.1.0+)
 
-Support multiple Proton Mail addresses configured in Bridge (using Bridge's **Split Addresses** feature). Each address gets its own isolated service stack, local index, and drafts storage.
+Use more than one Proton mailbox from the same server: either several addresses of one account (Bridge's **Split Addresses** feature) or separate Proton accounts signed in to the same Bridge. Each one gets its own isolated service stack, local index, and drafts storage.
 
 ### Setup
 
-First, enable **Split Addresses** in Proton Bridge and configure each address as a separate account. Bridge will generate a separate password for each address. Then set `PROTONMAIL_ACCOUNTS_JSON`:
+In Proton Bridge, make each address or account its own login: with **Split Addresses** on, every address has a login; separate accounts each have their own. Bridge generates a separate password for each login, and the same password works for IMAP and SMTP. The first account is `PROTONMAIL_USERNAME` / `PROTONMAIL_PASSWORD`; **`PROTONMAIL_ACCOUNTS_JSON` lists only the additional ones**, as a JSON array on one line:
 
 ```json
 {
@@ -304,27 +304,20 @@ First, enable **Split Addresses** in Proton Bridge and configure each address as
       "env": {
         "PROTONMAIL_USERNAME": "primary@proton.me",
         "PROTONMAIL_PASSWORD": "primary-bridge-password",
-        "PROTONMAIL_IMAP_HOST": "127.0.0.1",
-        "PROTONMAIL_IMAP_PORT": "1143",
-        "PROTONMAIL_IMAP_SECURE": "false",
-        "PROTONMAIL_SMTP_HOST": "127.0.0.1",
-        "PROTONMAIL_SMTP_PORT": "1025",
-        "PROTONMAIL_ACCOUNTS_JSON": "[
-          { \"address\": \"primary@proton.me\", \"password\": \"primary-bridge-password\" },
-          { \"address\": \"alias@proton.me\", \"password\": \"alias-bridge-password\" },
-          { \"address\": \"business@custom.com\", \"password\": \"business-bridge-password\" }
-        ]"
+        "PROTONMAIL_ACCOUNTS_JSON": "[{\"address\": \"alias@proton.me\", \"password\": \"alias-bridge-password\"}, {\"address\": \"business@custom.com\", \"password\": \"business-bridge-password\"}]"
       }
     }
   }
 }
 ```
 
-**Note:** The password is the **Bridge password for each address**, not your Proton account password. Bridge generates a unique password for each Split Address.
+Listing the primary address again is refused at startup ("duplicate address"). Host, ports and the TLS mode default to the primary account's; an entry can override them with `imapHost`, `imapPort`, `imapSecure`, `smtpHost`, `smtpPort` and `smtpSecure`.
+
+**Note:** The password is the **Bridge password for each login**, not your Proton account password.
 
 ### How it works
 
-- **Primary account:** the first entry in `PROTONMAIL_ACCOUNTS_JSON` (or the main `PROTONMAIL_USERNAME`/`PROTONMAIL_PASSWORD` pair if not set). Email IDs from the primary account have no prefix.
+- **Primary account:** the `PROTONMAIL_USERNAME`/`PROTONMAIL_PASSWORD` pair. Email IDs from the primary account have no prefix.
 - **Additional accounts:** each has an auto-generated slug (e.g., `alias`, `business`). Email IDs carry an account prefix: `alias::message-id`, `business::message-id`.
 - **Sending:** `send_email`, `reply_to_email`, etc. route through the account matching the `from` address. If no account matches, the primary connection is used with a header override (for non-configured aliases).
 - **Search and read:** all read tools (search, threads, analytics, digest) automatically fan out across all configured accounts and merge results, preserving the account prefix in returned IDs.
