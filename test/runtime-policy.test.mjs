@@ -71,6 +71,7 @@ test("sanitized runtime config excludes secrets and preserves policy flags", () 
     allowEmptyFolder: false,
     restrictOutboundToSelf: false,
     allowFileDownloadDir: null,
+    maxInlineKB: 40960,
     maxInlineBytes: 40960,
     opDelayMs: 0,
     sendDelaySeconds: 0,
