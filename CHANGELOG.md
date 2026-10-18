@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.13.0] — 2026-10-18
+
 - **`docker/Dockerfile`**: the published package in a small non-root image for headless machines (see the README); built from the repo, not published to a registry.
 - **A lost connection no longer ends the server.** Unhandled socket errors (`ECONNRESET`, `EPIPE`, a dropped TLS session) used to run `process.exit(1)`, so Claude Desktop showed the server as disconnected after a quiet period. They are now logged and the next call reconnects; any other uncaught error still exits, and every exit logs its cause and uptime.
 - **A TLS-mode mismatch is explained in every tool** (as in `run_doctor`), next to the existing wrong-password and Bridge-not-running messages.
