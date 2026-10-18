@@ -403,6 +403,23 @@ export function exceedsHtmlDepth(html: string, limit: number): boolean {
 // text. Markdown keeps links, lists, and emphasis instead of discarding
 // them, and (per real-world comparison against other Proton MCP servers)
 // costs meaningfully fewer tokens than passing raw HTML to a model.
+// Links a reader may really need (leaving a list, confirming an address, resetting a password, an invitation)
+// are never shortened, whatever their length.
+const KEEP_LINK = /unsubscribe|opt[-_]?out|subscribe|confirm|verify|activate|reset|password|invit|calendar|\.ics\b|preferences|manage/i;
+
+// Marketing and bank mail carry tracking links of 100-300 characters per link; in Markdown they cost tokens and say
+// nothing. Keeps the link text and the host, drops the rest of the address.
+export function shortenLongLinks(markdown: string, maxUrlLength = 100): string {
+  return markdown.replace(/\[([^\]]*)\]\((https?:\/\/[^\s)]+)([^)]*)\)/g, (match, text: string, url: string) => {
+    if (url.length <= maxUrlLength || KEEP_LINK.test(url) || KEEP_LINK.test(text)) return match;
+    try {
+      return `[${text}](${new URL(url).origin}/…)`;
+    } catch {
+      return match;
+    }
+  });
+}
+
 export function htmlToMarkdown(value?: string): string | undefined {
   if (!value) {
     return undefined;

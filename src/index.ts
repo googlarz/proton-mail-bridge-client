@@ -4332,6 +4332,7 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       allowFileDownloadDir,
       // The value is in KB despite the historical name; PROTONMAIL_MAX_INLINE_KB is the clear spelling and wins.
       maxInlineBytes: parseIntegerEnv("PROTONMAIL_MAX_INLINE_KB", parseIntegerEnv("PROTONMAIL_MAX_INLINE_BYTES", 40, 1, 10240), 1, 10240),
+      shortenLinks: parseBooleanEnv("PROTONMAIL_SHORTEN_LINKS", false),
       pdfMaxMb: parseIntegerEnv("PROTONMAIL_PDF_MAX_MB", DEFAULT_PDF_MAX_MB, 1, 100),
       pdfMaxPages: parseIntegerEnv("PROTONMAIL_PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, 1, 2000),
       opDelayMs,

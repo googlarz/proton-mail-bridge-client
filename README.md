@@ -524,6 +524,7 @@ PROTONMAIL_IDLE_WATCH='true'
 PROTONMAIL_IDLE_MAX_SECONDS='30'
 
 # Attachments
+PROTONMAIL_SHORTEN_LINKS='false'     # true = long tracking links in Markdown bodies become host/… (unsubscribe, confirm, reset links are kept)
 PROTONMAIL_MAX_INLINE_KB='40'         # in KB (older name PROTONMAIL_MAX_INLINE_BYTES still works, also in KB): largest attachment get_attachment_content returns inline as base64
 PROTONMAIL_PDF_MAX_MB='10'            # largest PDF get_attachment_text extracts text from (1-100 MB); bigger ones are refused with a message
 PROTONMAIL_PDF_MAX_PAGES='50'         # pages get_attachment_text reads from a PDF (1-2000); a longer PDF is cut off with a note saying how many pages are missing

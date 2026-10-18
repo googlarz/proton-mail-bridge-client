@@ -42,6 +42,7 @@ import {
   optionalNumber,
   parseDateInput,
   htmlToMarkdown,
+  shortenLongLinks,
   redactInlineData,
   parseEmailId,
   previewText,
@@ -963,6 +964,11 @@ export class SimpleIMAPService {
   async ping(): Promise<void> {
     const client = await this.ensureConnected();
     await client.noop();
+  }
+
+  // PROTONMAIL_SHORTEN_LINKS (off by default): long tracking links in the Markdown body become host/…
+  private maybeShortenLinks(text: string | undefined): string | undefined {
+    return text && this.config.runtime?.shortenLinks ? shortenLongLinks(text) : text;
   }
 
   // The folders this account keeps in its index (PROTONMAIL_AUTO_SYNC_FOLDER, or the account's own autoSyncFolder).
@@ -4351,7 +4357,7 @@ export class SimpleIMAPService {
       // display happens later, only in the tool-output formatting layer
       // (formatEmailDetailOutput), so composing a reply or forward still
       // quotes the real original rather than a folded marker.
-      text: redactInlineData(parsed.text) || htmlToMarkdown(typeof parsed.html === "string" ? parsed.html : undefined),
+      text: this.maybeShortenLinks(redactInlineData(parsed.text) || htmlToMarkdown(typeof parsed.html === "string" ? parsed.html : undefined)),
       html: parsed.html,
       headers: this.mapHeaders(parsed),
     };

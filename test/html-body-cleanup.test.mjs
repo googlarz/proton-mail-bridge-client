@@ -42,3 +42,15 @@ test("the plain-text preview decodes numeric and common named entities, once", (
   assert.equal(stripHtmlToText("<p>&amp;lt;b&amp;gt;</p>").trim(), "&lt;b&gt;", "an escaped entity is decoded one level only");
   assert.equal(stripHtmlToText("<p>&notanentity; &#0; &#xD800;</p>").trim(), "&notanentity; &#0; &#xD800;");
 });
+
+import { shortenLongLinks } from "../dist/utils/helpers.js";
+
+test("shortenLongLinks drops the tail of long tracking links but keeps the ones a reader may need", () => {
+  const tracking = `https://click.example.com/f/a/${"x".repeat(200)}`;
+  assert.equal(shortenLongLinks(`[facebook](${tracking})`), "[facebook](https://click.example.com/…)");
+  assert.equal(shortenLongLinks("[short](https://example.com/a)"), "[short](https://example.com/a)", "short links stay");
+  const unsubscribe = `https://click.example.com/unsubscribe/${"y".repeat(200)}`;
+  assert.equal(shortenLongLinks(`[leave](${unsubscribe})`), `[leave](${unsubscribe})`, "an unsubscribe address stays");
+  assert.equal(shortenLongLinks(`[Confirm your email](${tracking})`), `[Confirm your email](${tracking})`, "nor a confirm link, judged by its text");
+  assert.equal(shortenLongLinks(`[x](${tracking} "title")`), "[x](https://click.example.com/…)");
+});

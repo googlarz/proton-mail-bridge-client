@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`PROTONMAIL_SHORTEN_LINKS=true`** (#42, off by default): long tracking links in a Markdown body become `[text](https://host/…)`. Links to unsubscribe, confirm, verify, reset, invitations and calendar files are never shortened.
+- **`imapflow` is pinned to an exact version** (2.5.5), like `unpdf`, and Dependabot proposes bumps of the two on their own instead of in a group.
+
 ## [2.12.0] — 2026-10-18
 
 - **Read state of old mail stays accurate** (#45): besides the newest window, an incremental sync now does a flags-only pass over each synced folder (every 10 minutes, folders up to 30,000 messages). Mail read elsewhere stops showing as unread in `get_inbox_digest` / `get_actionable_threads`, and messages removed on the server leave the index.

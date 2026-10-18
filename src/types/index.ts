@@ -568,6 +568,8 @@ export interface ProtonRuntimeConfig {
   restrictOutboundToSelf: boolean;
   allowFileDownloadDir?: string;
   maxInlineBytes: number;
+  // Shorten very long links in Markdown bodies to host/… (PROTONMAIL_SHORTEN_LINKS); links to unsubscribe, confirm, reset and the like are kept.
+  shortenLinks?: boolean;
   /** Size limit in MB for PDF text extraction in get_attachment_text (PROTONMAIL_PDF_MAX_MB, default 10). */
   pdfMaxMb?: number;
   /** Pages read from a PDF before the text is cut off (PROTONMAIL_PDF_MAX_PAGES, default 50). */

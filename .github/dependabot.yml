@@ -23,9 +23,15 @@ updates:
       dev-dependencies:
         dependency-type: development
         update-types: ["minor", "patch"]
+      # imapflow and unpdf are pinned to exact versions (package.json): unpdf parses untrusted PDFs and imapflow
+      # is the IMAP core, so a bump of either is reviewed on its own, not buried in a group of four.
+      pinned-dependencies:
+        patterns: ["imapflow", "unpdf"]
+        update-types: ["minor", "patch"]
       production-dependencies:
         dependency-type: production
         update-types: ["minor", "patch"]
+        exclude-patterns: ["imapflow", "unpdf"]
     ignore:
       # Type definitions should describe the OLDEST Node this package supports, not the
       # newest: a newer @types/node lets code call APIs the minimum Node does not have and
