@@ -288,6 +288,20 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 
 ---
 
+## Running in Docker (headless machines)
+
+For a server with no desktop, next to a headless Bridge. The image installs the published npm package; it is not published to a registry, so build it from this repo:
+
+```bash
+docker build -f docker/Dockerfile --build-arg VERSION=2.12.0 -t proton-mail-bridge-client .
+docker run -i --rm --network host \
+  -e PROTONMAIL_USERNAME=you@proton.me -e PROTONMAIL_PASSWORD_FILE=/run/secrets/bridge \
+  -v /path/to/bridge-password:/run/secrets/bridge:ro -v bridge-client-data:/data \
+  proton-mail-bridge-client
+```
+
+`docker run -i` speaks MCP over stdio. The container must reach Bridge's IMAP and SMTP ports (`--network host`, or `--network container:<bridge>` to share Bridge's network). The CLI is in the same image: add `--entrypoint proton-mail-bridge-client` and a command such as `doctor`. The server has no network transport of its own; reaching it from a remote client needs your own wrapper. The image was checked to build, report its version, run as a non-root user and answer an MCP `initialize`; it has not been run against a real Bridge.
+
 ## Multi-account support (v2.1.0+)
 
 Use more than one Proton mailbox from the same server: either several addresses of one account (Bridge's **Split Addresses** feature) or separate Proton accounts signed in to the same Bridge. Each one gets its own isolated service stack, local index, and drafts storage.
