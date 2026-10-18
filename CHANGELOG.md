@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **A lost connection no longer ends the server.** Unhandled socket errors (`ECONNRESET`, `EPIPE`, a dropped TLS session) used to run `process.exit(1)`, so Claude Desktop showed the server as disconnected after a quiet period. They are now logged and the next call reconnects; any other uncaught error still exits, and every exit logs its cause and uptime.
+- **A TLS-mode mismatch is explained in every tool** (as in `run_doctor`), next to the existing wrong-password and Bridge-not-running messages.
+- **`version --check` and `doctor --check-updates`** ask the npm registry whether a newer release exists. Nothing is contacted unless you ask.
+- **`report`**: a diagnostic summary for bug reports (versions, system, connection modes, flags, per-account state); no passwords, no mail, addresses masked.
+- **`get_index_status` shows `history`**: per synced folder how many messages are indexed out of the server total, so a long first sync of a big mailbox no longer looks stuck.
+- **`health` in `get_runtime_status` and CLI `runtime-status`**: a failing login (changed Bridge password), an unreachable Bridge, a stalled sync or a stale index is named with what to do about it.
+
 - **`PROTONMAIL_SHORTEN_LINKS=true`** (#42, off by default): long tracking links in a Markdown body become `[text](https://host/…)`. Links to unsubscribe, confirm, verify, reset, invitations and calendar files are never shortened.
 - **`imapflow` is pinned to an exact version** (2.5.5), like `unpdf`, and Dependabot proposes bumps of the two on their own instead of in a group.
 

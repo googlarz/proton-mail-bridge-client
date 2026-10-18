@@ -870,8 +870,13 @@ export class LocalIndexService {
   // for "verify the index is fresh and complete" was lying about progress.
   // Query the real counts directly instead; cheap indexed COUNT(*)s, no
   // need to touch the deliberate thread/label-building cap above.
-  private async realMessageCounts(): Promise<{ storedMessageCount: number; dedupedMessageCount: number }> {
+  private async realMessageCounts(): Promise<{ storedMessageCount: number; dedupedMessageCount: number; byFolder: Map<string, number> }> {
     const db = await this.ensureDb();
+    const byFolder = new Map(
+      (db.prepare(`SELECT folder, COUNT(*) AS count FROM messages GROUP BY folder`).all() as Array<{ folder: string; count: number }>).map(
+        (row) => [row.folder, Number(row.count)],
+      ),
+    );
     const storedMessageCount = Number(
       (db.prepare(`SELECT COUNT(*) AS count FROM messages`).get() as { count: number }).count,
     );
@@ -882,7 +887,7 @@ export class LocalIndexService {
           .get() as { count: number }
       ).count,
     );
-    return { storedMessageCount, dedupedMessageCount };
+    return { storedMessageCount, dedupedMessageCount, byFolder };
   }
 
   async search(filters: SearchEmailsInput): Promise<{
@@ -3280,7 +3285,7 @@ export class LocalIndexService {
 
   private toStatus(
     snapshot: SnapshotData,
-    counts: { storedMessageCount: number; dedupedMessageCount: number },
+    counts: { storedMessageCount: number; dedupedMessageCount: number; byFolder?: Map<string, number> },
   ): LocalIndexStatus {
     const mailboxMessages = this.buildMailboxMessages(snapshot);
     const threadCount = this.buildThreads(snapshot).length;
@@ -3310,6 +3315,17 @@ export class LocalIndexService {
       storedMessageCount: counts.storedMessageCount,
       dedupedMessageCount: counts.dedupedMessageCount,
       syncCheckpoints: snapshot.syncCheckpoints,
+      history: snapshot.syncCheckpoints.map((checkpoint) => {
+        const indexedMessages = counts.byFolder?.get(checkpoint.folder) ?? 0;
+        const serverMessages = checkpoint.total;
+        return {
+          folder: checkpoint.folder,
+          indexedMessages,
+          serverMessages,
+          ...(serverMessages ? { percent: Math.min(100, Math.round((indexedMessages / serverMessages) * 100)) } : {}),
+          historyComplete: checkpoint.backfilledToUid !== undefined && checkpoint.backfilledToUid <= 1,
+        };
+      }),
       folders: snapshot.indexedFolders,
     };
   }

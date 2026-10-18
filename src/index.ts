@@ -78,6 +78,7 @@ import {
   sanitizeFileName,
 } from "./utils/helpers.js";
 import { AccountManager, type AccountBundle } from "./services/account-manager.js";
+import { healthProblems } from "./utils/health.js";
 import { logger } from "./utils/logger.js";
 import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES } from "./utils/pdf-text.js";
 import {
@@ -8129,6 +8130,7 @@ export function createServer(
                 isPrimary: bundle.account.slug === primaryBundle.account.slug,
                 index: { storedMessageCount: accountIndexStatus.storedMessageCount, updatedAt: accountIndexStatus.updatedAt, isStale: accountIndexStatus.isStale },
                 backgroundSync: bundle.backgroundSyncService.getStatus(),
+                health: healthProblems(bundle.backgroundSyncService.getStatus(), accountIndexStatus),
               };
             }),
           );
@@ -8136,6 +8138,7 @@ export function createServer(
             checkedAt: new Date().toISOString(),
             runtime: sanitizeRuntimeConfig(config.runtime),
             backgroundSync: backgroundSyncService.getStatus(),
+            health: healthProblems(backgroundSyncService.getStatus(), indexStatus),
             imapIdle: imapService.getIdleStatus(),
             index: indexStatus,
             audit: {
@@ -9353,6 +9356,11 @@ export function createServer(
           "IMAP authentication failed. Check that PROTONMAIL_PASSWORD is your Proton Bridge password (not your Proton account password) and that you're signed in inside the Bridge app. Run run_doctor for a full connectivity check.",
         );
       }
+      if (isLikelyTlsMismatchError(error)) {
+        return failed(
+          "The TLS handshake with Proton Bridge failed. PROTONMAIL_IMAP_SECURE / PROTONMAIL_SMTP_SECURE probably does not match the connection mode of that port in Bridge (implicit TLS vs STARTTLS); compare them with Bridge's settings. Run run_doctor for a full connectivity check.",
+        );
+      }
       if (isLikelyConnectionError(error)) {
         return failed(
           "Could not connect to Proton Bridge. Make sure the Bridge app is running, and that PROTONMAIL_IMAP_HOST/PORT and PROTONMAIL_SMTP_HOST/PORT match the ports shown in Bridge's settings. Run run_doctor for a full connectivity check.",
@@ -9481,7 +9489,7 @@ export async function main(): Promise<void> {
       return;
     }
     shuttingDown = true;
-    logger.info(`Received ${reason}, shutting down`, "MCPServer");
+    logger.info(`Received ${reason}, shutting down after ${Math.round((Date.now() - processStartedAt) / 1000)} s`, "MCPServer");
     await stopAllAccounts(accountManager.all());
     process.exit(0);
   };
@@ -9516,15 +9524,31 @@ export async function main(): Promise<void> {
   });
 }
 
-process.on("uncaughtException", (error) => {
-  logger.error("Uncaught exception", "MCPServer", error);
-  process.exit(1);
-});
+// A socket that Bridge (or the OS) drops while nobody is using it surfaces as an error event or a rejection with
+// no caller to catch it. That is a lost connection, which the next call re-opens, not a reason to end the
+// session: Claude Desktop would show the server as disconnected after a quiet period.
+export function isRecoverableConnectionError(error: unknown): boolean {
+  if (isLikelyConnectionError(error) || isLikelyTlsMismatchError(error)) return true;
+  const code = String((error as { code?: unknown } | undefined)?.code ?? "");
+  const text = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return ["EPIPE", "ECONNABORTED", "ENETRESET", "ENETUNREACH", "ERR_STREAM_DESTROYED"].includes(code) ||
+    ["socket hang up", "socket closed", "write after end", "epipe"].some((needle) => text.includes(needle));
+}
 
-process.on("unhandledRejection", (reason) => {
-  logger.error("Unhandled rejection", "MCPServer", reason);
+const processStartedAt = Date.now();
+
+function fatal(kind: string, error: unknown): void {
+  if (isRecoverableConnectionError(error)) {
+    logger.warn(`${kind} from a lost connection; the server keeps running`, "MCPServer", error);
+    return;
+  }
+  logger.error(`${kind}; exiting after ${Math.round((Date.now() - processStartedAt) / 1000)} s`, "MCPServer", error);
   process.exit(1);
-});
+}
+
+process.on("uncaughtException", (error) => fatal("Uncaught exception", error));
+
+process.on("unhandledRejection", (reason) => fatal("Unhandled rejection", reason));
 
 const isDirectExecution = isMainModule(import.meta.url);
 

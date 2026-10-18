@@ -13,6 +13,8 @@ import { isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismat
 import type { EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
 import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
 import { isValidEmail, parseEmails } from "./utils/helpers.js";
+import { checkForUpdate } from "./utils/update-check.js";
+import { healthProblems } from "./utils/health.js";
 import { buildSchedule, defaultSchedulerSystem, findStableAlias, parseTimeOfDay, SCHEDULER_SYSTEMS, type SchedulerSystem } from "./utils/schedule-templates.js";
 import { getClaudeDesktopInstallStatus } from "./scripts/check-claude-desktop.js";
 import { installClaudeDesktopConfig } from "./scripts/install-claude-desktop.js";
@@ -266,12 +268,13 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   completion: { usage: "completion <zsh|bash|fish>", description: "Print a shell completion script for the commands and their flags", flags: [] },
   schedule: { usage: "schedule [--at HH:MM] [--system launchd|systemd|cron|schtasks] [--output <file>] [--password-file <file>]", description: "Print the scheduler definition that runs `digest` every day, with the commands to switch it on (installs nothing)", flags: ["at", "system", "output", "password-file"] },
   help: { usage: "help [command]", description: "Show the command list, or the help for one command", flags: [] },
-  version: { usage: "version", description: "Print the version and exit", flags: [] },
+  version: { usage: "version [--check]", description: "Print the version and exit; --check also asks the npm registry whether a newer release exists", flags: ["check"] },
   "setup-claude-desktop": { usage: "setup-claude-desktop", description: "Run the Claude Desktop setup wizard (works from any install)", flags: [] },
   claude: { usage: "claude <setup|install|check|update|doctor>", description: "Claude Desktop integration: setup wizard, install or update the runtime, check status (update is an alias for install, doctor for check)", flags: [] },
   status: { usage: "status", description: "Show local config, index, runtime, and Claude Desktop status", flags: [] },
-  doctor: { usage: "doctor [--account <slug|address>]", description: "Verify IMAP, SMTP, and Claude Desktop wiring for every account, or one (exits 1 when the check fails)", flags: ["account"] },
+  doctor: { usage: "doctor [--account <slug|address>] [--check-updates]", description: "Verify IMAP, SMTP, and Claude Desktop wiring for every account, or one (exits 1 when the check fails); --check-updates also asks the npm registry for a newer release", flags: ["account", "check-updates"] },
   "connection-status": { usage: "connection-status", description: "Show live IMAP/SMTP connectivity state (exits 1 when either is unreachable)", flags: [] },
+  report: { usage: "report", description: "Print a diagnostic summary to paste into a bug report: versions, system, connection modes, flags and per-account state; no passwords, no mail content, addresses masked", flags: [] },
   "runtime-status": { usage: "runtime-status [--account <slug|address>]", description: "Show runtime policy and background sync state, per account", flags: ["account"] },
   sync: { usage: "sync [--folder <name>] [--limit <n>] [--full]", description: "Refresh the local index from Proton Bridge", flags: ["folder", "limit", "full", "no-attachment-text"] },
   "index-status": { usage: "index-status", description: "Show local index health and freshness", flags: [] },
@@ -900,6 +903,7 @@ async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
       // Top-level fields describe the first account shown; ok covers all of them.
       ok: checked.every((entry) => entry.ok),
       claudeDesktopInstalled: claudeDesktop.installed,
+      ...(isTruthyFlag(parsed.flags["check-updates"]) ? { update: await checkForUpdate(await getPkgVersion()) } : {}),
       ...(checked.length > 1 ? { accounts: checked } : {}),
     };
 
@@ -944,6 +948,55 @@ async function runConnectionStatus(parsed: ParsedCliArgs): Promise<void> {
   });
 }
 
+// a***@example.com: enough to tell accounts apart in a bug report, not enough to identify the person.
+export function maskAddress(address: string): string {
+  const at = address.lastIndexOf("@");
+  return at <= 0 ? "***" : `${address[0]}***${address.slice(at)}`;
+}
+
+async function runReport(): Promise<void> {
+  await withServices(async ({ config, accountManager }) => {
+    const accounts = await Promise.all(
+      accountManager.all().map(async (bundle) => {
+        let imap = "ok";
+        let folderCount: number | undefined;
+        try {
+          await bundle.imapService.ping();
+          folderCount = (await bundle.imapService.getFolders(true)).length;
+        } catch (error) {
+          imap = diagnoseConnectionFailure(error)?.cause ?? "failed";
+        }
+        let smtp = "ok";
+        try {
+          await bundle.smtpService.verifyConnection();
+        } catch (error) {
+          smtp = diagnoseConnectionFailure(error)?.cause ?? "failed";
+        }
+        const index = await bundle.localIndexService.getStatus();
+        return {
+          account: maskAddress(bundle.account.address),
+          imap: { host: bundle.config.imap.host, port: bundle.config.imap.port, secure: bundle.config.imap.secure, check: imap },
+          smtp: { host: bundle.config.smtp.host, port: bundle.config.smtp.port, secure: bundle.config.smtp.secure, userSet: bundle.config.smtp.secureExplicit === true, check: smtp },
+          folderCount,
+          index: { storedMessageCount: index.storedMessageCount, updatedAt: index.updatedAt, isStale: index.isStale },
+          backgroundSync: { folder: bundle.backgroundSyncService.getStatus().folder, full: bundle.backgroundSyncService.getStatus().full },
+        };
+      }),
+    );
+    const claudeDesktop = await getClaudeDesktopInstallStatus();
+    process.stdout.write(
+      json({
+        version: await getPkgVersion(),
+        node: process.version,
+        platform: `${process.platform} ${process.arch}`,
+        claudeDesktopInstalled: claudeDesktop.installed,
+        runtime: sanitizeRuntimeConfig(config.runtime),
+        accounts,
+      }),
+    );
+  });
+}
+
 async function runRuntimeStatus(parsed: ParsedCliArgs): Promise<void> {
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withServices(async ({ accountManager }) => {
@@ -954,6 +1007,7 @@ async function runRuntimeStatus(parsed: ParsedCliArgs): Promise<void> {
         account: bundle.config.smtp.username,
         runtime: sanitizeRuntimeConfig(bundle.config.runtime),
         backgroundSync: bundle.backgroundSyncService.getStatus(),
+        health: healthProblems(bundle.backgroundSyncService.getStatus(), await bundle.localIndexService.getStatus()),
         localIndex: await bundle.localIndexService.getStatus(),
         drafts: {
           total: (await bundle.draftStore.listDrafts(true)).length,
@@ -2215,9 +2269,21 @@ export async function main(): Promise<void> {
       process.stdout.write(scheduleText(parsed));
       return;
     case "-v":
-    case "version":
-      process.stdout.write(`proton-mail-bridge-client ${await getPkgVersion()}\n`);
+    case "version": {
+      const current = await getPkgVersion();
+      process.stdout.write(`proton-mail-bridge-client ${current}\n`);
+      if (isTruthyFlag(parsed.flags.check)) {
+        const update = await checkForUpdate(current);
+        process.stdout.write(
+          update.error
+            ? `Could not check for updates: ${update.error}\n`
+            : update.newer
+              ? `A newer release is available: ${update.latest} (${update.releaseUrl}). Update with: npm install -g proton-mail-bridge-client\n`
+              : "You are on the latest release.\n",
+        );
+      }
       return;
+    }
     case "setup-claude-desktop":
       await runClaudeDesktopSetupWizard();
       return;
@@ -2229,6 +2295,9 @@ export async function main(): Promise<void> {
       return;
     case "connection-status":
       await runConnectionStatus(parsed);
+      return;
+    case "report":
+      await runReport();
       return;
     case "runtime-status":
       await runRuntimeStatus(parsed);

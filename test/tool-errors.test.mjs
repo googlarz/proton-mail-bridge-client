@@ -87,3 +87,19 @@ test("PROTONMAIL_TOOL_ERRORS=protocol (the CLI's setting) keeps the thrown error
     if (saved === undefined) delete process.env.PROTONMAIL_TOOL_ERRORS; else process.env.PROTONMAIL_TOOL_ERRORS = saved;
   }
 });
+
+test("a failed connection says what to do: wrong password, Bridge not running, TLS mode", async () => {
+  await withServer(["owner@example.com"], async ({ client, bundles }) => {
+    const cases = [
+      [new Error("Invalid credentials: login failed"), /Bridge password/],
+      [Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1143"), { code: "ECONNREFUSED" }), /Bridge app is running/],
+      [Object.assign(new Error("wrong version number"), { code: "EPROTO" }), /implicit TLS vs STARTTLS/],
+    ];
+    for (const [error, expected] of cases) {
+      bundles[0].imapService.getFolders = async () => { throw error; };
+      const result = await client.callTool({ name: "get_folders", arguments: {} });
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, expected);
+    }
+  });
+});

@@ -64,3 +64,20 @@ test("the IMAP sweep collects present, unseen and flagged UIDs, at most every fe
   assert.equal(await svc.maybeSweepFlags(client, "Other", 0), undefined, "an empty folder is not swept");
   assert.equal(await svc.maybeSweepFlags(client, "Huge", 1_000_000), undefined, "a very large folder is left to full syncs");
 });
+
+test("index status shows how much of each synced folder is indexed", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "history-progress-"));
+  const index = new LocalIndexService({ smtp, imap, dataDir, debug: false, cacheEnabled: true, analyticsEnabled: true, autoSync: false, syncInterval: 5, runtime });
+  try {
+    await index.recordSnapshot({
+      syncedAt: "2026-03-24T12:00:00.000Z", folders: [],
+      folderStats: [{ folder: "INBOX", fetched: 2, total: 8, backfilledToUid: 5 }],
+      emails: [mail(7), mail(8)],
+    });
+    const status = await index.getStatus();
+    assert.deepEqual(status.history, [{ folder: "INBOX", indexedMessages: 2, serverMessages: 8, percent: 25, historyComplete: false }]);
+  } finally {
+    await index.close();
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

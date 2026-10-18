@@ -191,6 +191,9 @@ proton-mail-bridge-client volume-trends --days 14
 proton-mail-bridge-client watch --timeout 30
 proton-mail-bridge-client test-email you@example.com
 proton-mail-bridge-client doctor                       # every configured account; --account <slug|address> for one
+proton-mail-bridge-client doctor --check-updates         # also asks the npm registry whether a newer release exists
+proton-mail-bridge-client version --check                # same lookup, on its own; nothing is contacted unless you ask
+proton-mail-bridge-client report                         # diagnostic summary for a bug report: versions, system, connection modes, flags; no passwords, addresses masked
 proton-mail-bridge-client status
 proton-mail-bridge-client connection-status
 proton-mail-bridge-client runtime-status                # per account, with each account's background sync; --account for one

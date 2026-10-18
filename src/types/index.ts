@@ -538,6 +538,8 @@ export interface LocalIndexStatus {
   storedMessageCount: number;
   dedupedMessageCount: number;
   syncCheckpoints: MailboxSyncCheckpoint[];
+  // How much of each synced folder is in the index. A long first sync of a big mailbox reads as "stuck" without it.
+  history: Array<{ folder: string; indexedMessages: number; serverMessages?: number; percent?: number; historyComplete: boolean }>;
   folders: Array<{
     path: string;
     messages?: number;

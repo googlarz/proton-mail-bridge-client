@@ -150,3 +150,27 @@ test("doctor and runtime-status cover every account, and --account picks one", a
     await Promise.all([primary.close(), secondary.close(), rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })]);
   }
 });
+
+test("report prints a masked diagnostic summary without secrets", async () => {
+  const primary = await listener();
+  const dir = await mkdtemp(join(tmpdir(), "pmbc-cli-report-"));
+  const env = {
+    ...process.env,
+    PROTONMAIL_USERNAME: "user@example.com",
+    PROTONMAIL_PASSWORD: "super-secret-password",
+    PROTONMAIL_IMAP_PORT: String(primary.port),
+    PROTONMAIL_SMTP_PORT: "9",
+    PROTONMAIL_DATA_DIR: dir,
+    PROTONMAIL_IDLE_WATCH: "false",
+    PROTONMAIL_AUTO_SYNC: "false",
+  };
+  try {
+    const result = await runCli(["report"], env);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.accounts[0].account, "u***@example.com");
+    assert.ok(parsed.version && parsed.node && parsed.platform);
+    assert.doesNotMatch(result.stdout, /super-secret-password|user@example\.com/);
+  } finally {
+    await Promise.all([primary.close(), rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })]);
+  }
+});
