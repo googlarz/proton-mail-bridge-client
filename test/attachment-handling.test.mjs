@@ -265,3 +265,38 @@ test("asImage leaves non-image attachments as base64 text", async () => {
     });
   });
 });
+
+test("saving works when the download directory itself does not exist yet", async () => {
+  await withDirs(async ({ root }) => {
+    const missing = join(root, "deleted-downloads");
+    const svc = service(missing);
+    withAttachments(svc, [att("a.txt", "hello")]);
+    const result = await svc.saveAttachments({ emailId: "INBOX::1::x", outputPath: missing });
+    assert.equal(result.saved.length, 1);
+    assert.equal(await readFile(join(missing, "a.txt"), "utf8"), "hello");
+  });
+});
+
+test("saveTo with a trailing slash saves into that folder under the attachment's own name", async () => {
+  await withDirs(async ({ downloads }) => {
+    await withServer(downloads, async (client, imapService) => {
+      imapService.getAttachmentContent = async (emailId, attachmentId) => ({
+        emailId, attachment: { id: attachmentId, filename: "report.txt" }, base64: Buffer.from("data").toString("base64"),
+      });
+      imapService.saveAttachment = async (emailId, attachmentId, outputPath) => {
+        const { writeFile, mkdir: mk } = await import("node:fs/promises");
+        const target = /[\\/]$/.test(outputPath) ? join(outputPath, "report.txt") : outputPath;
+        await mk(join(target, ".."), { recursive: true });
+        await writeFile(target, "data");
+        return { emailId, attachment: { id: attachmentId }, outputPath: target };
+      };
+      const emailId = createEmailId("INBOX", 5, "100");
+      const viaContent = await client.callTool({ name: "get_attachment_content", arguments: { emailId, attachmentId: "a1", saveTo: "sub/" } });
+      assert.ok(!viaContent.isError, JSON.stringify(viaContent.content));
+      assert.equal(await readFile(join(downloads, "sub", "report.txt"), "utf8"), "data");
+      const viaSave = await client.callTool({ name: "save_attachment", arguments: { emailId, attachmentId: "a1", saveTo: "sub2/" } });
+      assert.ok(!viaSave.isError, JSON.stringify(viaSave.content));
+      assert.equal(await readFile(join(downloads, "sub2", "report.txt"), "utf8"), "data");
+    });
+  });
+});

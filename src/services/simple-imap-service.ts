@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { mkdir, open, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { ImapFlow, type FetchMessageObject, type ListResponse, type SearchObject } from "imapflow";
@@ -955,6 +955,15 @@ export class SimpleIMAPService {
   async ping(): Promise<void> {
     const client = await this.ensureConnected();
     await client.noop();
+  }
+
+  // The folders this account keeps in its index (PROTONMAIL_AUTO_SYNC_FOLDER, or the account's own autoSyncFolder).
+  getSyncFolderList(): string[] {
+    const list = (this.config.runtime?.autoSyncFolder ?? "INBOX,Sent")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    return list.length > 0 ? list : ["INBOX"];
   }
 
   getIdleStatus(): Record<string, unknown> {
@@ -4824,6 +4833,9 @@ export class SimpleIMAPService {
     }
 
     const targetPath = resolve(outputPath);
+    // The download directory itself may be created (writeAttachmentToDownloadDir does the same), e.g. after
+    // the user deleted their Downloads folder.
+    mkdirSync(resolve(allowDir), { recursive: true, mode: 0o700 });
     const allowedRealPath = realpathSync(resolve(allowDir));
     // Canonicalise the part of the target that exists (following symlinks) and keep the rest as written:
     // a save into a directory that does not exist yet is fine as long as the deepest existing ancestor is

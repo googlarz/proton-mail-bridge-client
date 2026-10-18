@@ -75,6 +75,7 @@ import {
   splitAccountPrefix,
   stringifyForJson,
   withAccountPrefix,
+  sanitizeFileName,
 } from "./utils/helpers.js";
 import { AccountManager, type AccountBundle } from "./services/account-manager.js";
 import { logger } from "./utils/logger.js";
@@ -1818,7 +1819,7 @@ const TOOLS = [
         attachmentId: { type: "string", description: "Stable attachment id returned by list_attachments." },
         includeBase64: { type: "boolean", description: "Include base64 payload in the response.", default: false },
         asImage: { type: "boolean", description: "For png, jpeg, gif and webp attachments: return the picture as MCP image content (which a vision-capable client shows to the model) instead of base64 text. Subject to the same inline size limit.", default: false },
-        saveTo: { type: "string", description: "Relative path within PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR to save attachment to disk. Returns file path and size instead of inline base64. Requires env var to be set. Set PROTONMAIL_MAX_INLINE_BYTES (in KB, default 40) to configure the inline size threshold." },
+        saveTo: { type: "string", description: "Relative path within PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR to save attachment to disk. Returns file path and size instead of inline base64. Requires env var to be set. A trailing / saves into that folder under the attachment\u0027s file name. Set PROTONMAIL_MAX_INLINE_KB (default 40) to configure the inline size threshold." },
       },
       required: ["emailId", "attachmentId"],
     },
@@ -1862,7 +1863,7 @@ const TOOLS = [
         emailId: { type: "string", description: "Composite email id in FOLDER::UID format, as returned by get_emails or search_emails." },
         attachmentId: { type: "string", description: "Stable attachment id returned by list_attachments." },
         outputPath: { type: "string", description: "Optional file or directory path to write to." },
-        saveTo: { type: "string", description: "Relative path within PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR to save attachment to disk. Returns file path and size instead of inline base64. Requires env var to be set. Set PROTONMAIL_MAX_INLINE_BYTES (in KB, default 40) to configure the inline size threshold." },
+        saveTo: { type: "string", description: "Relative path within PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR to save attachment to disk. Returns file path and size instead of inline base64. Requires env var to be set. A trailing / saves into that folder under the attachment\u0027s file name. Set PROTONMAIL_MAX_INLINE_KB (default 40) to configure the inline size threshold." },
       },
       required: ["emailId", "attachmentId"],
     },
@@ -3386,27 +3387,39 @@ async function maybeRefreshLocalIndex(
     limitPerFolder?: number;
   } = {},
 ) {
+  // The triage tools ask for "INBOX", but with Proton filters most mail lands in other folders. Refresh the
+  // folders the account actually indexes (its autoSyncFolder list) instead of INBOX alone.
+  const folders =
+    input.folder === "INBOX" && typeof imapService.getSyncFolderList === "function"
+      ? imapService.getSyncFolderList()
+      : input.folder
+        ? [input.folder]
+        : undefined;
   const status = await localIndexService.getFreshness();
   if (!input.force && status.storedMessageCount > 0 && !status.isStale) {
     // Not stale by age, but age alone cannot see mail that arrived since the last sync
     // (background sync/IDLE may be off, failing, or not covering this account). Compare the
-    // server's UIDNEXT/MESSAGES for the folder with the stored checkpoint (a single STATUS)
-    // and refresh only if they differ. A failed probe never blocks serving the index.
-    if (!(await mailboxChangedSinceCheckpoint(imapService, localIndexService, input.folder ?? "INBOX"))) {
+    // server's UIDNEXT/MESSAGES for each folder with the stored checkpoint (a single STATUS)
+    // and refresh only those that differ. A failed probe never blocks serving the index.
+    const changed: string[] = [];
+    for (const folder of folders ?? ["INBOX"]) {
+      if (await mailboxChangedSinceCheckpoint(imapService, localIndexService, folder)) changed.push(folder);
+    }
+    if (changed.length === 0) {
       return undefined;
     }
-    // Only the probed folder moved, so refresh only that one. An unscoped refresh here would
+    // Only the folders that moved, so refresh only those. An unscoped refresh here would
     // sync EVERY folder (with attachment text) whenever a single INBOX message arrives — the
     // pattern that used to blow past the client's 60 s request timeout.
     return ensureFreshLocalIndex(imapService, localIndexService, {
-      folder: input.folder ?? "INBOX",
+      folder: changed.join(","),
       full: input.full,
       limitPerFolder: input.limitPerFolder ?? 100,
     });
   }
 
   return ensureFreshLocalIndex(imapService, localIndexService, {
-    folder: input.folder,
+    folder: folders?.join(","),
     full: input.full,
     limitPerFolder: input.limitPerFolder,
   });
@@ -8114,6 +8127,7 @@ export function createServer(
                 address: bundle.account.address,
                 isPrimary: bundle.account.slug === primaryBundle.account.slug,
                 index: { storedMessageCount: accountIndexStatus.storedMessageCount, updatedAt: accountIndexStatus.updatedAt, isStale: accountIndexStatus.isStale },
+                backgroundSync: bundle.backgroundSyncService.getStatus(),
               };
             }),
           );
@@ -9129,7 +9143,8 @@ export function createServer(
             }
             const saving = await bundle.imapService.getAttachmentContent(emailId, requireString(args, "attachmentId"), { forSave: true });
             const buf = Buffer.from(saving.base64 ?? "", "base64");
-            const savedPath = await writeAttachmentToDownloadDir(downloadDir, saveTo, buf);
+            const target = /[\\/]$/.test(saveTo) ? saveTo + sanitizeFileName(saving.attachment?.filename, "attachment") : saveTo;
+            const savedPath = await writeAttachmentToDownloadDir(downloadDir, target, buf);
             return createTextResult({ saved: true, path: savedPath, bytes: buf.length, filename: saving.attachment?.filename });
           }
           const result = await bundle.imapService.getAttachmentContent(
@@ -9144,7 +9159,7 @@ export function createServer(
             if (decodedSize > MAX_INLINE_BYTES) {
               throw new McpError(
                 ErrorCode.InvalidParams,
-                `Attachment is ~${Math.round(decodedSize / 1024)}KB decoded. Inline limit is ${config.runtime.maxInlineBytes ?? 40}KB. Set PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR and pass saveTo to write to disk instead, or increase the limit with PROTONMAIL_MAX_INLINE_BYTES.`,
+                `Attachment is ~${Math.round(decodedSize / 1024)}KB decoded. Inline limit is ${config.runtime.maxInlineBytes ?? 40}KB. Set PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR and pass saveTo to write to disk instead, or increase the limit with PROTONMAIL_MAX_INLINE_KB.`,
               );
             }
           }
@@ -9186,7 +9201,8 @@ export function createServer(
             if (!isPathInside(absDir, absTarget, pathSep)) {
               throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
             }
-            resolvedPath = absTarget;
+            // pathResolve drops a trailing slash; keep it so the service saves into the folder under the file's own name.
+            resolvedPath = /[\\/]$/.test(saveTo) ? absTarget + pathSep : absTarget;
           }
           const result = await bundle.imapService.saveAttachment(
             emailId,

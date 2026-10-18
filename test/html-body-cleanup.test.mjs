@@ -36,3 +36,9 @@ test("many unclosed comment openers stay linear", () => {
   htmlToMarkdown(hostile);
   assert.ok(performance.now() - start < 3000, `took ${Math.round(performance.now() - start)} ms`);
 });
+
+test("the plain-text preview decodes numeric and common named entities, once", () => {
+  assert.equal(stripHtmlToText("<p>We&#39;ve made &quot;changes&quot; &#x2014; read &amp; reply</p>").trim(), "We've made \"changes\" — read & reply");
+  assert.equal(stripHtmlToText("<p>&amp;lt;b&amp;gt;</p>").trim(), "&lt;b&gt;", "an escaped entity is decoded one level only");
+  assert.equal(stripHtmlToText("<p>&notanentity; &#0; &#xD800;</p>").trim(), "&notanentity; &#0; &#xD800;");
+});

@@ -296,13 +296,21 @@ export function stripHtmlToText(value?: string): string | undefined {
   // `[^<>]*` (not `[^>]+`): a tag cannot contain another `<`, so an unclosed `<` stops at the next one
   // instead of scanning to the end of the text.
   const withoutTags = removeHtmlBlocks(removeHtmlBlocks(removeHtmlComments(value), "style"), "script")
-    .replace(/<[^<>]*>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">");
+    .replace(/<[^<>]*>/g, " ");
 
-  return previewText(withoutTags, 10_000);
+  return previewText(decodeHtmlEntities(withoutTags), 10_000);
+}
+
+const NAMED_HTML_ENTITIES: Record<string, string> = { nbsp: " ", amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+
+// One pass, so "&amp;lt;" stays "&lt;" instead of being decoded twice into "<".
+function decodeHtmlEntities(value: string): string {
+  return value.replace(/&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([a-zA-Z]+));/g, (match, dec?: string, hex?: string, name?: string) => {
+    if (name) return NAMED_HTML_ENTITIES[name.toLowerCase()] ?? match;
+    const codePoint = dec !== undefined ? Number.parseInt(dec, 10) : Number.parseInt(hex ?? "", 16);
+    if (!Number.isFinite(codePoint) || codePoint < 1 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return match;
+    return String.fromCodePoint(codePoint);
+  });
 }
 
 let markdownConverter: TurndownService | undefined;
