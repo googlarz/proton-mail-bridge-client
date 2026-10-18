@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.12.0] — 2026-10-18
+
 - **Read state of old mail stays accurate** (#45): besides the newest window, an incremental sync now does a flags-only pass over each synced folder (every 10 minutes, folders up to 30,000 messages). Mail read elsewhere stops showing as unread in `get_inbox_digest` / `get_actionable_threads`, and messages removed on the server leave the index.
 - **Only one server instance per data directory runs the background sync and IDLE** (#47): the others take over when it exits. `get_runtime_status` shows `backgroundSync.leader`.
 - **CLI `doctor` and `runtime-status` cover every account**, `--account <slug|address>` picks one (#48).
