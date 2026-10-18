@@ -3,6 +3,7 @@ import { logger, type Logger } from "../utils/logger.js";
 import { LocalIndexService } from "./local-index-service.js";
 import { AccountIdentityMismatchError } from "../utils/account-identity.js";
 import { isLikelyAuthenticationError, SimpleIMAPService } from "./simple-imap-service.js";
+import { SyncLeader } from "./sync-leader.js";
 
 const AUTH_BACKOFF_MIN_MS = 5 * 60_000;
 const AUTH_BACKOFF_MAX_MS = 30 * 60_000;
@@ -12,6 +13,8 @@ const TRANSIENT_BACKOFF_MAX_MS = 2 * 60_000;
 // as a hard floor so the idle loop can never busy-spin, independent of how the
 // underlying IMAP client behaves.
 const IDLE_ITERATION_FLOOR_MS = 1_000;
+// How often an instance that does not hold the sync lease checks whether it can take over the IDLE watch.
+const IDLE_FOLLOWER_RECHECK_MS = 30_000;
 
 // "auth" backs off for minutes and, for the IDLE loop, stops retrying: use it for anything that only the
 // user can fix. A data directory that belongs to another account is exactly that; retrying it every
@@ -22,6 +25,7 @@ function classifyFailure(error: unknown): "auth" | "transient" {
 
 export class BackgroundSyncService {
   private readonly status: BackgroundSyncStatus;
+  private readonly leader: SyncLeader;
   private timer?: NodeJS.Timeout;
   private activeRun?: Promise<void>;
   private idleLoop?: Promise<void>;
@@ -35,6 +39,7 @@ export class BackgroundSyncService {
     private readonly localIndexService: LocalIndexService,
     private readonly log: Logger = logger,
   ) {
+    this.leader = new SyncLeader(this.config.dataDir, this.log);
     this.status = {
       enabled: this.config.autoSync,
       running: false,
@@ -73,6 +78,7 @@ export class BackgroundSyncService {
     this.status.nextRunAt = undefined;
     this.status.backoffUntil = undefined;
     this.status.idleWatching = false;
+    this.leader.release();
   }
 
   getStatus(): BackgroundSyncStatus {
@@ -87,6 +93,20 @@ export class BackgroundSyncService {
     if (this.activeRun) {
       await this.activeRun;
       return this.getStatus();
+    }
+
+    // Scheduled and IDLE-triggered runs belong to one instance per data directory; an explicit run (the tool or
+    // the CLI) always goes ahead.
+    if (reason !== "manual") {
+      const leads = this.leader.tryAcquire();
+      this.status.leader = leads;
+      if (!leads) {
+        if (this.started) {
+          this.startIdleLoop();
+          this.scheduleNextRun();
+        }
+        return this.getStatus();
+      }
     }
 
     if (this.timer) {
@@ -221,6 +241,13 @@ export class BackgroundSyncService {
     this.idleLoop = (async () => {
       let failCount = 0;
       while (this.started && this.status.enabled && this.status.idleEnabled && this.primaryIdleFolder) {
+        if (!this.leader.tryAcquire()) {
+          this.status.leader = false;
+          this.status.idleWatching = false;
+          await this.waitForRetry(IDLE_FOLLOWER_RECHECK_MS);
+          continue;
+        }
+        this.status.leader = true;
         this.status.idleWatching = true;
         const iterationStartedAt = Date.now();
         try {

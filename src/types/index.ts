@@ -582,6 +582,9 @@ export interface ProtonRuntimeConfig {
 
 export interface BackgroundSyncStatus {
   enabled: boolean;
+  // Several server instances can share one data directory; only one runs the background sync and IDLE watch.
+  // False here means another instance holds that job and this one serves tools from the index.
+  leader?: boolean;
   running: boolean;
   intervalMinutes: number;
   folder?: string;

@@ -695,6 +695,7 @@ To check a real Bridge yourself, run the read-only smoke test: `PROTONMAIL_USERN
 - `get_emails` and `search_emails` return a composite `emailId` — use it for all subsequent reads and actions.
 - `search_indexed_emails` supports `from:`, `to:`, `subject:`, `label:`, `domain:` shortcuts.
 - The local index lives at `PROTONMAIL_DATA_DIR/mail-index.sqlite`. Background sync and IMAP IDLE keep it warm.
+- **Several clients at once.** Every MCP client starts its own server. Per data directory, only one of them runs the background sync and the IDLE watch (it holds `background-sync.lock`); the others serve tools from the index and take over when it exits. `get_runtime_status` shows `backgroundSync.leader`. A manual `sync_emails` / `run_background_sync` always runs.
 - Filters on the local index ignore case and accents, and match spelling variants: `Müller` finds `Mueller`, `lodz` finds `Łódź`, `strasse` finds `Straße`. Live `search_emails` and `count_messages` go through Bridge: a query with umlauts or other non-ASCII letters also matches the spelled-out form (`Müller` finds `Mueller`), but a plain ASCII query is sent as typed, so `Mueller` does not find `Müller` there. Use `search_indexed_emails` for that.
 - Audit logs live at `PROTONMAIL_DATA_DIR/audit.log`.
 - Draft sync is best-effort — the local draft is always preserved even if remote sync fails.

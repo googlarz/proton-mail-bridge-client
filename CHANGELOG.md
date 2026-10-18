@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Read state of old mail stays accurate** (#45): besides the newest window, an incremental sync now does a flags-only pass over each synced folder (every 10 minutes, folders up to 30,000 messages). Mail read elsewhere stops showing as unread in `get_inbox_digest` / `get_actionable_threads`, and messages removed on the server leave the index.
+- **Only one server instance per data directory runs the background sync and IDLE** (#47): the others take over when it exits. `get_runtime_status` shows `backgroundSync.leader`.
+- **CLI `doctor` and `runtime-status` cover every account**, `--account <slug|address>` picks one (#48).
+- **Saving attachments** (#46): `save_attachment(s)` create a missing `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR`; `saveTo: "folder/"` saves into the folder under the attachment's file name.
+- **Triage tools refresh the account's own folder list** (`autoSyncFolder`) before reading, not only INBOX; `get_runtime_status` shows each account's `backgroundSync`; HTML entities such as `&#39;` are decoded in previews; the `saveTo` description names `PROTONMAIL_MAX_INLINE_KB` (#49).
 - **`get_attachment_content` can return a picture as MCP image content** (#44): pass `asImage: true` for a png, jpeg, gif or webp attachment. Same inline size limit; other types and the default behaviour are unchanged.
 - **PDF text is read in a `worker_thread`** (#43), so a heavy file cannot stall the server, and the timeout now really stops the parse.
 - **CLI `doctor` explains the failure** (`cause` and `suggestion`: TLS mode mismatch, wrong password, Bridge unreachable), the same way the `run_doctor` tool does.
