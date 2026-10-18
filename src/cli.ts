@@ -270,9 +270,9 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   "setup-claude-desktop": { usage: "setup-claude-desktop", description: "Run the Claude Desktop setup wizard (works from any install)", flags: [] },
   claude: { usage: "claude <setup|install|check|update|doctor>", description: "Claude Desktop integration: setup wizard, install or update the runtime, check status (update is an alias for install, doctor for check)", flags: [] },
   status: { usage: "status", description: "Show local config, index, runtime, and Claude Desktop status", flags: [] },
-  doctor: { usage: "doctor", description: "Verify IMAP, SMTP, and Claude Desktop wiring (exits 1 when the check fails)", flags: [] },
+  doctor: { usage: "doctor [--account <slug|address>]", description: "Verify IMAP, SMTP, and Claude Desktop wiring for every account, or one (exits 1 when the check fails)", flags: ["account"] },
   "connection-status": { usage: "connection-status", description: "Show live IMAP/SMTP connectivity state (exits 1 when either is unreachable)", flags: [] },
-  "runtime-status": { usage: "runtime-status", description: "Show runtime policy and background sync state", flags: [] },
+  "runtime-status": { usage: "runtime-status [--account <slug|address>]", description: "Show runtime policy and background sync state, per account", flags: ["account"] },
   sync: { usage: "sync [--folder <name>] [--limit <n>] [--full]", description: "Refresh the local index from Proton Bridge", flags: ["folder", "limit", "full", "no-attachment-text"] },
   "index-status": { usage: "index-status", description: "Show local index health and freshness", flags: [] },
   folders: { usage: "folders", description: "List available folders from Proton Bridge", flags: [] },
@@ -719,9 +719,22 @@ async function withServices<T>(run: (context: ReturnType<typeof createServer> & 
   try {
     return await run({ config, ...services });
   } finally {
-    services.backgroundSyncService.stop();
-    await Promise.allSettled([services.imapService.disconnect(), services.smtpService.close()]);
+    for (const bundle of services.accountManager.all()) {
+      bundle.backgroundSyncService.stop();
+      await Promise.allSettled([bundle.imapService.disconnect(), bundle.smtpService.close()]);
+    }
   }
+}
+
+// --account picks one account (slug or address); without it, every configured account.
+function selectAccountBundles(accountManager: ReturnType<typeof createServer>["accountManager"], parsed: ParsedCliArgs) {
+  const wanted = getStringFlag(parsed.flags, "account");
+  if (!wanted) return accountManager.all();
+  const bundle = accountManager.byAddress(wanted) ?? accountManager.all().find((entry) => entry.account.slug === wanted);
+  if (!bundle) {
+    throw new CliUsageError(`Unknown account "${wanted}". Configured: ${accountManager.all().map((entry) => entry.account.slug).join(", ")}`);
+  }
+  return [bundle];
 }
 
 async function syncIndex(context: ReturnType<typeof createServer>, input: {
@@ -842,44 +855,52 @@ export function diagnoseConnectionFailure(reason: unknown): { cause: string; sug
 
 async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, smtpService, imapService, localIndexService }) => {
-    const [claudeDesktop, index] = await Promise.all([
-      getClaudeDesktopInstallStatus(),
-      localIndexService.getStatus(),
-    ]);
-
-    let imapOk = false;
-    let smtpOk = false;
-    let folderCount = 0;
-    let error: string | undefined;
-    let diagnosis: ReturnType<typeof diagnoseConnectionFailure>;
-
-    try {
-      await imapService.ping();
-      imapOk = true;
-      folderCount = (await imapService.getFolders(true)).length;
-      await smtpService.verifyConnection();
-      smtpOk = true;
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
-      diagnosis = diagnoseConnectionFailure(err);
-    }
+  await withServices(async ({ accountManager }) => {
+    const bundles = selectAccountBundles(accountManager, parsed);
+    const checked = await Promise.all(
+      bundles.map(async (bundle) => {
+        let imapOk = false;
+        let smtpOk = false;
+        let folderCount = 0;
+        let error: string | undefined;
+        let diagnosis: ReturnType<typeof diagnoseConnectionFailure>;
+        try {
+          await bundle.imapService.ping();
+          imapOk = true;
+          folderCount = (await bundle.imapService.getFolders(true)).length;
+          await bundle.smtpService.verifyConnection();
+          smtpOk = true;
+        } catch (err) {
+          error = err instanceof Error ? err.message : String(err);
+          diagnosis = diagnoseConnectionFailure(err);
+        }
+        return {
+          slug: bundle.account.slug,
+          account: bundle.config.smtp.username,
+          ok: imapOk && smtpOk,
+          imapOk,
+          smtpOk,
+          folderCount,
+          indexUpdatedAt: (await bundle.localIndexService.getStatus()).updatedAt,
+          error,
+          ...(diagnosis ? { cause: diagnosis.cause, suggestion: diagnosis.suggestion } : {}),
+        };
+      }),
+    );
+    const claudeDesktop = await getClaudeDesktopInstallStatus();
+    const { slug: _slug, ...firstFields } = checked[0];
 
     const result = {
-      ok: imapOk && smtpOk,
       // A stale/orphaned install elsewhere on disk (wrong path, old
       // version) looks identical to a fresh one on every other field
       // above — this is the field that actually distinguishes them.
       version: await getPkgVersion(),
       entrypoint: cliEntryPath(),
-      account: config.smtp.username,
-      imapOk,
-      smtpOk,
-      folderCount,
-      indexUpdatedAt: index.updatedAt,
+      ...firstFields,
+      // Top-level fields describe the first account shown; ok covers all of them.
+      ok: checked.every((entry) => entry.ok),
       claudeDesktopInstalled: claudeDesktop.installed,
-      error,
-      ...(diagnosis ? { cause: diagnosis.cause, suggestion: diagnosis.suggestion } : {}),
+      ...(checked.length > 1 ? { accounts: checked } : {}),
     };
 
     process.stdout.write(wantJson ? json(result) : `${result.ok ? "Doctor OK" : "Doctor failed"}\n${json(result)}`);
@@ -925,16 +946,25 @@ async function runConnectionStatus(parsed: ParsedCliArgs): Promise<void> {
 
 async function runRuntimeStatus(parsed: ParsedCliArgs): Promise<void> {
   const wantJson = isTruthyFlag(parsed.flags.json);
-  await withServices(async ({ config, backgroundSyncService, draftStore, localIndexService }) => {
+  await withServices(async ({ accountManager }) => {
+    const bundles = selectAccountBundles(accountManager, parsed);
+    const perAccount = await Promise.all(
+      bundles.map(async (bundle) => ({
+        slug: bundle.account.slug,
+        account: bundle.config.smtp.username,
+        runtime: sanitizeRuntimeConfig(bundle.config.runtime),
+        backgroundSync: bundle.backgroundSyncService.getStatus(),
+        localIndex: await bundle.localIndexService.getStatus(),
+        drafts: {
+          total: (await bundle.draftStore.listDrafts(true)).length,
+          active: (await bundle.draftStore.listDrafts(false)).length,
+        },
+      })),
+    );
+    const { slug: _slug, ...firstFields } = perAccount[0];
     const result = {
-      account: config.smtp.username,
-      runtime: sanitizeRuntimeConfig(config.runtime),
-      backgroundSync: backgroundSyncService.getStatus(),
-      localIndex: await localIndexService.getStatus(),
-      drafts: {
-        total: (await draftStore.listDrafts(true)).length,
-        active: (await draftStore.listDrafts(false)).length,
-      },
+      ...firstFields,
+      ...(perAccount.length > 1 ? { accounts: perAccount } : {}),
     };
     process.stdout.write(wantJson ? json(result) : `${JSON.stringify(result, null, 2)}\n`);
   });

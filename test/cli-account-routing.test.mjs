@@ -110,3 +110,43 @@ test("runtime policy still gates the shortcuts after routing through the tool ha
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test("doctor and runtime-status cover every account, and --account picks one", async () => {
+  const primary = await listener();
+  const secondary = await listener();
+  const dir = await mkdtemp(join(tmpdir(), "pmbc-cli-doctor-"));
+  const slug = slugifyAccountAddress("work@example.com");
+  const env = {
+    ...process.env,
+    PROTONMAIL_USERNAME: "user@example.com",
+    PROTONMAIL_PASSWORD: "dummy",
+    PROTONMAIL_IMAP_PORT: String(primary.port),
+    PROTONMAIL_SMTP_PORT: "9",
+    PROTONMAIL_DATA_DIR: dir,
+    PROTONMAIL_IDLE_WATCH: "false",
+    PROTONMAIL_AUTO_SYNC: "false",
+    PROTONMAIL_ACCOUNTS_JSON: JSON.stringify([
+      { address: "work@example.com", password: "dummy", imapPort: secondary.port, smtpPort: 9, autoSyncFolder: "INBOX" },
+    ]),
+  };
+  try {
+    const all = await runCli(["runtime-status", "--json"], env);
+    const parsed = JSON.parse(all.stdout);
+    assert.deepEqual(parsed.accounts.map((entry) => entry.slug), [slugifyAccountAddress("user@example.com"), slug]);
+    assert.equal(parsed.accounts[1].backgroundSync.folder, "INBOX");
+
+    primary.state.connections = 0;
+    secondary.state.connections = 0;
+    const one = await runCli(["doctor", "--account", slug, "--json"], env);
+    assert.equal(one.code, 1, "no Bridge behind the listeners");
+    assert.equal(JSON.parse(one.stdout).account, "work@example.com");
+    assert.equal(primary.state.connections, 0, "--account must leave the other account alone");
+    assert.ok(secondary.state.connections > 0);
+
+    const unknown = await runCli(["doctor", "--account", "nobody"], env);
+    assert.equal(unknown.code, 2, "a usage error");
+    assert.match(unknown.stderr, /Unknown account "nobody"/);
+  } finally {
+    await Promise.all([primary.close(), secondary.close(), rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })]);
+  }
+});

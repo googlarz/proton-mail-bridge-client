@@ -190,10 +190,10 @@ proton-mail-bridge-client contacts
 proton-mail-bridge-client volume-trends --days 14
 proton-mail-bridge-client watch --timeout 30
 proton-mail-bridge-client test-email you@example.com
-proton-mail-bridge-client doctor
+proton-mail-bridge-client doctor                       # every configured account; --account <slug|address> for one
 proton-mail-bridge-client status
 proton-mail-bridge-client connection-status
-proton-mail-bridge-client runtime-status
+proton-mail-bridge-client runtime-status                # per account, with each account's background sync; --account for one
 proton-mail-bridge-client get-logs --limit 50 --level error
 proton-mail-bridge-client clear-cache
 proton-mail-bridge-client sync --folder INBOX --limit 150
