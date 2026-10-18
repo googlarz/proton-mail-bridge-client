@@ -2322,6 +2322,43 @@ export class LocalIndexService {
         insertFts.run(email.id, ...ftsColumns(email, persisted.preview ?? "", persisted.attachment_text ?? undefined));
       }
 
+      // Flags-only sweeps: bring read/starred state of every indexed row of the folder in line with the server and
+      // drop rows the server no longer has. Applied after this snapshot's own upserts, which were fetched first.
+      for (const folderStat of input.folderStats) {
+        const sweep = folderStat.flagSweep;
+        if (!sweep || foldersWithResetCheckpoint.has(folderStat.folder)) continue;
+        const present = new Set(sweep.present);
+        const unseen = new Set(sweep.unseen);
+        const flagged = new Set(sweep.flagged);
+        const rows = db
+          .prepare(`SELECT email_id, uid, is_read, is_starred, flags_json FROM messages WHERE folder = ?`)
+          .all(folderStat.folder) as Array<{ email_id: string; uid: number; is_read: number; is_starred: number; flags_json: string | null }>;
+        const updateFlags = db.prepare(`UPDATE messages SET is_read = ?, is_starred = ?, flags_json = ? WHERE email_id = ?`);
+        const deleteSweptFts = db.prepare(`DELETE FROM messages_fts WHERE email_id = ?`);
+        const deleteSweptMessage = db.prepare(`DELETE FROM messages WHERE email_id = ?`);
+        for (const row of rows) {
+          if (!present.has(row.uid)) {
+            deleteSweptFts.run(row.email_id);
+            deleteSweptMessage.run(row.email_id);
+            continue;
+          }
+          const isRead = unseen.has(row.uid) ? 0 : 1;
+          const isStarred = flagged.has(row.uid) ? 1 : 0;
+          if (isRead === row.is_read && isStarred === row.is_starred) continue;
+          let flags: string[] = [];
+          try {
+            const parsed = JSON.parse(row.flags_json ?? "[]");
+            if (Array.isArray(parsed)) flags = parsed.filter((flag): flag is string => typeof flag === "string");
+          } catch {
+            // keep an empty list
+          }
+          flags = flags.filter((flag) => flag !== "\\Seen" && flag !== "\\Flagged");
+          if (isRead) flags.push("\\Seen");
+          if (isStarred) flags.push("\\Flagged");
+          updateFlags.run(isRead, isStarred, JSON.stringify(flags), row.email_id);
+        }
+      }
+
       if (cleanupExpunged) {
         createSnapshotUidTable.run();
         const clearSnapshotUidTable = db.prepare(`DELETE FROM temp_snapshot_uids`);

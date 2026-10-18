@@ -515,6 +515,11 @@ export interface MailboxSyncCheckpoint {
   // forward from here instead of re-planning a UID range spanning the whole
   // gap in one call. Cleared (undefined) once the gap has been fully closed.
   incrementalResumeUid?: number;
+  // Result of a flags-only pass over the whole folder (UID FETCH 1:* (FLAGS)): every UID the server still has,
+  // and which of them are unseen / flagged. The local index applies it to rows outside the sync window, so read
+  // state stays accurate for old mail and messages removed on the server are dropped. Carried in memory from
+  // the IMAP service to recordSnapshot; never persisted.
+  flagSweep?: { present: number[]; unseen: number[]; flagged: number[] };
 }
 
 export interface LocalIndexStatus {

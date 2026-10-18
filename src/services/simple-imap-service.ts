@@ -69,6 +69,14 @@ const FETCH_DETAIL_QUERY = {
   source: true,
 } as const;
 
+// Non-enumerable, so the (large) sweep never shows up in a tool's JSON output or in a persisted checkpoint.
+function attachFlagSweep(checkpoint: MailboxSyncCheckpoint, sweep: MailboxSyncCheckpoint["flagSweep"]): void {
+  if (sweep) Object.defineProperty(checkpoint, "flagSweep", { value: sweep, enumerable: false });
+}
+
+const FLAG_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+const FLAG_SWEEP_MAX_MESSAGES = 30_000;
+
 const FETCH_INDEX_QUERY = {
   uid: true,
   flags: true,
@@ -3671,6 +3679,7 @@ export class SimpleIMAPService {
       const uidNext = mailbox?.uidNext;
       const uidValidity = mailbox?.uidValidity?.toString();
       const exists = mailbox?.exists ?? 0;
+      const flagSweep = await this.maybeSweepFlags(client, folder, exists);
       const plan = planFolderSync({
         folder,
         exists,
@@ -3682,7 +3691,7 @@ export class SimpleIMAPService {
       });
 
       if (!plan.startUid || !plan.endUid || plan.endUid < plan.startUid) {
-        return {
+        const result = {
           checkpoint: {
             folder,
             uidValidity,
@@ -3700,6 +3709,8 @@ export class SimpleIMAPService {
           },
           emails: [],
         };
+        attachFlagSweep(result.checkpoint, flagSweep);
+        return result;
       }
 
       // On an unchanged incremental window (nothing new, checkpoint still matches),
@@ -3736,7 +3747,7 @@ export class SimpleIMAPService {
       const highestUid = reachesTop
         ? emails.reduce((max, email) => Math.max(max, email.uid), 0) || plan.highestKnownUid
         : (input.checkpoint?.highestUid ?? plan.highestKnownUid);
-      return {
+      const done = {
         checkpoint: {
           folder,
           uidValidity,
@@ -3755,7 +3766,42 @@ export class SimpleIMAPService {
         },
         emails,
       };
+      attachFlagSweep(done.checkpoint, flagSweep);
+      return done;
     });
+  }
+
+  // An incremental pass only refreshes flags for its overlap window (the newest ~50 UIDs), so mail read
+  // elsewhere long ago stayed "unread" in the index and mail deleted on the server never left it. A flags-only
+  // FETCH of the whole folder (no envelope, no body) is cheap enough to repeat every few minutes for folders of
+  // a normal size; very large folders are left to the history walk of full syncs.
+  private readonly lastFlagSweepAt = new Map<string, number>();
+
+  private async maybeSweepFlags(
+    client: ImapFlow,
+    folder: string,
+    exists: number,
+  ): Promise<{ present: number[]; unseen: number[]; flagged: number[] } | undefined> {
+    if (exists === 0 || exists > FLAG_SWEEP_MAX_MESSAGES) return undefined;
+    const now = Date.now();
+    if (now - (this.lastFlagSweepAt.get(folder) ?? 0) < FLAG_SWEEP_INTERVAL_MS) return undefined;
+    const present: number[] = [];
+    const unseen: number[] = [];
+    const flagged: number[] = [];
+    try {
+      for await (const message of client.fetch("1:*", { uid: true, flags: true }, { uid: true })) {
+        present.push(message.uid);
+        const flags = message.flags ?? new Set<string>();
+        if (!flags.has("\\Seen")) unseen.push(message.uid);
+        if (flags.has("\\Flagged")) flagged.push(message.uid);
+      }
+    } catch (error) {
+      // A failed sweep must not fail the sync; a partial one would look like mass deletion, so it is dropped.
+      this.log.warn("Flag sweep failed", "SimpleIMAPService", { folder, error });
+      return undefined;
+    }
+    this.lastFlagSweepAt.set(folder, now);
+    return present.length > 0 ? { present, unseen, flagged } : undefined;
   }
 
   async archiveEmail(emailId: string, uidValidity?: string): Promise<{
