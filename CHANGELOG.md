@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`notify` tells you when it breaks**, not only when mail arrives: a rejected Bridge login (changed password), an unreachable Bridge or a TLS mismatch is announced once with what to do, and again when the connection works.
+
 ## [2.13.0] — 2026-10-18
 
 - **`docker/Dockerfile`**: the published package in a small non-root image for headless machines (see the README); built from the repo, not published to a registry.

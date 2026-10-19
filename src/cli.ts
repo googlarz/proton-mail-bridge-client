@@ -319,7 +319,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   watch: { usage: "watch [--folder <name>] [--timeout <s>]", description: "Wait for mailbox changes via IMAP IDLE", flags: ["folder", "timeout"] },
   "clear-cache": { usage: "clear-cache", description: "Clear in-memory MCP server caches", flags: [] },
   "get-logs": { usage: "get-logs [--limit <n>] [--offset <n>] [--level <level>]", description: "Return recent in-memory MCP server logs", flags: ["limit", "level", "offset"] },
-  notify: { usage: "notify [--folder <name>] [--timeout <s>]", description: "Daemon: watch a folder and send a system notification on new mail", flags: ["folder", "timeout"] },
+  notify: { usage: "notify [--folder <name>] [--timeout <s>]", description: "Daemon: watch a folder and send a system notification on new mail, and when it cannot reach or log in to Bridge (once per problem, and when it recovers)", flags: ["folder", "timeout"] },
   drafts: { usage: "drafts [--sent]", description: "List local drafts", flags: ["sent"] },
   "remote-drafts": { usage: "remote-drafts [--limit <n>] [--offset <n>]", description: "List drafts in the Proton Drafts mailbox", flags: ["limit", "offset"] },
   "draft-create": { usage: "draft-create --subject <text> [--to <addr>] (--body <text> | stdin) [--cc <a>] [--bcc <a>]", description: "Create a draft", flags: ["to", "cc", "bcc", "subject", ...BODY_FLAGS] },
@@ -1799,6 +1799,25 @@ async function sendSystemNotification(title: string, body: string): Promise<void
   }
 }
 
+// What `notify` should tell the user when its own watch starts or stops working. A problem is announced once per
+// cause (not every retry), and recovery once; `cause` is what the caller passes back in as `previous`.
+export function watchHealthNotice(
+  previous: string | undefined,
+  error: unknown,
+): { cause: string | undefined; notice?: { title: string; body: string } } {
+  if (error === null) {
+    return previous
+      ? { cause: undefined, notice: { title: "Proton Mail Bridge Client", body: "The connection to Bridge works again." } }
+      : { cause: undefined };
+  }
+  const cause = diagnoseConnectionFailure(error)?.cause ?? "failed";
+  if (cause === previous) return { cause };
+  const body =
+    diagnoseConnectionFailure(error)?.suggestion ??
+    `The mailbox watch stopped working: ${error instanceof Error ? error.message : String(error)}`;
+  return { cause, notice: { title: "Proton Mail Bridge Client needs attention", body } };
+}
+
 async function runNotify(parsed: ParsedCliArgs): Promise<void> {
   const folder = getStringFlag(parsed.flags, "folder") || "INBOX";
   const timeoutSeconds = getNumberFlag(parsed.flags, "timeout", 30);
@@ -1808,6 +1827,7 @@ async function runNotify(parsed: ParsedCliArgs): Promise<void> {
 
   let running = true;
   let previousCount: number | undefined;
+  let problemCause: string | undefined;
 
   const shutdown = () => { running = false; };
   process.on("SIGINT", shutdown);
@@ -1823,6 +1843,13 @@ async function runNotify(parsed: ParsedCliArgs): Promise<void> {
       });
 
       if (!running) break;
+
+      const recovered = watchHealthNotice(problemCause, null);
+      if (recovered.notice) {
+        await sendSystemNotification(recovered.notice.title, recovered.notice.body);
+        process.stdout.write(JSON.stringify({ event: "recovered", at: result.checkedAt }) + "\n");
+      }
+      problemCause = recovered.cause;
 
       if (result.changed) {
         const existsEvent = result.events.find((e) => e["type"] === "exists");
@@ -1850,8 +1877,14 @@ async function runNotify(parsed: ParsedCliArgs): Promise<void> {
       if (!running) break;
       const msg = error instanceof Error ? error.message : String(error);
       process.stderr.write(`[notify] Watch error: ${msg}\n`);
-      // Simple backoff before retrying
-      await new Promise<void>((resolve) => { setTimeout(resolve, 15_000).unref(); });
+      const health = watchHealthNotice(problemCause, error);
+      problemCause = health.cause;
+      if (health.notice) {
+        await sendSystemNotification(health.notice.title, health.notice.body);
+        process.stdout.write(JSON.stringify({ event: "problem", cause: health.cause, message: health.notice.body }) + "\n");
+      }
+      // Simple backoff before retrying; a rejected login will not fix itself in seconds.
+      await new Promise<void>((resolve) => { setTimeout(resolve, health.cause === "authentication_failed" ? 120_000 : 15_000).unref(); });
     }
   }
 
