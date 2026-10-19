@@ -290,7 +290,7 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 
 ## Running in Docker (headless machines)
 
-For a server with no desktop, next to a headless Bridge. The image installs the published npm package; it is not published to a registry, so build it from this repo:
+For a server with no desktop, next to a headless Bridge. The image installs the published npm package and is published for each release to `ghcr.io/googlarz/proton-mail-bridge-client` (`:<version>` and `:latest`, linux/amd64 and linux/arm64). To build it yourself from this repo:
 
 ```bash
 docker build -f docker/Dockerfile --build-arg VERSION=2.13.0 -t proton-mail-bridge-client .
