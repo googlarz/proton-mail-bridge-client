@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.14.0] — 2026-10-21
+
 - **Autoresponder per address** (`set_autoresponder`, `get_autoresponder`, `preview_autoresponder`; CLI `set-autoresponder`, `autoresponder`, `preview-autoresponder`): an automatic reply to incoming mail, plus a note appended to what the address sends. Off by default. One reply per sender per N days, a daily cap, never to lists, automatic mail or no-reply senders, never to mail from before it was switched on, never to someone you have already answered. Rules by sender, domain, subject words or "someone you have written to" give a different text, a draft for approval, or no reply; `mode: draft` (and a server that may not send) leaves drafts instead of sending; `outsideHours` with a time zone limits it to when you are away; the text takes `{senderFirstName}`, `{endsAt}` and the like; `preview_autoresponder` shows what it would do to recent mail; the log and `get_autoresponder` say who wrote and why mail was skipped. Switching it on needs sending allowed and confirmation. See the README.
 - **`doctor` and `report` note a Bridge newer than the verified version** (3.27.1); `docs/threat-model.md` says what the project protects and where it stops.
 
