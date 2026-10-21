@@ -20,11 +20,10 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { isMainModule } from "./is-main.js";
-import { CORE_TOOL_NAMES, listedTools, TOOLS } from "./tools/definitions.js";
+import { CORE_TOOL_NAMES, listedTools } from "./tools/definitions.js";
 import { findMailPrompt, MAIL_PROMPTS } from "./utils/mail-prompts.js";
 import { AnalyticsService } from "./services/analytics-service.js";
-import { AuditService } from "./services/audit-service.js";
-import { DraftStoreService, applyBodyEdits, draftSyncFingerprint, type BodyEdit } from "./services/draft-store-service.js";
+import { DraftStoreService, applyBodyEdits, draftSyncFingerprint } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
 import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService, UID_VALIDITY_MISMATCH_ERROR } from "./services/simple-imap-service.js";
 import { applySignature, plainTextToHtml, SMTPService } from "./services/smtp-service.js";
@@ -40,7 +39,6 @@ import type {
   EmailAction,
   SafetyMode,
   EmailAddress,
-  EmailAttachmentInput,
   EmailDetail,
   EmailSummary,
   ContactStats,
@@ -66,7 +64,6 @@ import {
   optionalBoolean,
   optionalInteger,
   optionalNumber,
-  normalizeJsonValue,
   parseEmailId,
   parseEmails,
   projectFields,
@@ -74,7 +71,6 @@ import {
   renderMarkdown,
   slugifyAccountAddress,
   splitAccountPrefix,
-  stringifyForJson,
   withAccountPrefix,
   sanitizeFileName,
 } from "./utils/helpers.js";
@@ -96,23 +92,12 @@ import {
 } from "./utils/runtime-policy.js";
 import type { ReplyReminderRecord } from "./services/reply-reminder-service.js";
 import { InviteError, buildInviteReply, findMyAttendee, parseInvite, type ParsedInvite } from "./utils/ical-reply.js";
-
-type ToolResult = {
-  content: Array<
-    | { type: "text"; text: string }
-    | {
-        type: "resource_link";
-        uri: string;
-        name: string;
-        title?: string;
-        description?: string;
-        mimeType?: string;
-      }
-    | { type: "image"; data: string; mimeType: string }
-  >;
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-};
+import { ToolResult, createTextResult } from "./tools/results.js";
+import { parseBodyEdits, withIgnoredArgumentsNote, asObject, requireString, optionalString, optionalClearableString, parseFieldsArg, parseListValues, parseStringListArg, requireEmailAction, optionalAttachmentList } from "./tools/args.js";
+import { sanitizeAuditValue, withAudit } from "./tools/audit.js";
+export { withSources } from "./tools/results.js";
+export { ignoredArguments, optionalClearableString } from "./tools/args.js";
+export { withAudit } from "./tools/audit.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: string };
@@ -135,204 +120,6 @@ const ALL_EMAIL_ACTIONS: EmailAction[] = [
 // address at Apple's iMIP relay, while the message comes from noreply@email.apple.com. A reply to such an address
 // goes to the provider itself, so the organizer/sender mismatch warning is not raised for it.
 const CALENDAR_RELAY_DOMAINS = new Set(["imip.me.com"]);
-
-function citationToResourceLink(source: CitationSource): ToolResult["content"][number] {
-  return {
-    type: "resource_link",
-    uri: source.uri,
-    name: source.name,
-    title: source.title,
-  };
-}
-
-function normalizeStructuredContent(value: unknown): Record<string, unknown> | undefined {
-  const normalized = normalizeJsonValue(value);
-  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) {
-    return undefined;
-  }
-  return normalized as Record<string, unknown>;
-}
-
-// Found live (self-review, token-efficiency pass): this used to merge the full
-// CitationSource[] (uri, name, title, description, mimeType, provider, AND a
-// locator object repeating id/folder/from/subject/date) into the returned
-// payload — which then got serialized into content[0].text AND, separately,
-// into structuredContent (createTextResult always builds both). For a
-// search/list-style tool, almost every field in each source is ALREADY present
-// on the corresponding item in the tool's own result array (e.g.
-// search_indexed_emails' sources[].snippet duplicates emails[].preview
-// character-for-character, sources[].locator.subject duplicates
-// emails[].subject, etc.) — confirmed live at roughly doubling a 10-result
-// search's response size for zero new information. The same citation data is
-// already emitted, far more compactly, as its own resource_link content block
-// per source (see citationToResourceLink below) — no code in this repo (CLI,
-// tests, or index.ts itself) ever reads a result's `.sources` field back, so
-// nothing depends on it being embedded in the payload too. Kept as a
-// pass-through function (not deleted) so createTextResult's call sites don't
-// all need touching if a real reason to re-add a *trimmed* sources field ever
-// comes up.
-export function withSources<T>(value: T, _sources: CitationSource[]): T {
-  return value;
-}
-
-function createTextResult(
-  value: unknown,
-  isError = false,
-  sources: CitationSource[] = [],
-): ToolResult {
-  const payload = withSources(value, sources);
-  return {
-    content: [
-      { type: "text", text: typeof payload === "string" ? payload : stringifyForJson(payload) },
-      ...sources.map(citationToResourceLink),
-    ],
-    structuredContent: normalizeStructuredContent(payload),
-    ...(isError ? { isError: true } : {}),
-  };
-}
-
-// Bounded on purpose. The audited `result` of a handler can contain arbitrary objects —
-// found live: list_scheduled_sends/list_snoozed returned `{ bundle, items }` per account
-// from inside withAudit, and once an account had an open IMAP connection the recursive
-// walk through the bundle's services/sockets overflowed the stack ("Maximum call stack
-// size exceeded"), failing the whole tool call. So: never descend into class instances
-// (services, sockets, clients), never into an account bundle, stop on cycles, and cap depth.
-const AUDIT_MAX_DEPTH = 8;
-
-// The audit log records what was done, not the content of the mail or any secret. Message text can arrive under
-// many names (body, markdownBody, htmlBody, a draft's notes, the find/replace of body edits, a raw .eml...), so
-// every one of them is redacted by key; credential-like keys are caught by pattern.
-const AUDIT_REDACTED_KEYS = new Set([
-  "body", "html", "text", "htmlBody", "textBody", "markdownBody", "customMessage", "notes", "bodyEdits",
-  "raw", "rawBase64", "base64", "content", "find", "replace", "signature",
-  // Parts of a received message that a tool result could carry: a preview or attachment text can hold a code or a secret.
-  "preview", "snippet", "attachmentText", "latestPreview",
-]);
-const AUDIT_SECRET_KEY = /pass(word|wd|phrase)?$|secret|token|api[-_]?key|authoriz|credential|cookie|private[-_]?key/i;
-
-function sanitizeAuditValue(value: unknown, depth = 0, seen: WeakSet<object> = new WeakSet()): unknown {
-  if (value === undefined || value === null) {
-    return value;
-  }
-
-  if (typeof value === "string") {
-    return value.length > 300 ? `[redacted:${value.length} chars]` : value;
-  }
-
-  if (typeof value !== "object") {
-    return value;
-  }
-
-  if (depth >= AUDIT_MAX_DEPTH) {
-    return "[max depth]";
-  }
-  if (seen.has(value)) {
-    return "[circular]";
-  }
-  seen.add(value);
-
-  try {
-    if (Array.isArray(value)) {
-      return value.map((item) => sanitizeAuditValue(item, depth + 1, seen));
-    }
-
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      return `[${(value as object).constructor?.name ?? "object"}]`;
-    }
-
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, entryValue]) => {
-        if (AUDIT_REDACTED_KEYS.has(key) || AUDIT_SECRET_KEY.test(key)) {
-          return [key, "[redacted]"];
-        }
-
-        if (key === "bundle") {
-          return [key, "[account bundle]"];
-        }
-
-        if (key === "attachments" && Array.isArray(entryValue)) {
-          return [
-            key,
-            entryValue.map((attachment) => {
-              const object = asObject(attachment);
-              return {
-                filename: object.filename,
-                contentType: object.contentType,
-                cid: object.cid,
-              };
-            }),
-          ];
-        }
-
-        return [key, sanitizeAuditValue(entryValue, depth + 1, seen)];
-      }),
-    );
-  } finally {
-    // Only ancestors count as a cycle; the same object reachable twice is fine.
-    seen.delete(value);
-  }
-}
-
-export async function withAudit<T>(
-  auditService: AuditService,
-  tool: string,
-  input: Record<string, unknown>,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const startedAt = Date.now();
-  // Writing the audit entry is bookkeeping about an operation that has already happened. If it fails (disk
-  // full, a locked file), the failure is logged and swallowed: raising it turned a successful move or send
-  // into a tool error, so a client would retry it, and on the error path it would hide the real error.
-  const record = async (entry: Parameters<AuditService["record"]>[0]) => {
-    try {
-      await auditService.record(entry);
-    } catch (auditError) {
-      logger.error("Could not write the audit entry", "MCPServer", { tool, error: auditError });
-    }
-  };
-  let result: T;
-  try {
-    result = await operation();
-  } catch (error) {
-    await record({
-      timestamp: new Date().toISOString(),
-      tool,
-      status: "error",
-      durationMs: Date.now() - startedAt,
-      input: sanitizeAuditValue(input),
-      error: error instanceof Error ? error.message : String(error),
-    });
-    throw error;
-  }
-  await record({
-    timestamp: new Date().toISOString(),
-    tool,
-    status: "success",
-    durationMs: Date.now() - startedAt,
-    input: sanitizeAuditValue(input),
-    result: sanitizeAuditValue(result),
-  });
-  return result;
-}
-
-// Validates update_draft's `bodyEdits` argument into BodyEdit[] (shape only; whether each
-// find text is present/unambiguous is decided against the stored body by applyBodyEdits).
-function parseBodyEdits(value: unknown): BodyEdit[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new McpError(ErrorCode.InvalidParams, "bodyEdits must be a non-empty array of {find, replace, all?} objects.");
-  }
-  return value.map((entry, index) => {
-    const edit = asObject(entry);
-    if (typeof edit.find !== "string" || edit.find.length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${index}].find must be a non-empty string.`);
-    }
-    if (typeof edit.replace !== "string") {
-      throw new McpError(ErrorCode.InvalidParams, `bodyEdits[${index}].replace must be a string (use "" to delete the text).`);
-    }
-    return { find: edit.find, replace: edit.replace, ...(edit.all === true ? { all: true } : {}) };
-  });
-}
 
 // Moving a message into the Trash folder is trashing it: trash_email is literally a move there. The move tools
 // therefore need the "trash" permission as well as "move" when the destination is the Trash folder, or an
@@ -360,77 +147,6 @@ async function ensureMoveTargetAllowed(
       `Cannot tell whether ${targetFolder} is the Trash folder (the folder list could not be read), and the trash action is not allowed. Try again when Bridge answers.`,
     );
   }
-}
-
-// Arguments a tool does not declare are ignored (clients send extra fields, and refusing them would break
-// those clients), but silently: `folder` on get_threads did nothing for a long time and nobody was told. The
-// result now carries a note naming them, so the caller (usually a model) learns the argument had no effect.
-export function ignoredArguments(toolName: string, args: unknown): string[] {
-  const tool = TOOLS.find((candidate) => candidate.name === toolName);
-  if (!tool || !args || typeof args !== "object" || Array.isArray(args)) {
-    return [];
-  }
-  const declared = new Set(Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}));
-  return Object.keys(args).filter((key) => !declared.has(key));
-}
-
-function withIgnoredArgumentsNote<R extends { params: { name: string; arguments?: unknown } }, T extends { content: unknown[] }>(
-  handler: (request: R) => Promise<T>,
-): (request: R) => Promise<T> {
-  return async (request) => {
-    const result = await handler(request);
-    const ignored = ignoredArguments(request.params.name, request.params.arguments);
-    if (ignored.length === 0) {
-      return result;
-    }
-    // The names come from the caller; keep the note short however many or however long they are.
-    const shown = ignored.slice(0, 10).map((key) => `"${key.length > 64 ? `${key.slice(0, 64)}...` : key}"`);
-    if (ignored.length > shown.length) shown.push(`and ${ignored.length - shown.length} more`);
-    logger.warn("Tool call had arguments the tool does not accept", "MCPServer", { name: request.params.name, ignored: shown });
-    const tool = TOOLS.find((candidate) => candidate.name === request.params.name);
-    const accepted = Object.keys((tool?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {});
-    const note = `Note: ${request.params.name} does not accept ${shown.join(", ")}; ignored. ` +
-      (accepted.length > 0 ? `It accepts: ${accepted.join(", ")}.` : "It takes no arguments.");
-    return { ...result, content: [...result.content, { type: "text", text: note }] };
-  };
-}
-
-function asObject(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  return value as Record<string, unknown>;
-}
-
-function requireString(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  if (typeof value !== "string" || !value.trim()) {
-    throw new McpError(ErrorCode.InvalidParams, `${key} must be a non-empty string.`);
-  }
-  return value.trim();
-}
-
-function optionalString(args: Record<string, unknown>, key: string): string | undefined {
-  const value = args[key];
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-// Found live (external review): update_draft's body:'' and replyTo:'' both
-// returned success but left the old values in place — optionalString collapses
-// an explicitly-empty string to undefined the same as an omitted field
-// entirely, and DraftStoreService.updateDraft's patch treats undefined as
-// "don't touch this field" (`patch.body ?? existing.body`). So there was no
-// way to actually clear either field once set — only used for update_draft's
-// body/replyTo, which are the two fields the review confirmed this breaks
-// (cc/bcc/attachments already have their own clear path via
-// `args.x === undefined ? undefined : ...`, checked separately). Not applied
-// to optionalString itself, since most of its many other callers legitimately
-// want "" treated the same as "not provided".
-export function optionalClearableString(args: Record<string, unknown>, key: string): string | undefined {
-  if (!(key in args) || args[key] === undefined) {
-    return undefined;
-  }
-  return typeof args[key] === "string" ? (args[key] as string).trim() : undefined;
 }
 
 // Shared by get_email_by_id and get_emails_by_ids: applies body preference/
@@ -552,93 +268,6 @@ export function extractUnsubscribeInfo(detail: EmailDetail): { mailto?: string; 
     ...(mail?.body ? { mailtoBody: mail.body } : {}),
     url,
   };
-}
-
-function parseFieldsArg(value: unknown): string[] | undefined {
-  if (Array.isArray(value)) {
-    return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-  }
-  if (typeof value === "string" && value.trim()) {
-    return value.split(",").map((entry) => entry.trim()).filter(Boolean);
-  }
-  return undefined;
-}
-
-function parseListValues(value?: string): string[] {
-  if (!value) {
-    return [];
-  }
-
-  return value
-    .split(/[;,]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function parseStringListArg(args: Record<string, unknown>, key: string): string[] {
-  const value = args[key];
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-      .filter(Boolean);
-  }
-
-  if (typeof value === "string") {
-    return parseListValues(value);
-  }
-
-  throw new McpError(ErrorCode.InvalidParams, `${key} must be a non-empty string or string array.`);
-}
-
-function requireEmailAction(args: Record<string, unknown>, key = "action"): EmailAction {
-  const value = requireString(args, key);
-  switch (value) {
-    case "mark_read":
-    case "mark_unread":
-    case "star":
-    case "unstar":
-    case "archive":
-    case "trash":
-    case "restore":
-    case "move":
-    case "delete":
-      return value;
-    default:
-      throw new McpError(ErrorCode.InvalidParams, `${key} must be a supported email action.`);
-  }
-}
-
-function optionalAttachmentList(value: unknown): EmailAttachmentInput[] | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (!Array.isArray(value)) {
-    throw new McpError(ErrorCode.InvalidParams, "attachments must be an array.");
-  }
-
-  return value.map((item, index) => {
-    const attachment = asObject(item);
-    const filename = requireString(attachment, "filename");
-    const content = requireString(attachment, "content");
-    const contentType = optionalString(attachment, "contentType");
-    const cid = optionalString(attachment, "cid");
-    const contentDisposition = optionalString(attachment, "contentDisposition");
-
-    if (!filename || !content) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `attachments[${index}] must contain filename and content.`,
-      );
-    }
-
-    return {
-      filename,
-      content,
-      contentType,
-      cid,
-      contentDisposition,
-    };
-  });
 }
 
 function uniqueAddresses(addresses: string[]): string[] {
