@@ -14,6 +14,8 @@ Please report vulnerabilities privately, not in a public issue or pull request.
 
 This is maintained by one person, so replies are best effort and there is no fixed response time. Reports are credited in the release notes unless you ask not to be.
 
+What the project protects and where it stops is described in [docs/threat-model.md](docs/threat-model.md).
+
 ## Scope
 
 In scope: the MCP server and CLI in this repository, including the handling of received mail (HTML, headers, calendar invitations, attachments), the policy gates for sending and deleting, and multi-account routing.

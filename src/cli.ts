@@ -16,6 +16,7 @@ import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWrit
 import { isValidEmail, parseEmails } from "./utils/helpers.js";
 import { checkForUpdate } from "./utils/update-check.js";
 import { healthProblems } from "./utils/health.js";
+import { bridgeVersionNote } from "./utils/bridge-version.js";
 import { buildSchedule, defaultSchedulerSystem, findStableAlias, parseTimeOfDay, SCHEDULER_SYSTEMS, type SchedulerSystem } from "./utils/schedule-templates.js";
 import { getClaudeDesktopInstallStatus } from "./scripts/check-claude-desktop.js";
 import { installClaudeDesktopConfig } from "./scripts/install-claude-desktop.js";
@@ -882,6 +883,7 @@ async function runDoctor(parsed: ParsedCliArgs): Promise<void> {
           slug: bundle.account.slug,
           account: bundle.config.smtp.username,
           ok: imapOk && smtpOk,
+          ...(bridgeVersionNote(bundle.imapService.getServerInfo()) ? { bridgeNote: bridgeVersionNote(bundle.imapService.getServerInfo()) } : {}),
           imapOk,
           smtpOk,
           folderCount,
@@ -997,7 +999,7 @@ async function runReport(): Promise<void> {
             userSet: bundle.config.smtp.secureExplicit === true,
             check: smtp,
           },
-          bridge: bundle.imapService.getServerInfo(),
+          bridge: { ...bundle.imapService.getServerInfo(), note: bridgeVersionNote(bundle.imapService.getServerInfo()) },
           folderCount,
           index: { storedMessageCount: index.storedMessageCount, updatedAt: index.updatedAt, isStale: index.isStale },
           // Folder names can be as private as an address: only how many are synced.
