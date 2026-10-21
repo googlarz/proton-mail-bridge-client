@@ -19,6 +19,8 @@ export function sanitizeRuntimeConfig(runtime: ProtonRuntimeConfig): Record<stri
     restrictOutboundToSelf: runtime.restrictOutboundToSelf,
     allowFileDownloadDir: runtime.allowFileDownloadDir ?? null,
     shortenLinks: runtime.shortenLinks ?? false,
+    tlsCaFileSet: Boolean(runtime.tlsCaFile),
+    tlsInsecureHosts: runtime.tlsInsecureHosts ?? [],
     maxInlineKB: runtime.maxInlineBytes,
     maxInlineBytes: runtime.maxInlineBytes, // same number in KB; kept for compatibility, prefer maxInlineKB
     opDelayMs: runtime.opDelayMs,

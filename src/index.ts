@@ -79,6 +79,7 @@ import {
 } from "./utils/helpers.js";
 import { AccountManager, type AccountBundle } from "./services/account-manager.js";
 import { healthProblems } from "./utils/health.js";
+import { isLocalBridgeHost, parseHostList } from "./utils/tls.js";
 import { logger } from "./utils/logger.js";
 import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES } from "./utils/pdf-text.js";
 import {
@@ -4098,11 +4099,6 @@ function parseAllowedActionsEnv(name: string): EmailAction[] {
   return allowed;
 }
 
-function isLocalBridgeHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase();
-  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
-}
-
 function isMissingTargetFolderError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /TRYCREATE|NONEXISTENT/i.test(message);
@@ -4289,6 +4285,12 @@ export function buildConfigFromEnv(): ProtonMailConfig {
   if (isLocalBridgeHost(imapHost)) {
     logger.warn("TLS verification is disabled for local Bridge IMAP connections.", "MCPServer", { host: imapHost });
   }
+  const insecureHosts = parseHostList(process.env.PROTONMAIL_TLS_INSECURE_HOSTS);
+  for (const host of [imapHost, smtpHost]) {
+    if (insecureHosts.includes(host.trim().toLowerCase())) {
+      logger.warn("TLS verification is disabled for this host (PROTONMAIL_TLS_INSECURE_HOSTS).", "MCPServer", { host });
+    }
+  }
 
   const primarySmtp = { host: smtpHost, port: smtpPort, secure: smtpSecure, secureExplicit: smtpSecureExplicit, username, password };
   const primaryImap = { host: imapHost, port: imapPort, secure: imapSecure, username: imapUsername, password: imapPassword };
@@ -4335,6 +4337,8 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       // The value is in KB despite the historical name; PROTONMAIL_MAX_INLINE_KB is the clear spelling and wins.
       maxInlineBytes: parseIntegerEnv("PROTONMAIL_MAX_INLINE_KB", parseIntegerEnv("PROTONMAIL_MAX_INLINE_BYTES", 40, 1, 10240), 1, 10240),
       shortenLinks: parseBooleanEnv("PROTONMAIL_SHORTEN_LINKS", false),
+      tlsCaFile: process.env.PROTONMAIL_TLS_CA_FILE?.trim() || undefined,
+      tlsInsecureHosts: parseHostList(process.env.PROTONMAIL_TLS_INSECURE_HOSTS),
       pdfMaxMb: parseIntegerEnv("PROTONMAIL_PDF_MAX_MB", DEFAULT_PDF_MAX_MB, 1, 100),
       pdfMaxPages: parseIntegerEnv("PROTONMAIL_PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, 1, 2000),
       opDelayMs,

@@ -570,6 +570,10 @@ export interface ProtonRuntimeConfig {
   restrictOutboundToSelf: boolean;
   allowFileDownloadDir?: string;
   maxInlineBytes: number;
+  /** PEM file with Bridge's certificate (PROTONMAIL_TLS_CA_FILE): trusted for a Bridge reached by a name other than localhost. */
+  tlsCaFile?: string;
+  /** Host names whose certificate is not verified, like localhost (PROTONMAIL_TLS_INSECURE_HOSTS). */
+  tlsInsecureHosts?: string[];
   // Shorten very long links in Markdown bodies to host/… (PROTONMAIL_SHORTEN_LINKS); links to unsubscribe, confirm, reset and the like are kept.
   shortenLinks?: boolean;
   /** Size limit in MB for PDF text extraction in get_attachment_text (PROTONMAIL_PDF_MAX_MB, default 10). */

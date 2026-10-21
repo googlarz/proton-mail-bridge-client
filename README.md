@@ -300,7 +300,7 @@ docker run -i --rm --network host \
   proton-mail-bridge-client
 ```
 
-`docker run -i` speaks MCP over stdio. The container must reach Bridge's IMAP and SMTP ports (`--network host`, or `--network container:<bridge>` to share Bridge's network). The CLI is in the same image: add `--entrypoint proton-mail-bridge-client` and a command such as `doctor`. The server has no network transport of its own; reaching it from a remote client needs your own wrapper. The image was checked to build, report its version, run as a non-root user and answer an MCP `initialize`; it has not been run against a real Bridge.
+`docker run -i` speaks MCP over stdio. The container must reach Bridge's IMAP and SMTP ports (`--network host`, or `--network container:<bridge>` to share Bridge's network). The CLI is in the same image: add `--entrypoint proton-mail-bridge-client` and a command such as `doctor`. If Bridge is reached by a host name (for example `host.docker.internal` or another container), its self-signed certificate fails verification: export it from Bridge and point `PROTONMAIL_TLS_CA_FILE` at it, or list the name in `PROTONMAIL_TLS_INSECURE_HOSTS`. The server has no network transport of its own; reaching it from a remote client needs your own wrapper. The image was checked to build, report its version, run as a non-root user and answer an MCP `initialize`; it has not been run against a real Bridge.
 
 ## Multi-account support (v2.1.0+)
 
@@ -538,6 +538,8 @@ PROTONMAIL_IDLE_WATCH='true'
 PROTONMAIL_IDLE_MAX_SECONDS='30'
 
 # Attachments
+PROTONMAIL_TLS_CA_FILE=''              # PEM file with Bridge's exported certificate: trusted when Bridge is reached by a name other than localhost (another container, another machine)
+PROTONMAIL_TLS_INSECURE_HOSTS=''      # comma-separated host names whose certificate is not verified, like localhost is (only for a private network you trust)
 PROTONMAIL_SHORTEN_LINKS='false'     # true = long tracking links in Markdown bodies become host/… (unsubscribe, confirm, reset links are kept)
 PROTONMAIL_MAX_INLINE_KB='40'         # in KB (older name PROTONMAIL_MAX_INLINE_BYTES still works, also in KB): largest attachment get_attachment_content returns inline as base64
 PROTONMAIL_PDF_MAX_MB='10'            # largest PDF get_attachment_text extracts text from (1-100 MB); bigger ones are refused with a message

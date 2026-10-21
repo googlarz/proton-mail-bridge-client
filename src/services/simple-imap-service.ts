@@ -53,6 +53,7 @@ import {
 } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
+import { tlsOptionsFor } from "../utils/tls.js";
 import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES, extractPdfText, looksLikePdf, PdfTextError } from "../utils/pdf-text.js";
 
 const FETCH_SUMMARY_QUERY = {
@@ -926,7 +927,7 @@ export class SimpleIMAPService {
           user: this.config.imap.username,
           pass: this.config.imap.password,
         },
-        tls: this.shouldRelaxTlsVerification() ? { rejectUnauthorized: false } : undefined,
+        tls: tlsOptionsFor(this.config.imap.host, this.config.runtime),
         disableAutoIdle: true,
         maxIdleTime: this.config.runtime.idleMaxSeconds * 1000,
         logger: false,
@@ -4002,11 +4003,6 @@ export class SimpleIMAPService {
     }
 
     return this.client;
-  }
-
-  private shouldRelaxTlsVerification(): boolean {
-    const host = this.config.imap.host.trim().toLowerCase();
-    return host === "127.0.0.1" || host === "localhost" || host === "::1";
   }
 
   private async withMailbox<T>(

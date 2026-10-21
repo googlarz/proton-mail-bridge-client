@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+From zotabee's testing of 2.13.0 (#52–#57):
+
+- **`PROTONMAIL_SHORTEN_LINKS` now works** (#52). It only matched Markdown links, but a message body is mailparser's text, where links read `text [url]` or are bare addresses. Both are shortened now; unsubscribe, confirm and similar links are still kept.
+- **`dryRun` no longer asks for `confirmed`** (#54) in `send_email`, `reply_to_email`, `reply_all_email`, `forward_email`, `send_draft`, `respond_to_invite`, `bulk_delete`, `delete_thread`, `batch_email_action` and `apply_thread_action`. A tool without a dry run is not unlocked by passing it.
+- **`health` on an instance without the sync lock** still checks the shared index (#55), and a folder with no messages shows `historyComplete: true`.
+- **`report`** prints how many folders are synced instead of their names, writes the home directory as `~`, shows the TLS mode actually in use for SMTP, the Bridge version and OS it announces, and the OS release (#53).
+- **`PROTONMAIL_TLS_CA_FILE` and `PROTONMAIL_TLS_INSECURE_HOSTS`** (#56): a Bridge reached by a name other than localhost (another container, `host.docker.internal`) no longer fails certificate verification once you pin Bridge's certificate or list the name.
+- **The first call after Bridge drops a connection** takes a new connection instead of failing with `Connection not available` (#57).
+- **`move_email` prefixes `emailId` and `sourceEmailId`** like `targetEmailId`; **`import_email` takes `account`** or a `<slug>::` folder prefix; a relative `outputPath` in `save_attachment(s)` is relative to the download folder; the default folder for a saved attachment is no longer encoded twice; a failing CLI command prints `MCP error -32603:` once (#57).
+
 - **`notify` tells you when it breaks**, not only when mail arrives: a rejected Bridge login (changed password), an unreachable Bridge or a TLS mismatch is announced once with what to do, and again when the connection works.
 
 ## [2.13.0] — 2026-10-18

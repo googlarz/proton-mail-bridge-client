@@ -1,3 +1,4 @@
+import { tlsOptionsFor } from "../utils/tls.js";
 import { randomUUID } from "node:crypto";
 import nodemailer, { type Transporter } from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
@@ -259,9 +260,6 @@ export class SMTPService {
 
   private getTransporter(): Transporter {
     if (!this.transporter) {
-      const host = this.config.smtp.host.trim().toLowerCase();
-      const isLocalhost = host === "127.0.0.1" || host === "localhost" || host === "::1";
-
       this.transporter = nodemailer.createTransport({
         host: this.config.smtp.host,
         port: this.config.smtp.port,
@@ -270,7 +268,7 @@ export class SMTPService {
           user: this.config.smtp.username,
           pass: this.config.smtp.password,
         },
-        tls: isLocalhost ? { rejectUnauthorized: false } : undefined,
+        tls: tlsOptionsFor(this.config.smtp.host, this.config.runtime),
       });
     }
 

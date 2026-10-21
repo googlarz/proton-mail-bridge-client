@@ -179,3 +179,46 @@ test("a NoConnection while taking the mailbox lock opens a new connection and ta
   service.ensureConnected = async () => ({ getMailboxLock: async () => { throw new Error("Mailbox does not exist"); } });
   await assert.rejects(service.withMailbox("Nope", true, async () => "x"), /does not exist/);
 });
+
+import { tlsOptionsFor } from "../dist/utils/tls.js";
+import { writeFileSync } from "node:fs";
+
+test("tlsOptionsFor: local hosts are relaxed, listed hosts too, a pinned certificate is trusted, others verify fully", () => {
+  assert.deepEqual(tlsOptionsFor("127.0.0.1", {}), { rejectUnauthorized: false });
+  assert.deepEqual(tlsOptionsFor("Host.Docker.Internal", { tlsInsecureHosts: ["host.docker.internal"] }), { rejectUnauthorized: false });
+  assert.equal(tlsOptionsFor("bridge.lan", {}), undefined, "an unlisted name keeps full verification");
+  assert.equal(tlsOptionsFor("bridge.lan", undefined), undefined);
+});
+
+// "localhost." (with the dot) resolves like localhost but is not on the built-in list, so it stands in for a Bridge
+// reached by another name.
+test("a Bridge reached by another name needs PROTONMAIL_TLS_INSECURE_HOSTS or a pinned certificate", { skip: !certificate || process.platform === "win32" }, async () => {
+  const bridge = await startFakeBridge({ mode: "starttls", certificate, folders: mailbox() });
+  const caFile = join(await mkdtemp(join(tmpdir(), "fake-bridge-ca-")), "bridge.pem");
+  writeFileSync(caFile, certificate.cert);
+  const make = (extraRuntime) => {
+    const imap = { host: "localhost.", port: bridge.port, secure: false, username: "owner@example.com", password: "secret" };
+    return new SimpleIMAPService({ imap, smtp: { ...imap, port: 9 }, dataDir: "/tmp/fake-bridge-tls", debug: false, runtime: { ...runtime, ...extraRuntime } });
+  };
+  const attempts = [];
+  try {
+    for (const [label, extra, shouldWork] of [
+      ["no trust configured", {}, false],
+      ["host listed as insecure", { tlsInsecureHosts: ["localhost."] }, true],
+      ["certificate pinned", { tlsCaFile: caFile }, true],
+    ]) {
+      const service = make(extra);
+      try {
+        await service.ping();
+        attempts.push([label, true]);
+      } catch (error) {
+        attempts.push([label, false, String(error?.message).slice(0, 80)]);
+      } finally {
+        await service.disconnect().catch(() => {});
+      }
+      assert.equal(attempts.at(-1)[1], shouldWork, `${label}: ${JSON.stringify(attempts.at(-1))}`);
+    }
+  } finally {
+    await bridge.close();
+  }
+});
