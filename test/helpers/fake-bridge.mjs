@@ -40,6 +40,15 @@ export function createMessage(uid, { subject = `Mail ${uid}`, from = "alice@exam
   return { uid, flags: new Set(flags), internalDate: date, from, to, subject, messageId: `<m${uid}@fake.bridge>`, source: Buffer.from(source) };
 }
 
+// A message appended by a client: only the headers the server needs to answer an envelope.
+function messageFromSource(uid, source, flags, internalDate) {
+  const head = source.toString().split("\r\n\r\n")[0];
+  const header = (name) => head.match(new RegExp(`^${name}:\\s*(.*)$`, "im"))?.[1]?.trim();
+  const from = header("From")?.match(/<([^>]+)>/)?.[1] ?? header("From") ?? "unknown@example.com";
+  const to = header("To")?.match(/<([^>]+)>/)?.[1] ?? header("To") ?? "owner@example.com";
+  return { uid, flags: new Set(flags), internalDate, from, to, subject: header("Subject") ?? "", messageId: header("Message-ID") ?? `<a${uid}@fake.bridge>`, source };
+}
+
 function address(email) {
   const [mailbox, host] = email.split("@");
   return `(("Alice" NIL ${quote(mailbox)} ${quote(host)}))`;
@@ -81,7 +90,16 @@ export async function startFakeBridge(options) {
     let pendingAuth;
 
     const write = (text) => socket.write(text);
-    const capability = () => `IMAP4rev1 AUTH=PLAIN ID IDLE UIDPLUS NAMESPACE${upgraded ? "" : " STARTTLS"}`;
+    const capability = () => `IMAP4rev1 AUTH=PLAIN ID IDLE UIDPLUS MOVE NAMESPACE${upgraded ? "" : " STARTTLS"}`;
+    const nextUid = (name) => Math.max(0, ...(folder(name)?.messages ?? []).map((m) => m.uid)) + 1;
+    const expunge = (name, predicate) => {
+      const f = folder(name);
+      const before = sorted(name);
+      const removed = before.filter(predicate);
+      f.messages = f.messages.filter((m) => !predicate(m));
+      // Sequence numbers shift as messages go, so they are reported from the highest down.
+      return [...removed].reverse().map((m) => `* ${before.indexOf(m) + 1} EXPUNGE\r\n`).join("");
+    };
     const folder = (name) => folders[name];
     const sorted = (name) => [...(folder(name)?.messages ?? [])].sort((a, b) => a.uid - b.uid);
 
@@ -91,6 +109,17 @@ export async function startFakeBridge(options) {
         return write(`${tag} OK [CAPABILITY ${capability()}] Authentication successful\r\n`);
       }
       return write(`${tag} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n`);
+    };
+
+    const appendMessage = (tag, rest, source) => {
+      const name = rest.match(/^"((?:[^"\\]|\\.)*)"|^(\S+)/);
+      const mailbox = (name?.[1] ?? name?.[2] ?? "").replace(/\\(.)/g, "$1");
+      const target = folder(mailbox);
+      if (!target) return write(`${tag} NO [TRYCREATE] Mailbox does not exist\r\n`);
+      const flags = (rest.match(/\(([^)]*)\)/)?.[1] ?? "").split(/\s+/).filter(Boolean);
+      const uid = nextUid(mailbox);
+      target.messages.push(messageFromSource(uid, source, flags, new Date()));
+      write(`${tag} OK [APPENDUID ${target.uidValidity ?? 1} ${uid}] APPEND completed\r\n`);
     };
 
     const run = (tag, command, rest) => {
@@ -171,6 +200,16 @@ export async function startFakeBridge(options) {
         case "IDLE":
           idleTag = tag;
           return write("+ idling\r\n");
+        case "CREATE": {
+          const name = rest.replace(/^"|"$/g, "");
+          if (folder(name)) return write(`${tag} NO [ALREADYEXISTS] Mailbox already exists\r\n`);
+          folders[name] = { uidValidity: 100 + Object.keys(folders).length, messages: [] };
+          return write(`${tag} OK CREATE completed\r\n`);
+        }
+        case "EXPUNGE": {
+          if (!selected) return write(`${tag} BAD No mailbox selected\r\n`);
+          return write(`${expunge(selected, (m) => m.flags.has("\\Deleted"))}${tag} OK EXPUNGE completed\r\n`);
+        }
         case "UID": {
           const [sub, ...more] = rest.split(/\s+/);
           const args = more.join(" ");
@@ -179,8 +218,33 @@ export async function startFakeBridge(options) {
           const maxUid = messages.at(-1)?.uid ?? 0;
           if (sub.toUpperCase() === "SEARCH") {
             const unseenOnly = /UNSEEN/i.test(args);
-            const uids = messages.filter((m) => !unseenOnly || !m.flags.has("\\Seen")).map((m) => m.uid);
+            const header = args.match(/HEADER\s+"?([^"\s]+)"?\s+"?([^"]*?)"?\s*$/i);
+            const hasHeader = (m) => {
+              const head = m.source.toString().split("\r\n\r\n")[0];
+              return head.split("\r\n").some((line) => line.toLowerCase().startsWith(`${header[1].toLowerCase()}:`) && line.toLowerCase().includes(header[2].toLowerCase()));
+            };
+            const uids = messages.filter((m) => (!unseenOnly || !m.flags.has("\\Seen")) && (!header || hasHeader(m))).map((m) => m.uid);
             return write(`* SEARCH ${uids.join(" ")}\r\n${tag} OK UID SEARCH completed\r\n`);
+          }
+          if (sub.toUpperCase() === "EXPUNGE") {
+            const inSet = parseSet(args.trim(), maxUid);
+            return write(`${expunge(selected, (m) => inSet(m.uid) && m.flags.has("\\Deleted"))}${tag} OK UID EXPUNGE completed\r\n`);
+          }
+          if (sub.toUpperCase() === "MOVE" || sub.toUpperCase() === "COPY") {
+            const [set, ...destParts] = args.split(" ");
+            const destination = destParts.join(" ").replace(/^"|"$/g, "").replace(/\\(.)/g, "$1");
+            const target = folder(destination);
+            if (!target) return write(`${tag} NO [TRYCREATE] Mailbox does not exist\r\n`);
+            const inSet = parseSet(set, maxUid);
+            const chosen = messages.filter((m) => inSet(m.uid));
+            const pairs = chosen.map((m) => {
+              const copy = { ...m, uid: nextUid(destination), flags: new Set(m.flags) };
+              target.messages.push(copy);
+              return [m.uid, copy.uid];
+            });
+            const code = pairs.length ? `[COPYUID ${target.uidValidity ?? 1} ${pairs.map(([a]) => a).join(",")} ${pairs.map(([, b]) => b).join(",")}] ` : "";
+            const expunged = sub.toUpperCase() === "MOVE" ? expunge(selected, (m) => chosen.includes(m)) : "";
+            return write(`${expunged}${tag} OK ${code}${sub.toUpperCase()} completed\r\n`);
           }
           if (sub.toUpperCase() === "STORE") {
             const [set, mode, flagList] = [args.split(" ")[0], args.split(" ")[1], args.slice(args.indexOf("(") + 1, args.lastIndexOf(")"))];
@@ -232,9 +296,20 @@ export async function startFakeBridge(options) {
       }
     };
 
+    let pendingLiteral;
+
     function onData(chunk) {
       buffer = Buffer.concat([buffer, chunk]);
       for (;;) {
+        if (pendingLiteral) {
+          if (buffer.length < pendingLiteral.length + 2) return;
+          const data = buffer.subarray(0, pendingLiteral.length);
+          buffer = buffer.subarray(pendingLiteral.length + 2);
+          const { tag, rest } = pendingLiteral;
+          pendingLiteral = undefined;
+          appendMessage(tag, rest, Buffer.from(data));
+          continue;
+        }
         const end = buffer.indexOf("\r\n");
         if (end < 0) return;
         const line = buffer.subarray(0, end).toString();
@@ -254,6 +329,12 @@ export async function startFakeBridge(options) {
         }
         const match = line.match(/^(\S+)\s+(\S+)\s*(.*)$/);
         if (!match) continue;
+        const literal = match[2].toUpperCase() === "APPEND" ? match[3].match(/\{(\d+)\+?\}$/) : null;
+        if (literal) {
+          pendingLiteral = { tag: match[1], rest: match[3], length: Number(literal[1]) };
+          if (!/\+\}$/.test(match[3])) write("+ Ready for literal data\r\n");
+          continue;
+        }
         run(match[1], match[2].toUpperCase(), match[3]);
       }
     }

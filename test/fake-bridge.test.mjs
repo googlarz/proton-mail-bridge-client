@@ -222,3 +222,45 @@ test("a Bridge reached by another name needs PROTONMAIL_TLS_INSECURE_HOSTS or a 
     await bridge.close();
   }
 });
+
+test("moving, importing, deleting and flagging reach the server and give back usable ids", needsOpenssl, async () => {
+  await withBridge({}, async ({ service, bridge }) => {
+    const folders = bridge.folders;
+    const inboxId = (uid) => `INBOX::${uid}::x`;
+    // The ids the service hands out carry the folder's UIDVALIDITY; build the real ones from a sync.
+    const snapshot = await service.collectEmailsForIndex({ folder: "INBOX", limitPerFolder: 10 });
+    const first = snapshot.emails.find((e) => e.uid === 1);
+    const second = snapshot.emails.find((e) => e.uid === 2);
+    const third = snapshot.emails.find((e) => e.uid === 3);
+    void inboxId;
+
+    // Mark read.
+    await service.markEmailRead(first.id, true);
+    assert.ok(folders.INBOX.messages.find((m) => m.uid === 1).flags.has("\\Seen"), "the flag is set on the server");
+
+    // Move to another folder: the message leaves INBOX and appears in the target with a new uid.
+    const moved = await service.moveEmail(second.id, "Folders/Geek");
+    assert.equal(moved.targetFolder, "Folders/Geek");
+    assert.ok(moved.targetEmailId, "a target id comes back");
+    assert.equal(folders.INBOX.messages.some((m) => m.uid === 2), false, "gone from the source");
+    assert.equal(folders["Folders/Geek"].messages.some((m) => m.uid === moved.targetUid), true, "present in the target");
+
+    // Delete: flagged and expunged.
+    await service.deleteEmail(third.id);
+    assert.equal(folders.INBOX.messages.some((m) => m.uid === 3), false, "deleted");
+
+    // Import: appended with its flags, and the id points at it.
+    const raw = Buffer.from("From: Bob <bob@example.com>\r\nTo: owner@example.com\r\nSubject: Imported\r\nMessage-ID: <imp1@x>\r\nDate: Tue, 24 Mar 2026 10:00:00 +0000\r\n\r\nHello\r\n");
+    const imported = await service.importEmail({ raw, targetFolder: "Sent", flags: ["\\Seen"] });
+    assert.ok(imported.uid && imported.emailId, JSON.stringify(imported));
+    const stored = folders.Sent.messages.find((m) => m.uid === imported.uid);
+    assert.ok(stored, "the message is on the server");
+    assert.equal(stored.subject, "Imported");
+    assert.ok(stored.flags.has("\\Seen"));
+
+    // Importing the same message again is recognised by its Message-ID instead of creating a second copy.
+    const again = await service.importEmail({ raw, targetFolder: "Sent" });
+    assert.equal(again.alreadyExists, true);
+    assert.equal(folders.Sent.messages.filter((m) => m.messageId === "<imp1@x>").length, 1);
+  });
+});
