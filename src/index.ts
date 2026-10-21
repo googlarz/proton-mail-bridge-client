@@ -4502,6 +4502,16 @@ export function createServer(
     );
   }
 
+  // A result that names messages: every id it carries gets the account's prefix, so the caller can pass it straight
+  // back (an id of a non-primary account is only valid with its "<slug>::").
+  function withPrefixedIds<T extends object>(bundle: AccountBundle, result: T): T {
+    const copy = { ...result } as Record<string, unknown>;
+    for (const key of ["emailId", "sourceEmailId", "targetEmailId", "existingEmailId"]) {
+      if (typeof copy[key] === "string" && copy[key] !== "") copy[key] = prefixedIdFor(bundle, copy[key] as string);
+    }
+    return copy as T;
+  }
+
   // draftId and emailId share the exact same "<slug>::" prefixing scheme (plain
   // string-prefix stripping over the non-primary slugs), so draftId resolution reuses
   // resolveAccountForEmailId itself rather than a second, parallel mechanism.
@@ -7408,11 +7418,14 @@ export function createServer(
           const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
-            await withAudit(auditService, name, args, async () =>
-              bundle.imapService.markEmailRead(
-                emailId,
-                normalizeBoolean(args.isRead, true),
-                uidValidity,
+            withPrefixedIds(
+              bundle,
+              await withAudit(auditService, name, args, async () =>
+                bundle.imapService.markEmailRead(
+                  emailId,
+                  normalizeBoolean(args.isRead, true),
+                  uidValidity,
+                ),
               ),
             ),
           );
@@ -7427,11 +7440,14 @@ export function createServer(
           const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
-            await withAudit(auditService, name, args, async () =>
-              bundle.imapService.starEmail(
-                emailId,
-                normalizeBoolean(args.isStarred, true),
-                uidValidity,
+            withPrefixedIds(
+              bundle,
+              await withAudit(auditService, name, args, async () =>
+                bundle.imapService.starEmail(
+                  emailId,
+                  normalizeBoolean(args.isStarred, true),
+                  uidValidity,
+                ),
               ),
             ),
           );
@@ -7470,11 +7486,7 @@ export function createServer(
                 },
               ]
             : [];
-          return createTextResult(
-            { ...result, emailId: prefixedIdFor(bundle, result.emailId), sourceEmailId: prefixedIdFor(bundle, result.sourceEmailId), targetEmailId },
-            false,
-            sources,
-          );
+          return createTextResult(withPrefixedIds(bundle, { ...result, targetEmailId }), false, sources);
         }
 
         case "archive_email":
@@ -7498,7 +7510,7 @@ export function createServer(
                 },
               ]
             : [];
-          return createTextResult({ ...result, targetEmailId }, false, sources);
+          return createTextResult(withPrefixedIds(bundle, { ...result, targetEmailId }), false, sources);
         }
 
         case "trash_email":
@@ -7522,7 +7534,7 @@ export function createServer(
                 },
               ]
             : [];
-          return createTextResult({ ...result, targetEmailId }, false, sources);
+          return createTextResult(withPrefixedIds(bundle, { ...result, targetEmailId }), false, sources);
         }
 
         case "restore_email":
@@ -7551,7 +7563,7 @@ export function createServer(
                 },
               ]
             : [];
-          return createTextResult({ ...result, targetEmailId }, false, sources);
+          return createTextResult(withPrefixedIds(bundle, { ...result, targetEmailId }), false, sources);
         }
 
         case "snooze_email": {
@@ -7736,8 +7748,9 @@ export function createServer(
           const { bundle, rest: emailId } = resolveAccountForEmailId(rawEmailId);
           const uidValidity = parseEmailId(emailId).uidValidity;
           return createTextResult(
-            await withAudit(auditService, name, args, async () =>
-              bundle.imapService.deleteEmail(emailId, uidValidity),
+            withPrefixedIds(
+              bundle,
+              await withAudit(auditService, name, args, async () => bundle.imapService.deleteEmail(emailId, uidValidity)),
             ),
           );
         }

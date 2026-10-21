@@ -146,3 +146,35 @@ test("import_email goes to the account named by the argument or the folder prefi
     }
   }, ["delete", "move"]);
 });
+
+test("every tool that names a message answers with the account's prefix on a non-primary account", async () => {
+  await withServer(["owner@example.com", "work@example.com"], async ({ client, bundles }) => {
+    const work = bundles[1];
+    const slug = work.account.slug;
+    const folders = [{ path: "Archive", name: "Archive", delimiter: "/", flags: [], listed: true, subscribed: true, specialUse: "\\Archive" }, { path: "Trash", name: "Trash", delimiter: "/", flags: [], listed: true, subscribed: true, specialUse: "\\Trash" }];
+    work.imapService.getFolders = async () => folders;
+    work.imapService.getFolderStructure = async () => folders;
+    work.imapService.isTrashFolder = async (path) => path === "Trash";
+    const moved = async (emailId) => ({ emailId, sourceEmailId: emailId, fromFolder: "INBOX", targetFolder: "Archive", uid: 1, targetUid: 2, targetEmailId: "Archive::2::y" });
+    work.imapService.archiveEmail = moved;
+    work.imapService.trashEmail = moved;
+    work.imapService.restoreEmail = moved;
+    work.imapService.moveEmail = moved;
+    work.imapService.markEmailRead = async (emailId, isRead) => ({ emailId, isRead });
+    work.imapService.starEmail = async (emailId, isStarred) => ({ emailId, isStarred });
+    work.imapService.deleteEmail = async (emailId) => ({ emailId, deleted: true });
+    const id = `${slug}::${createEmailId("INBOX", 1, "100")}`;
+    const calls = {
+      archive_email: {}, trash_email: {}, restore_email: { targetFolder: "INBOX" }, move_email: { targetFolder: "Archive" },
+      mark_email_read: {}, star_email: {}, delete_email: { confirmed: true, permanent: true },
+    };
+    const ids = (value) => ["emailId", "sourceEmailId", "targetEmailId"].filter((key) => typeof value[key] === "string").map((key) => [key, value[key]]);
+    for (const [tool, extra] of Object.entries(calls)) {
+      const result = await client.callTool({ name: tool, arguments: { emailId: id, ...extra } });
+      assert.ok(!result.isError, `${tool}: ${result.content[0].text}`);
+      const found = ids(JSON.parse(result.content[0].text));
+      assert.ok(found.length > 0, `${tool} names a message`);
+      for (const [key, value] of found) assert.ok(value.startsWith(`${slug}::`), `${tool}.${key} is not prefixed: ${value}`);
+    }
+  }, ["delete", "move", "archive", "trash", "restore", "mark_read", "mark_unread", "star", "unstar"]);
+});
