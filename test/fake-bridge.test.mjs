@@ -114,3 +114,39 @@ test("two accounts on two Bridge logins stay apart", needsOpenssl, async () => {
     await bridge.close();
   }
 });
+
+test("PROTONMAIL_SHORTEN_LINKS shortens long tracking links in a message read from a server, HTML-only or plain text", needsOpenssl, async () => {
+  const tracking = `https://click.example.com/f/a/${"x".repeat(200)}`;
+  const unsubscribe = `https://click.example.com/unsubscribe/${"y".repeat(200)}`;
+  const folders = {
+    INBOX: {
+      uidValidity: 1,
+      messages: [
+        createMessage(1, { html: `<p>Hello <a href="${tracking}">Read more</a> or <a href="${unsubscribe}">unsubscribe</a></p>` }),
+        createMessage(2, { body: `Plain text mail with ${tracking} and leave ${unsubscribe}\r\n` }),
+      ],
+    },
+  };
+  for (const shortenLinks of [false, true]) {
+    const bridge = await startFakeBridge({ mode: "starttls", certificate, folders });
+    const imap = { host: "127.0.0.1", port: bridge.port, secure: false, username: "owner@example.com", password: "secret" };
+    const service = new SimpleIMAPService({ imap, smtp: { ...imap, port: 9 }, dataDir: "/tmp/fake-bridge-shorten", debug: false, runtime: { ...runtime, shortenLinks } });
+    try {
+      const snapshot = await service.collectEmailsForIndex({ folder: "INBOX", limitPerFolder: 10 });
+      for (const email of snapshot.emails) {
+        const detail = await service.getEmailById(email.id);
+        const body = detail.body ?? detail.text ?? "";
+        if (shortenLinks) {
+          assert.ok(!body.includes(tracking), `uid ${email.uid}: the tracking link must be shortened`);
+          assert.match(body, /https:\/\/click\.example\.com\/…/);
+          assert.ok(body.includes(unsubscribe), `uid ${email.uid}: the unsubscribe link must stay whole`);
+        } else {
+          assert.ok(body.includes(tracking), `uid ${email.uid}: off by default, nothing changes`);
+        }
+      }
+    } finally {
+      await service.disconnect().catch(() => {});
+      await bridge.close();
+    }
+  }
+});

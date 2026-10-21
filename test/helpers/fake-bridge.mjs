@@ -23,7 +23,7 @@ export function makeCertificate() {
 
 const quote = (value) => (value === undefined || value === null ? "NIL" : `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
 
-export function createMessage(uid, { subject = `Mail ${uid}`, from = "alice@example.com", to = "owner@example.com", flags = [], body, date = new Date(Date.UTC(2026, 2, 24, 10, uid % 60)) } = {}) {
+export function createMessage(uid, { subject = `Mail ${uid}`, from = "alice@example.com", to = "owner@example.com", flags = [], body, html, date = new Date(Date.UTC(2026, 2, 24, 10, uid % 60)) } = {}) {
   const text = body ?? `Body of mail ${uid}\r\n`;
   const source = [
     `From: Alice <${from}>`,
@@ -32,9 +32,9 @@ export function createMessage(uid, { subject = `Mail ${uid}`, from = "alice@exam
     `Date: ${date.toUTCString()}`,
     `Message-ID: <m${uid}@fake.bridge>`,
     "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=utf-8",
+    `Content-Type: ${html ? "text/html" : "text/plain"}; charset=utf-8`,
     "",
-    text,
+    html ?? text,
   ].join("\r\n");
   return { uid, flags: new Set(flags), internalDate: date, from, to, subject, messageId: `<m${uid}@fake.bridge>`, source: Buffer.from(source) };
 }

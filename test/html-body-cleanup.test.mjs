@@ -53,4 +53,8 @@ test("shortenLongLinks drops the tail of long tracking links but keeps the ones 
   assert.equal(shortenLongLinks(`[leave](${unsubscribe})`), `[leave](${unsubscribe})`, "an unsubscribe address stays");
   assert.equal(shortenLongLinks(`[Confirm your email](${tracking})`), `[Confirm your email](${tracking})`, "nor a confirm link, judged by its text");
   assert.equal(shortenLongLinks(`[x](${tracking} "title")`), "[x](https://click.example.com/…)");
+  // How mailparser writes an HTML mail's links into its text, and a bare address in plain text.
+  assert.equal(shortenLongLinks(`Read more [${tracking}] now`), "Read more [https://click.example.com/…] now");
+  assert.equal(shortenLongLinks(`see ${tracking}\nnext`), "see https://click.example.com/…\nnext");
+  assert.equal(shortenLongLinks(`leave [${unsubscribe}]`), `leave [${unsubscribe}]`);
 });

@@ -410,14 +410,29 @@ const KEEP_LINK = /unsubscribe|opt[-_]?out|subscribe|confirm|verify|activate|res
 // Marketing and bank mail carry tracking links of 100-300 characters per link; in Markdown they cost tokens and say
 // nothing. Keeps the link text and the host, drops the rest of the address.
 export function shortenLongLinks(markdown: string, maxUrlLength = 100): string {
-  return markdown.replace(/\[([^\]]*)\]\((https?:\/\/[^\s)]+)([^)]*)\)/g, (match, text: string, url: string) => {
-    if (url.length <= maxUrlLength || KEEP_LINK.test(url) || KEEP_LINK.test(text)) return match;
+  const shorten = (url: string): string | undefined => {
     try {
-      return `[${text}](${new URL(url).origin}/…)`;
+      return `${new URL(url).origin}/…`;
     } catch {
-      return match;
+      return undefined;
     }
-  });
+  };
+  // One pass over two shapes, so a [text](url) that is kept is not shortened again as a bare address.
+  //  - [text](url): the text stays.
+  //  - any other address: mailparser writes an HTML mail's links into its text as "text [url]", and plain-text mail
+  //    carries bare addresses.
+  return markdown.replace(
+    /\[([^\]]*)\]\((https?:\/\/[^\s)]+)([^)]*)\)|https?:\/\/[^\s<>\])"']+/g,
+    (match, text?: string, markdownUrl?: string) => {
+      if (text !== undefined && markdownUrl !== undefined) {
+        if (markdownUrl.length <= maxUrlLength || KEEP_LINK.test(markdownUrl) || KEEP_LINK.test(text)) return match;
+        const short = shorten(markdownUrl);
+        return short ? `[${text}](${short})` : match;
+      }
+      if (match.length <= maxUrlLength || KEEP_LINK.test(match)) return match;
+      return shorten(match) ?? match;
+    },
+  );
 }
 
 export function htmlToMarkdown(value?: string): string | undefined {
