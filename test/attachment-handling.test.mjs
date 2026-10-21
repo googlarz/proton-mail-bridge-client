@@ -312,9 +312,9 @@ test("a relative outputPath is relative to the download directory, and the defau
     withAttachments(svc, [att("b.txt", "world")]);
     const alreadyEncoded = await svc.saveAttachments({ emailId: "Folders%2FNews::116870800::51::d673a4f9" });
     const folder = alreadyEncoded.saved[0].outputPath.split(/[\\/]/).at(-2);
-    assert.equal(folder, "Folders_News_116870800_51_d673a4f9");
+    assert.equal(folder, "Folders%2FNews%3A%3A116870800%3A%3A51%3A%3Ad673a4f9", "encoded once, not twice");
     withAttachments(svc, [att("c.txt", "again")]);
     const plain = await svc.saveAttachments({ emailId: "Folders/News::116870800::51::d673a4f9" });
-    assert.equal(plain.saved[0].outputPath.split(/[\\/]/).at(-2), "Folders_News_116870800_51_d673a4f9", "the same folder for the same message");
+    assert.equal(plain.saved[0].outputPath.split(/[\\/]/).at(-2), folder, "the same folder for the same message");
   });
 });

@@ -76,7 +76,7 @@ function attachFlagSweep(checkpoint: MailboxSyncCheckpoint, sweep: MailboxSyncCh
 }
 
 // A folder name inside an id may already be percent-encoded, and encoding the whole id again gave names like
-// "Folders%252FNews%252F...". Decode once, then make the characters a file system dislikes safe.
+// "Folders%252FNews%252F...". Decode first, then encode once: a plain id keeps the name it always had.
 export function attachmentDirName(emailId: string): string {
   let decoded = emailId;
   try {
@@ -84,7 +84,7 @@ export function attachmentDirName(emailId: string): string {
   } catch {
     // not percent-encoded
   }
-  return decoded.replace(/[\\/:*?"<>|\s]+/g, "_").replace(/^_+|_+$/g, "") || "message";
+  return encodeURIComponent(decoded);
 }
 
 const FLAG_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
