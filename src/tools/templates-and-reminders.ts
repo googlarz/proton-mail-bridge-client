@@ -4,7 +4,7 @@ import { createTextResult } from "./results.js";
 import { normalizeBoolean, optionalBoolean, optionalInteger, optionalNumber, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
 import { requireString, optionalString } from "./args.js";
 import { withAudit } from "./audit.js";
-import { ensureMailboxWriteAllowed, ensureDestructiveConfirmed, ensureSendAllowed, ensureEmailActionAllowed } from "../utils/runtime-policy.js";
+import { ensureMailboxWriteAllowed, ensureDestructiveConfirmed, ensureEmailActionAllowed } from "../utils/runtime-policy.js";
 import type { ToolContext } from "./context.js";
 import type { ToolResult } from "./results.js";
 
@@ -64,13 +64,19 @@ export async function handleTemplateAndReminderTool(name: string, args: Record<s
     case "set_autoresponder": {
       const target = resolveAccountArg(args) ?? primaryBundle;
       const enabled = optionalBoolean(args.enabled);
+      const existing = (await target.autoresponderService.get()).rule;
+      const deps = target.autoresponderDeps();
       if (enabled === true) {
-        // It sends mail nobody looks at: it needs everything a send needs, and a confirmation like one.
-        ensureSendAllowed(config.runtime);
-        if (config.runtime.restrictOutboundToSelf) {
-          throw new McpError(ErrorCode.InvalidParams, "Outbound mail is confined to your own addresses (PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF), and an automatic reply goes to whoever wrote.");
+        if (!deps.canSend && !deps.canDraft) {
+          throw new McpError(ErrorCode.InvalidParams, "This server can neither send mail nor write drafts under the current runtime policy, so an automatic reply could do nothing.");
         }
-        ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Switch on the automatic reply of ${target.account.address}: it will send mail without asking each time`);
+        // Whether it could send: the server may, and the default reply or a rule is set to send.
+        const mode = optionalString(args, "mode") ?? existing?.mode;
+        const rules = Array.isArray(args.rules) ? (args.rules as Array<{ action?: string }>) : existing?.rules;
+        const couldSend = deps.canSend && (mode !== "draft" || (rules ?? []).some((rule) => rule.action === "reply"));
+        if (couldSend) {
+          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Switch on the automatic reply of ${target.account.address}: it will send mail without asking each time`);
+        }
       }
       const rule = await withAudit(target.auditService, name, args, async () =>
         target.autoresponderService.set({
@@ -80,13 +86,20 @@ export async function handleTemplateAndReminderTool(name: string, args: Record<s
           startsAt: optionalString(args, "startsAt"),
           endsAt: optionalString(args, "endsAt"),
           replyEveryDays: optionalInteger(args.replyEveryDays, 1, 90),
+          dailyLimit: optionalInteger(args.dailyLimit, 1, 200),
+          mode: optionalString(args, "mode") as "send" | "draft" | undefined,
+          timezone: optionalString(args, "timezone"),
+          outsideHours: args.outsideHours === null ? null : (args.outsideHours as { days: number[]; from: string; to: string } | undefined),
+          skipIfAnswered: optionalBoolean(args.skipIfAnswered),
+          rules: args.rules,
           outgoingNote: optionalString(args, "outgoingNote"),
         }),
       );
       const sync = target.backgroundSyncService.getStatus();
       const warnings: string[] = [];
-      if (rule.enabled && !sync.enabled) warnings.push("Background sync is off (PROTONMAIL_AUTO_SYNC), so no reply is sent until it runs.");
-      if (rule.enabled && rule.body === "") warnings.push("There is no reply text; only the outgoing note is active.");
+      if (rule.enabled && !sync.enabled) warnings.push("Background sync is off (PROTONMAIL_AUTO_SYNC), so nothing is answered until it runs.");
+      if (rule.enabled && !rule.body && !rule.rules?.some((candidate) => candidate.body)) warnings.push("There is no reply text; only the outgoing note is active.");
+      if (rule.enabled && !deps.canSend) warnings.push("This server may not send mail, so matching mail gets a draft for you to review instead of a reply.");
       return createTextResult({ account: target.account.address, rule, ...(warnings.length ? { warnings } : {}) });
     }
 
@@ -94,17 +107,41 @@ export async function handleTemplateAndReminderTool(name: string, args: Record<s
       const target = resolveAccountArg(args) ?? primaryBundle;
       const state = await target.autoresponderService.get();
       const sync = target.backgroundSyncService.getStatus();
-      let canSend = true;
-      try {
-        ensureSendAllowed(config.runtime);
-      } catch {
-        canSend = false;
-      }
+      const deps = target.autoresponderDeps();
       return createTextResult({
         account: target.account.address,
         ...state,
-        serverCanSend: canSend && !config.runtime.restrictOutboundToSelf,
+        serverCan: { send: deps.canSend === true, draft: deps.canDraft === true },
         backgroundSync: { enabled: sync.enabled, thisInstanceRunsIt: sync.leader !== false },
+      });
+    }
+
+    case "preview_autoresponder": {
+      const target = resolveAccountArg(args) ?? primaryBundle;
+      const days = optionalInteger(args.days, 1, 14) ?? 3;
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      const found = await target.localIndexService.search({ folder: "INBOX", dateFrom: since, limit: 200 });
+      const decisions = await target.autoresponderService.preview(found.emails, target.ownAddresses, target.autoresponderDeps());
+      const counts = { reply: 0, draft: 0, skip: 0 } as Record<string, number>;
+      const skippedBy: Record<string, number> = {};
+      for (const decision of decisions) {
+        counts[decision.outcome] += 1;
+        if (decision.outcome === "skip") skippedBy[decision.reason ?? "other"] = (skippedBy[decision.reason ?? "other"] ?? 0) + 1;
+      }
+      return createTextResult({
+        account: target.account.address,
+        lookedAt: { days, messages: found.emails.length, note: found.emails.length >= 200 ? "Only the newest 200 were judged." : undefined },
+        configured: (await target.autoresponderService.get()).rule !== undefined,
+        counts,
+        skippedBy,
+        messages: decisions.slice(0, 50).map((decision) => ({
+          from: decision.from,
+          subject: decision.subject,
+          would: decision.outcome,
+          reason: decision.reason,
+          rule: decision.rule,
+          ...(decision.reply ? { replySubject: decision.reply.subject, replyBody: decision.reply.body.slice(0, 300) } : {}),
+        })),
       });
     }
 

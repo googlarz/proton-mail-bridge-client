@@ -846,18 +846,48 @@ export const TOOLS = [
   },
   {
     name: "set_autoresponder",
-    description: "Set up, change or switch off the automatic reply of one address, and the note that address appends to what it sends. Off by default. While on, an incoming mail from a person who wrote to this address (not a list, not an automatic message, not a no-reply address, not mail that arrived before it was switched on) gets one reply per sender per `replyEveryDays` days, at most 50 a day, sent after each background sync, so it only works while this server is running with background sync on and PROTONMAIL_MODE allows sending. Switching it on needs confirmed: true when PROTONMAIL_CONFIRM_DESTRUCTIVE is on, and is refused when sending is disabled or confined to your own addresses. Switching it off is always allowed. With `startsAt`/`endsAt` it is active only inside that window.",
+    description: "Set up, change or switch off the automatic reply of one address, and the note that address appends to what it sends. Off by default. While on, a message from a person who wrote to this address (not a list, not an automatic message, not a no-reply address, not mail that arrived before it was switched on, not someone you have already answered since) gets one reply per sender per `replyEveryDays` days, at most `dailyLimit` a day. It is made after each background sync, so it only works while this server is running with background sync on. `rules` give other senders another text, a draft for you to approve, or no reply; the text can use {senderName}, {senderFirstName}, {subject}, {startsAt}, {endsAt}. `mode: \"draft\"` prepares drafts instead of sending, and so does a server that may not send. `outsideHours` limits it to when you are not at work. Use preview_autoresponder first to see what it would do to recent mail. Switching it on needs confirmed: true when PROTONMAIL_CONFIRM_DESTRUCTIVE is on and the server can send; it is refused when the server can neither send nor write drafts. Switching it off is always allowed.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
       properties: {
         account: { type: "string", description: "Address or slug of the account to set up (see list_accounts). Defaults to the primary account." },
-        enabled: { type: "boolean", description: "true switches the automatic reply on, false off. Omit to change only the text or dates." },
+        enabled: { type: "boolean", description: "true switches the automatic reply on, false off. Omit to change only the text, rules or dates." },
         subject: { type: "string", description: "Subject of the reply; {subject} stands for the subject of the message answered. Default: \"Automatic reply: {subject}\"." },
-        body: { type: "string", description: "Text of the reply (up to 4000 characters)." },
+        body: { type: "string", description: "Text of the default reply (up to 4000 characters). Can use {senderFirstName}, {endsAt} and the other placeholders." },
         startsAt: { type: "string", description: "Start of the window, a date or date-time such as 2026-12-24 or 2026-12-24T18:00:00+01:00. Empty string clears it." },
         endsAt: { type: "string", description: "End of the window. Empty string clears it." },
         replyEveryDays: { type: "integer", description: "A sender gets at most one reply in this many days (1-90, default 7).", minimum: 1, maximum: 90 },
+        dailyLimit: { type: "integer", description: "At most this many replies and drafts a day (1-200, default 50).", minimum: 1, maximum: 200 },
+        mode: { type: "string", enum: ["send", "draft"], description: "What the default reply does: send it (default) or leave a draft for you to review." },
+        timezone: { type: "string", description: "IANA time zone for outsideHours and for the dates in the text, for example Europe/Warsaw. Empty string = the server's." },
+        outsideHours: {
+          type: ["object", "null"],
+          description: "Answer only OUTSIDE these working hours, for example {\"days\":[1,2,3,4,5],\"from\":\"09:00\",\"to\":\"17:00\"} (days 0=Sunday..6=Saturday). null removes it.",
+          properties: {
+            days: { type: "array", items: { type: "integer", minimum: 0, maximum: 6 } },
+            from: { type: "string", description: "HH:MM" },
+            to: { type: "string", description: "HH:MM" },
+          },
+        },
+        skipIfAnswered: { type: "boolean", description: "Do not answer a sender you have already written to since their message (default true)." },
+        rules: {
+          type: "array",
+          description: "Replaces the whole list ([] clears it). Checked in order; the first that matches decides, mail matching none gets the default reply. At most 20.",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "A label that shows in the log." },
+              from: { type: "array", items: { type: "string" }, description: "Addresses, or \"*@example.com\" for a whole domain." },
+              subjectContains: { type: "array", items: { type: "string" }, description: "The subject contains any of these." },
+              known: { type: "string", enum: ["yes", "no"], description: "yes: the sender is someone you have written to; no: you have not." },
+              action: { type: "string", enum: ["reply", "draft", "skip"], description: "reply: send; draft: leave a draft for you; skip: no reply." },
+              subject: { type: "string", description: "Subject for this match instead of the default." },
+              body: { type: "string", description: "Text for this match instead of the default." },
+            },
+            required: ["action"],
+          },
+        },
         outgoingNote: { type: "string", description: "A note appended to every mail this address sends while the rule is active, for example \"I am away until 4 January.\" Empty string removes it." },
         confirmed: { type: "boolean", description: "Set to true to confirm switching the automatic reply on when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
@@ -865,12 +895,24 @@ export const TOOLS = [
   },
   {
     name: "get_autoresponder",
-    description: "Show the automatic reply of one address: the rule, whether it is active now, whether this server can send it (background sync running, sending allowed), and how many replies have gone out.",
+    description: "Show the automatic reply of one address: the rule, whether it is active now, what this server can do for it (send, draft; background sync running), counts and who wrote while it was on (replied, drafted, skipped and why), and the latest entries of its log.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
       properties: {
         account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+      },
+    },
+  },
+  {
+    name: "preview_autoresponder",
+    description: "Show what the automatic reply WOULD do with the mail already in the index from the last few days: for each message, whether it would be answered, left as a draft or skipped, why, which rule matched and the text it would use. Sends and records nothing, and works even while the rule is off (judged as if it were on now).",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        days: { type: "integer", description: "How many days back to look (1-14, default 3).", minimum: 1, maximum: 14 },
       },
     },
   },

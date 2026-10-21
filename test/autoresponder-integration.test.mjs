@@ -63,7 +63,7 @@ test("a sync that indexes new mail from a person sends one automatic reply, and 
   }
 });
 
-test("nothing is sent while the runtime does not allow sending or confines mail to the user", needsOpenssl, async () => {
+test("while the runtime may not send, a reply is prepared as a draft instead of being sent", needsOpenssl, async () => {
   for (const runtime of [{ allowSend: false }, { restrictOutboundToSelf: true }]) {
     const dir = await mkdtemp(join(tmpdir(), "autoresponder-policy-"));
     const bridge = await startFakeBridge({
@@ -78,6 +78,12 @@ test("nothing is sent while the runtime does not allow sending or confines mail 
       await bundle.autoresponderService.set({ enabled: true, body: "Away" });
       await bundle.backgroundSyncService.runNow("manual");
       assert.equal(sent, 0, JSON.stringify(runtime));
+      // The server may not send, so the reply is prepared as a draft for the user to review instead.
+      const drafts = await bundle.draftStore.listDrafts(true);
+      assert.equal(drafts.length, 1, JSON.stringify(runtime));
+      assert.deepEqual(drafts[0].to, ["alice@example.com"]);
+      assert.equal(drafts[0].mode, "reply");
+      assert.match(drafts[0].notes ?? "", /autoresponder/i);
     } finally {
       bundle.backgroundSyncService.stop();
       await bundle.imapService.disconnect().catch(() => {});
@@ -124,22 +130,31 @@ test("switching the autoresponder on is gated like a send; switching it off neve
     assert.equal(JSON.parse(text(on)).rule.enabled, true);
     const shown = JSON.parse(text(await client.callTool({ name: "get_autoresponder", arguments: {} })));
     assert.equal(shown.active, true);
-    assert.equal(shown.serverCanSend, true);
+    assert.deepEqual(shown.serverCan, { send: true, draft: true });
 
     const off = await client.callTool({ name: "set_autoresponder", arguments: { enabled: false } });
     assert.ok(!off.isError, text(off));
     assert.equal(JSON.parse(text(await client.callTool({ name: "get_autoresponder", arguments: {} }))).active, false);
   });
+  // A server that may not send can still prepare drafts: switching on is allowed, and says so.
   await withServer({ allowSend: false }, async (client) => {
-    const result = await client.callTool({ name: "set_autoresponder", arguments: { enabled: true, body: "Away", confirmed: true } });
-    assert.equal(result.isError, true);
-    assert.match(text(result), /disabled by the current runtime policy/);
+    const result = await client.callTool({ name: "set_autoresponder", arguments: { enabled: true, body: "Away" } });
+    assert.ok(!result.isError, text(result));
+    assert.match(JSON.parse(text(result)).warnings.join(" "), /draft/);
     const off = await client.callTool({ name: "set_autoresponder", arguments: { enabled: false } });
-    assert.ok(!off.isError, "switching off works in a read-only setup");
+    assert.ok(!off.isError, "switching off always works");
   });
   await withServer({ restrictOutboundToSelf: true }, async (client) => {
+    const result = await client.callTool({ name: "set_autoresponder", arguments: { enabled: true, body: "Away" } });
+    assert.ok(!result.isError, "a reply to whoever wrote cannot go out, so it becomes a draft");
+    assert.match(JSON.parse(text(result)).warnings.join(" "), /draft/);
+  });
+  // With nothing it may do at all (read-only), it is refused.
+  await withServer({ readOnly: true, allowSend: false }, async (client) => {
     const result = await client.callTool({ name: "set_autoresponder", arguments: { enabled: true, body: "Away", confirmed: true } });
     assert.equal(result.isError, true);
-    assert.match(text(result), /confined to your own addresses/);
+    assert.match(text(result), /neither send mail nor write drafts/);
+    const off = await client.callTool({ name: "set_autoresponder", arguments: { enabled: false } });
+    assert.ok(!off.isError, "switching off works even in a read-only setup");
   });
 });

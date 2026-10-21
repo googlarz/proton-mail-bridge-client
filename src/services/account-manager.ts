@@ -10,8 +10,8 @@ import { AuditService } from "./audit-service.js";
 import { ReplyReminderService } from "./reply-reminder-service.js";
 import { TemplateService } from "./template-service.js";
 import { BackgroundSyncService } from "./background-sync-service.js";
-import { AutoresponderService } from "./autoresponder-service.js";
-import { ensureSendAllowed } from "../utils/runtime-policy.js";
+import { AutoresponderService, type AutoresponderDeps } from "./autoresponder-service.js";
+import { ensureMailboxWriteAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 
 // One account's complete, self-contained service stack — identical in shape to what
 // createServer() builds once for a single account, now built once per configured
@@ -36,6 +36,9 @@ export interface AccountBundle {
   replyReminderService: ReplyReminderService;
   backgroundSyncService: BackgroundSyncService;
   autoresponderService: AutoresponderService;
+  /** What the autoresponder may do on this account right now (send, draft) and the lookups it needs. */
+  autoresponderDeps(): AutoresponderDeps;
+  ownAddresses: string[];
 }
 
 function buildAccountBundle(
@@ -69,39 +72,71 @@ function buildAccountBundle(
 
   // The note this address adds to what it sends while its automatic reply is active.
   smtpService.setOutgoingNoteProvider(() => autoresponderService.outgoingNoteNow());
-  // Replies go out after a sync has indexed new mail, and only when the runtime lets this server send at all and does
-  // not confine mail to the user's own addresses (an automatic reply goes to whoever wrote).
-  backgroundSyncService.setNewMailHandler(async (emails) => {
+  // The addresses that count as this account's own, and what the autoresponder may do and ask on its behalf.
+  const ownAddresses = [...new Set([account.address, config.smtp.username, config.imap.username])];
+  const autoresponderDeps = (): AutoresponderDeps => {
+    let canSend = true;
     try {
       ensureSendAllowed(config.runtime);
     } catch {
-      return;
+      canSend = false;
     }
-    if (config.runtime.restrictOutboundToSelf) return;
-    const own = [...new Set([account.address, config.smtp.username, config.imap.username])];
-    const outcome = await autoresponderService.process(emails, own, async (reply) => {
-      await smtpService.sendEmail({
-        to: [reply.to],
-        subject: reply.subject,
-        body: reply.body,
-        inReplyTo: reply.inReplyTo,
-        references: reply.references,
-        headers: reply.headers,
-        appendSignature: false,
-      });
+    // An automatic reply goes to whoever wrote, so a setup that confines mail to the user's own addresses cannot send it.
+    if (config.runtime.restrictOutboundToSelf) canSend = false;
+    let canDraft = true;
+    try {
+      ensureMailboxWriteAllowed(config.runtime);
+    } catch {
+      canDraft = false;
+    }
+    const audit = async (tool: string, reply: { to: string; subject: string }) => {
       try {
-        await auditService.record({
-          timestamp: new Date().toISOString(),
-          tool: "autoresponder_reply",
-          status: "success",
-          input: { to: reply.to, subject: reply.subject },
-        });
+        await auditService.record({ timestamp: new Date().toISOString(), tool, status: "success", input: { to: reply.to, subject: reply.subject } });
       } catch {
         // bookkeeping only
       }
-    });
-    if (outcome.replied.length > 0) {
-      log.info("Autoresponder replied", "AutoresponderService", { account: account.slug, replies: outcome.replied.length });
+    };
+    return {
+      canSend,
+      canDraft,
+      send: async (reply) => {
+        await smtpService.sendEmail({
+          to: [reply.to],
+          subject: reply.subject,
+          body: reply.body,
+          inReplyTo: reply.inReplyTo,
+          references: reply.references,
+          headers: reply.headers,
+          appendSignature: false,
+        });
+        await audit("autoresponder_reply", reply);
+      },
+      draft: async (reply) => {
+        await draftStore.createDraft({
+          mode: "reply",
+          to: [reply.to],
+          subject: reply.subject,
+          body: reply.body,
+          inReplyTo: reply.inReplyTo,
+          references: reply.references,
+          sourceEmailId: reply.sourceEmailId,
+          sourceMessageId: reply.inReplyTo,
+          notes: `Prepared by the autoresponder${reply.rule ? ` (${reply.rule})` : ""}. Review it and send it, or delete it.`,
+        });
+        await audit("autoresponder_draft", reply);
+      },
+      isKnownContact: async (address) => (await localIndexService.search({ from: account.address, to: address, limit: 1 })).emails.length > 0,
+      hasAnsweredSince: async (address, sinceIso) =>
+        (await localIndexService.search({ from: account.address, to: address, dateFrom: sinceIso, limit: 1 })).emails.length > 0,
+    };
+  };
+  // Replies and drafts are made after a sync has indexed new mail.
+  backgroundSyncService.setNewMailHandler(async (emails) => {
+    const deps = autoresponderDeps();
+    if (!deps.canSend && !deps.canDraft) return;
+    const outcome = await autoresponderService.process(emails, ownAddresses, deps);
+    if (outcome.replied.length > 0 || outcome.drafted.length > 0) {
+      log.info("Autoresponder acted", "AutoresponderService", { account: account.slug, replies: outcome.replied.length, drafts: outcome.drafted.length });
     }
   });
 
@@ -119,6 +154,8 @@ function buildAccountBundle(
     replyReminderService,
     backgroundSyncService,
     autoresponderService,
+    autoresponderDeps,
+    ownAddresses,
   };
 }
 

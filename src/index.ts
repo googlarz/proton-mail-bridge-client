@@ -343,6 +343,7 @@ export function createServer(
         case "render_template":
         case "set_autoresponder":
         case "get_autoresponder":
+    case "preview_autoresponder":
         case "set_reply_reminder":
         case "list_reply_reminders":
         case "cancel_reply_reminder":

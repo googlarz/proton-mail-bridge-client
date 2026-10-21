@@ -51,7 +51,7 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
 ## What you get
 
 - **Claude reads and manages your Proton Mail** — triage, reply, draft, archive, search, move, batch-act on threads, pull attachments
-- **Full CLI** — a dedicated command for every one of the 102 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable, works in cron and shell scripts
+- **Full CLI** — a dedicated command for every one of the 103 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable, works in cron and shell scripts
 - **Fast local search** — full-text search across your inbox without hitting IMAP on every query
 - **Safety controls** — read-only mode, send gate, destructive-action confirmation, per-action allowlist
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
@@ -304,24 +304,30 @@ docker run -i --rm --network host \
 
 ## Autoresponder (automatic reply per address)
 
-**Proton Mail has its own auto-reply** (Settings → Filters / Forward and auto-reply; Proton lists it on its paid plans). If that fits, use it and leave this one off: it runs inside Proton, not inside this server, and enabling both would send each sender two replies. This one exists for what Claude can do around it, such as setting the text and dates from a chat, or a note on outgoing mail.
+**Proton Mail has its own auto-reply** (Settings → Filters / Forward and auto-reply; Proton lists it on its paid plans). It runs inside Proton, works while your computer is off, and applies to the whole account unless you write a filter. If that is enough, use it and leave this one off: enabling both would send each sender two replies. This one adds what a filter cannot do from a chat, and it only runs while this server runs.
 
-An automatic reply for one address, plus a note that address appends to what it sends. **Off by default**, and it sends mail without asking each time, so it is held to stricter rules than a normal send:
+An automatic reply for one address, plus a note that address appends to what it sends. **Off by default**, and it can send mail without asking each time, so it is held to stricter rules than a normal send:
 
-- It runs after a background sync has indexed new mail, so it works only while this server is running with background sync on (`PROTONMAIL_AUTO_SYNC`), and only when `PROTONMAIL_MODE` / `PROTONMAIL_ALLOW_SEND` let this server send and `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF` is off. With several clients open, the instance that holds the sync lock does it.
-- It answers a message only if it is from a person (not a list, not automatic mail, not a `no-reply`/`mailer-daemon` sender), was written to this address (To or Cc), arrived inside the window, and arrived **after** the rule was switched on. A sender gets one reply per `replyEveryDays` days (default 7), and at most 50 replies go out per day.
-- A reply carries `Auto-Submitted: auto-replied`, `Precedence: bulk` and `X-Auto-Response-Suppress: All`, and threads under the message it answers.
-- A reply is recorded before it is sent, so a failure never becomes a second reply (and is not retried).
-- Switching it on needs `confirmed: true` when `PROTONMAIL_CONFIRM_DESTRUCTIVE` is on. Switching it off is always allowed, in every mode.
+- **Who gets a reply.** Only a person (not a list, not automatic mail, not a `no-reply`/`mailer-daemon` sender) who wrote to this address (To or Cc), after the rule was switched on and inside its dates, and whom you have not already answered since. One reply per sender per `replyEveryDays` days (default 7), at most `dailyLimit` a day (default 50). A reply is recorded before it is sent, so a failure never becomes a second one.
+- **When.** After a background sync has indexed new mail, so only while this server runs with `PROTONMAIL_AUTO_SYNC` on; with several clients open, the instance holding the sync lock does it. `outsideHours` (with a `timezone`) limits it to when you are not at work.
+- **What it does.** `mode: "send"` sends; `mode: "draft"` leaves a draft in your drafts for you to review and send. If the server may not send (`PROTONMAIL_MODE=drafts`, `ALLOW_SEND` off, or outbound mail confined to yourself), a reply becomes a draft by itself; if it may not write drafts either (read-only), it is refused.
+- **Rules**, first match wins: by sender (`boss@example.com`, `*@client.example`), words in the subject, and whether you have written to the sender before (`known: "yes"/"no"`). Each gives `reply`, `draft` or `skip`, optionally with its own text. Mail that matches none gets the default reply.
+- **Text.** Placeholders `{senderFirstName}`, `{senderName}`, `{senderAddress}`, `{subject}`, `{startsAt}`, `{endsAt}`.
+- **Safety headers.** `Auto-Submitted: auto-replied`, `Precedence: bulk`, `X-Auto-Response-Suppress: All`; the reply threads under the message it answers.
+- **Control.** Switching it on needs `confirmed: true` when `PROTONMAIL_CONFIRM_DESTRUCTIVE` is on and the server can send. Switching it off is always allowed, in every mode.
 
 ```text
+preview_autoresponder  account=work@example.com  days=3        # what it WOULD do with recent mail; changes nothing
 set_autoresponder  account=work@example.com  enabled=true  confirmed=true
-                   subject="Away: {subject}"  body="I am away until 4 January and will answer then."
-                   startsAt=2026-12-24  endsAt=2027-01-04  outgoingNote="I am away until 4 January."
-get_autoresponder  account=work@example.com
+                   body="Hi {senderFirstName}, I am away until {endsAt} and will answer then."
+                   endsAt=2027-01-04  timezone=Europe/Warsaw  outgoingNote="I am away until 4 January."
+                   rules=[{"name":"boss","from":["boss@example.com"],"action":"reply","body":"Urgent? Call my mobile."},
+                          {"name":"clients","from":["*@client.example"],"action":"draft"},
+                          {"known":"no","subjectContains":["unsubscribe"],"action":"skip"}]
+get_autoresponder  account=work@example.com                      # state, counts, who wrote, why mail was skipped, the log
 ```
 
-`outgoingNote` is appended, after the signature, to every mail sent from that address while the rule is active (a send with `appendSignature: false` opts out). On the command line: `set-autoresponder` and `autoresponder`. The rule and its log live in `autoresponder.json` in the account's data directory. Every account (every address Bridge exposes) has its own rule.
+`outgoingNote` is appended, after the signature, to every mail sent from that address while the rule is active (a send with `appendSignature: false` opts out). On the command line: `set-autoresponder`, `autoresponder` and `preview-autoresponder`. The rule, the log and the memory of who was answered live in `autoresponder.json` in the account's data directory; every account (every address Bridge exposes) has its own.
 
 ## Multi-account support (v2.1.0+)
 
@@ -462,7 +468,7 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 
 `<command> --help` prints that command's usage without running it. Flags accept `--flag value` or `--flag=value` (a value starting with `--` needs the `=` form, or must come after a bare `--`); unknown flags are an error. Exit codes: `0` success, `1` failure (including a failed `doctor` or `connection-status` check, or a failed item in a `batch`/`bulk-*` run), `2` usage error.
 
-**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 102 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
+**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 103 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
 
 ---
 
@@ -484,7 +490,7 @@ A mode is a floor: the individual flags below can make things stricter (`PROTONM
 All flags work in both the MCP server and CLI:
 
 ```bash
-PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 102 — saves context window
+PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 103 — saves context window
 PROTONMAIL_READ_ONLY=true            # disable all write operations
 PROTONMAIL_ALLOW_SEND=false          # disable SMTP sends only (other writes still work)
 PROTONMAIL_CONFIRM_DESTRUCTIVE=true  # require confirmed:true on send, reply, forward, delete
@@ -707,7 +713,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - Defaults are bounded: `search_emails`/`search_indexed_emails` return 50 (pass `limit` for more), `list_drafts` 20, `list_scheduled_sends` 50 newest first. Each reports `hasMore`; page with `offset`.
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_KB`.
-- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 102: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 103: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 
 **Working with drafts**
