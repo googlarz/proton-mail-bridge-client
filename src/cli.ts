@@ -2185,6 +2185,8 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "cancel-snooze", tool: "cancel_snooze", positionals: ["id"], help: "Wake a snoozed email immediately" },
   { command: "list-snoozed", tool: "list_snoozed", positionals: [], help: "List snoozed emails (rediscover an id for cancel-snooze)" },
   { command: "create-template", tool: "create_template", positionals: ["name", "subject", "body"], help: "Save a reusable email template" },
+  { command: "autoresponder", tool: "get_autoresponder", positionals: [], help: "Show the automatic reply of an address (--account)" },
+  { command: "set-autoresponder", tool: "set_autoresponder", positionals: [], help: "Set up or switch off the automatic reply of an address (--enabled, --body, --subject, --startsAt, --endsAt, --outgoingNote, --confirmed)" },
   { command: "list-templates", tool: "list_templates", positionals: [], help: "List saved email templates" },
   { command: "get-template", tool: "get_template", positionals: ["id"], help: "Get a saved template by id" },
   { command: "delete-template", tool: "delete_template", positionals: ["id"], help: "Delete a saved template" },

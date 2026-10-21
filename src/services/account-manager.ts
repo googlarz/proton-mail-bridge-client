@@ -10,6 +10,8 @@ import { AuditService } from "./audit-service.js";
 import { ReplyReminderService } from "./reply-reminder-service.js";
 import { TemplateService } from "./template-service.js";
 import { BackgroundSyncService } from "./background-sync-service.js";
+import { AutoresponderService } from "./autoresponder-service.js";
+import { ensureSendAllowed } from "../utils/runtime-policy.js";
 
 // One account's complete, self-contained service stack — identical in shape to what
 // createServer() builds once for a single account, now built once per configured
@@ -33,6 +35,7 @@ export interface AccountBundle {
   templateService: TemplateService;
   replyReminderService: ReplyReminderService;
   backgroundSyncService: BackgroundSyncService;
+  autoresponderService: AutoresponderService;
 }
 
 function buildAccountBundle(
@@ -62,6 +65,45 @@ function buildAccountBundle(
   const templateService = new TemplateService(config, log);
   const replyReminderService = new ReplyReminderService(config, log);
   const backgroundSyncService = new BackgroundSyncService(config, imapService, localIndexService, log);
+  const autoresponderService = new AutoresponderService(config, log);
+
+  // The note this address adds to what it sends while its automatic reply is active.
+  smtpService.setOutgoingNoteProvider(() => autoresponderService.outgoingNoteNow());
+  // Replies go out after a sync has indexed new mail, and only when the runtime lets this server send at all and does
+  // not confine mail to the user's own addresses (an automatic reply goes to whoever wrote).
+  backgroundSyncService.setNewMailHandler(async (emails) => {
+    try {
+      ensureSendAllowed(config.runtime);
+    } catch {
+      return;
+    }
+    if (config.runtime.restrictOutboundToSelf) return;
+    const own = [...new Set([account.address, config.smtp.username, config.imap.username])];
+    const outcome = await autoresponderService.process(emails, own, async (reply) => {
+      await smtpService.sendEmail({
+        to: [reply.to],
+        subject: reply.subject,
+        body: reply.body,
+        inReplyTo: reply.inReplyTo,
+        references: reply.references,
+        headers: reply.headers,
+        appendSignature: false,
+      });
+      try {
+        await auditService.record({
+          timestamp: new Date().toISOString(),
+          tool: "autoresponder_reply",
+          status: "success",
+          input: { to: reply.to, subject: reply.subject },
+        });
+      } catch {
+        // bookkeeping only
+      }
+    });
+    if (outcome.replied.length > 0) {
+      log.info("Autoresponder replied", "AutoresponderService", { account: account.slug, replies: outcome.replied.length });
+    }
+  });
 
   return {
     account,
@@ -76,6 +118,7 @@ function buildAccountBundle(
     templateService,
     replyReminderService,
     backgroundSyncService,
+    autoresponderService,
   };
 }
 

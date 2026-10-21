@@ -1,4 +1,4 @@
-import type { BackgroundSyncStatus, ProtonMailConfig } from "../types/index.js";
+import type { BackgroundSyncStatus, EmailSummary, ProtonMailConfig } from "../types/index.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { LocalIndexService } from "./local-index-service.js";
 import { AccountIdentityMismatchError } from "../utils/account-identity.js";
@@ -30,6 +30,7 @@ export class BackgroundSyncService {
   private activeRun?: Promise<void>;
   private idleLoop?: Promise<void>;
   private started = false;
+  private newMailHandler?: (emails: EmailSummary[]) => Promise<void>;
   private authFailureCount = 0;
   private transientFailureCount = 0;
 
@@ -52,6 +53,11 @@ export class BackgroundSyncService {
       idleWatching: false,
       idleMaxSeconds: this.config.runtime.idleMaxSeconds,
     };
+  }
+
+  /** Called with the messages of each completed sync (for the autoresponder). A failure here never fails the sync. */
+  setNewMailHandler(handler: ((emails: EmailSummary[]) => Promise<void>) | undefined): void {
+    this.newMailHandler = handler;
   }
 
   start(): void {
@@ -142,6 +148,14 @@ export class BackgroundSyncService {
           syncedAt: snapshot.syncedAt,
           folderStats: snapshot.folderStats,
         });
+
+        if (this.newMailHandler) {
+          try {
+            await this.newMailHandler(snapshot.emails);
+          } catch (handlerError) {
+            this.log.warn("Handling new mail failed", "BackgroundSyncService", { error: handlerError });
+          }
+        }
 
         this.status.lastSuccessAt = snapshot.syncedAt;
         this.status.lastError = undefined;

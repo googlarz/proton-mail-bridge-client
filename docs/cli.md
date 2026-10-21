@@ -333,6 +333,8 @@ proton-mail-bridge-client cancel-snooze <id>
 
 ```bash
 proton-mail-bridge-client create-template welcome "Welcome, {{firstName}}!" "Hi {{firstName}}, thanks for joining."
+proton-mail-bridge-client autoresponder --account work@example.com            # show the automatic reply of an address
+proton-mail-bridge-client set-autoresponder --account work@example.com --enabled true --confirmed true --body 'Away until 4 January' --startsAt 2026-12-24 --endsAt 2027-01-04
 proton-mail-bridge-client list-templates
 proton-mail-bridge-client get-template <id>
 proton-mail-bridge-client render-template <id> --args '{"variables":{"firstName":"Alex"}}'

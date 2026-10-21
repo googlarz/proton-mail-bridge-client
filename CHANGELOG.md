@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Autoresponder per address** (`set_autoresponder`, `get_autoresponder`; CLI `set-autoresponder`, `autoresponder`): an automatic reply to incoming mail, with a date window, one reply per sender per N days and a cap of 50 a day, plus a note appended to what the address sends while it is active. Off by default; only to a person who wrote to the address, after the rule was switched on; never to lists, automatic mail or no-reply senders; recorded before it is sent; needs sending allowed and confirmation to switch on. See the README.
+- **`doctor` and `report` note a Bridge newer than the verified version** (3.27.1); `docs/threat-model.md` says what the project protects and where it stops.
+
 ## [2.13.1] — 2026-10-21
 
 From zotabee's testing of 2.13.0 (#52–#57):

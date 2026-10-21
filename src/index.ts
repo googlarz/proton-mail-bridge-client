@@ -978,6 +978,36 @@ const TOOLS = [
     },
   },
   {
+    name: "set_autoresponder",
+    description: "Set up, change or switch off the automatic reply of one address, and the note that address appends to what it sends. Off by default. While on, an incoming mail from a person who wrote to this address (not a list, not an automatic message, not a no-reply address, not mail that arrived before it was switched on) gets one reply per sender per `replyEveryDays` days, at most 50 a day, sent after each background sync, so it only works while this server is running with background sync on and PROTONMAIL_MODE allows sending. Switching it on needs confirmed: true when PROTONMAIL_CONFIRM_DESTRUCTIVE is on, and is refused when sending is disabled or confined to your own addresses. Switching it off is always allowed. With `startsAt`/`endsAt` it is active only inside that window.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account to set up (see list_accounts). Defaults to the primary account." },
+        enabled: { type: "boolean", description: "true switches the automatic reply on, false off. Omit to change only the text or dates." },
+        subject: { type: "string", description: "Subject of the reply; {subject} stands for the subject of the message answered. Default: \"Automatic reply: {subject}\"." },
+        body: { type: "string", description: "Text of the reply (up to 4000 characters)." },
+        startsAt: { type: "string", description: "Start of the window, a date or date-time such as 2026-12-24 or 2026-12-24T18:00:00+01:00. Empty string clears it." },
+        endsAt: { type: "string", description: "End of the window. Empty string clears it." },
+        replyEveryDays: { type: "integer", description: "A sender gets at most one reply in this many days (1-90, default 7).", minimum: 1, maximum: 90 },
+        outgoingNote: { type: "string", description: "A note appended to every mail this address sends while the rule is active, for example \"I am away until 4 January.\" Empty string removes it." },
+        confirmed: { type: "boolean", description: "Set to true to confirm switching the automatic reply on when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
+      },
+    },
+  },
+  {
+    name: "get_autoresponder",
+    description: "Show the automatic reply of one address: the rule, whether it is active now, whether this server can send it (background sync running, sending allowed), and how many replies have gone out.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+      },
+    },
+  },
+  {
     name: "list_templates",
     description: "List all saved email templates.",
     annotations: { readOnlyHint: true },
@@ -7616,6 +7646,53 @@ export function createServer(
             }),
           );
           return createTextResult(result);
+        }
+
+        case "set_autoresponder": {
+          const target = resolveAccountArg(args) ?? primaryBundle;
+          const enabled = optionalBoolean(args.enabled);
+          if (enabled === true) {
+            // It sends mail nobody looks at: it needs everything a send needs, and a confirmation like one.
+            ensureSendAllowed(config.runtime);
+            if (config.runtime.restrictOutboundToSelf) {
+              throw new McpError(ErrorCode.InvalidParams, "Outbound mail is confined to your own addresses (PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF), and an automatic reply goes to whoever wrote.");
+            }
+            ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Switch on the automatic reply of ${target.account.address}: it will send mail without asking each time`);
+          }
+          const rule = await withAudit(target.auditService, name, args, async () =>
+            target.autoresponderService.set({
+              enabled,
+              subject: optionalString(args, "subject"),
+              body: optionalString(args, "body"),
+              startsAt: optionalString(args, "startsAt"),
+              endsAt: optionalString(args, "endsAt"),
+              replyEveryDays: optionalInteger(args.replyEveryDays, 1, 90),
+              outgoingNote: optionalString(args, "outgoingNote"),
+            }),
+          );
+          const sync = target.backgroundSyncService.getStatus();
+          const warnings: string[] = [];
+          if (rule.enabled && !sync.enabled) warnings.push("Background sync is off (PROTONMAIL_AUTO_SYNC), so no reply is sent until it runs.");
+          if (rule.enabled && rule.body === "") warnings.push("There is no reply text; only the outgoing note is active.");
+          return createTextResult({ account: target.account.address, rule, ...(warnings.length ? { warnings } : {}) });
+        }
+
+        case "get_autoresponder": {
+          const target = resolveAccountArg(args) ?? primaryBundle;
+          const state = await target.autoresponderService.get();
+          const sync = target.backgroundSyncService.getStatus();
+          let canSend = true;
+          try {
+            ensureSendAllowed(config.runtime);
+          } catch {
+            canSend = false;
+          }
+          return createTextResult({
+            account: target.account.address,
+            ...state,
+            serverCanSend: canSend && !config.runtime.restrictOutboundToSelf,
+            backgroundSync: { enabled: sync.enabled, thisInstanceRunsIt: sync.leader !== false },
+          });
         }
 
         case "list_templates": {

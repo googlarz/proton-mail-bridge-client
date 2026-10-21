@@ -23,7 +23,7 @@ export function makeCertificate() {
 
 const quote = (value) => (value === undefined || value === null ? "NIL" : `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
 
-export function createMessage(uid, { subject = `Mail ${uid}`, from = "alice@example.com", to = "owner@example.com", flags = [], body, html, date = new Date(Date.UTC(2026, 2, 24, 10, uid % 60)) } = {}) {
+export function createMessage(uid, { subject = `Mail ${uid}`, from = "alice@example.com", to = "owner@example.com", flags = [], body, html, headers = {}, date = new Date(Date.UTC(2026, 2, 24, 10, uid % 60)) } = {}) {
   const text = body ?? `Body of mail ${uid}\r\n`;
   const source = [
     `From: Alice <${from}>`,
@@ -31,6 +31,7 @@ export function createMessage(uid, { subject = `Mail ${uid}`, from = "alice@exam
     `Subject: ${subject}`,
     `Date: ${date.toUTCString()}`,
     `Message-ID: <m${uid}@fake.bridge>`,
+    ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
     "MIME-Version: 1.0",
     `Content-Type: ${html ? "text/html" : "text/plain"}; charset=utf-8`,
     "",
@@ -205,11 +206,21 @@ export async function startFakeBridge(options) {
               if (/RFC822\.SIZE/.test(items)) parts.push(`RFC822.SIZE ${m.source.length}`);
               if (/ENVELOPE/.test(items)) parts.push(`ENVELOPE ${envelope(m)}`);
               if (/BODYSTRUCTURE/.test(items)) parts.push(`BODYSTRUCTURE ("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" ${m.source.length} 3)`);
-              let literal;
-              if (/BODY(\.PEEK)?\[\]/.test(items)) literal = ["BODY[]", m.source];
-              else if (/BODY(\.PEEK)?\[HEADER/.test(items)) literal = ["BODY[HEADER]", m.source.subarray(0, m.source.indexOf("\r\n\r\n") + 4)];
-              write(`* ${index + 1} FETCH (${parts.join(" ")}${literal ? ` ${literal[0]} {${literal[1].length}}\r\n` : ""}`);
-              if (literal) write(literal[1]);
+              const literals = [];
+              const headerBlock = m.source.subarray(0, m.source.indexOf("\r\n\r\n") + 4);
+              const fields = items.match(/BODY(?:\.PEEK)?\[HEADER\.FIELDS \(([^)]*)\)\]/);
+              if (fields) {
+                const wanted = fields[1].toLowerCase().split(/\s+/).filter(Boolean);
+                const lines = headerBlock.toString().split("\r\n").filter((line) => wanted.includes(line.split(":")[0].toLowerCase()));
+                literals.push([`BODY[HEADER.FIELDS (${fields[1]})]`, Buffer.from(`${lines.join("\r\n")}${lines.length ? "\r\n" : ""}\r\n`)]);
+              }
+              if (/BODY(\.PEEK)?\[\]/.test(items)) literals.push(["BODY[]", m.source]);
+              else if (/BODY(\.PEEK)?\[HEADER\]/.test(items)) literals.push(["BODY[HEADER]", headerBlock]);
+              write(`* ${index + 1} FETCH (${parts.join(" ")}`);
+              for (const [key, data] of literals) {
+                write(` ${key} {${data.length}}\r\n`);
+                write(data);
+              }
               write(")\r\n");
             }
             return write(`${tag} OK UID FETCH completed\r\n`);

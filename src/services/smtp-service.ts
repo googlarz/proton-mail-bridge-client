@@ -158,6 +158,13 @@ export class SMTPService {
   // Implicit TLS unless told otherwise; see withTlsFallback.
   private secure: boolean;
 
+  private outgoingNoteProvider?: () => string | undefined;
+
+  /** A function that returns the note to append to every outgoing mail right now (synchronous: it is read while the mail is built). */
+  setOutgoingNoteProvider(provider: (() => string | undefined) | undefined): void {
+    this.outgoingNoteProvider = provider;
+  }
+
   /** The TLS mode in use: the configured one, or the other after a detected mismatch. */
   get effectiveSecure(): boolean {
     return this.secure;
@@ -460,7 +467,12 @@ export class SMTPService {
       );
     }
 
-    const { body: finalBody, htmlBody: finalHtml } = applySignature(input.body, sanitizedHtml, input.appendSignature);
+    const signed = applySignature(input.body, sanitizedHtml, input.appendSignature);
+    // The note this address adds to what it sends while an automatic reply is active (a mail that opts out of the
+    // signature opts out of this too).
+    const note = input.appendSignature === false ? undefined : this.outgoingNoteProvider?.();
+    const finalBody = note ? `${signed.body}\n\n${note}` : signed.body;
+    const finalHtml = note && signed.htmlBody ? `${signed.htmlBody}<br><br>${escapeHtml(note).replace(/\n/g, "<br>")}` : signed.htmlBody;
 
     // When isHtml is true and the caller didn't supply a separate htmlBody, input.body IS the
     // HTML source — the normal send_email/reply/forward/send_draft shape when an agent
@@ -490,7 +502,10 @@ export class SMTPService {
       priority: input.priority ?? "normal",
       // Requests an MDN (read receipt) from the recipient's mail client — most
       // clients ask the user before honoring it, this is a request not a guarantee.
-      headers: input.requestReadReceipt ? { "Disposition-Notification-To": fromAddress } : undefined,
+      headers:
+        input.requestReadReceipt || input.headers
+          ? { ...(input.requestReadReceipt ? { "Disposition-Notification-To": fromAddress } : {}), ...(input.headers ?? {}) }
+          : undefined,
     };
   }
 }

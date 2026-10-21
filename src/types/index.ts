@@ -160,6 +160,8 @@ export interface SendEmailInput {
   appendSignature?: boolean;
   /** A calendar message sent as an alternative part of the mail (an answer to an invitation uses method REPLY). */
   icalEvent?: { method: string; content: string };
+  /** Extra headers, for example Auto-Submitted on an automatic reply. */
+  headers?: Record<string, string>;
 }
 
 export interface EmailAttachmentSummary {
