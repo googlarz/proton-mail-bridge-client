@@ -1,8 +1,8 @@
+// Putting the answers of several accounts together (sorted, paginated, counted), tagging ids with the account, and keeping a list within the size a client can take.
+
 import { type MailboxLabel, type ContactStats, type VolumeTrendPoint } from "../types/index.js";
 import { type AccountBundle } from "../services/account-manager.js";
 import { withAccountPrefix } from "../utils/helpers.js";
-// Putting the answers of several accounts together (sorted, paginated, counted), tagging ids with the account, and keeping a list within the size a client can take.
-
 // Recursively prefixes every id-bearing field on a thread (or array of threads) with
 // the owning account's slug via withAccountPrefix, so ids returned by a tool fanned
 // out across accounts (see accountManager.all() usages below) stay globally unique

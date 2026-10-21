@@ -1,8 +1,8 @@
+// Writing a reply or a forward (quoted text and HTML, recipients, subject prefixes), and reading what a message says about itself (security headers, unsubscribe links).
+
 import { plainTextToHtml } from "../services/smtp-service.js";
 import { foldQuotedHistory, isValidEmail, lowerCaseAddress, isSelfAddress } from "../utils/helpers.js";
 import { type EmailDetail, type EmailAddress } from "../types/index.js";
-// Writing a reply or a forward (quoted text and HTML, recipients, subject prefixes), and reading what a message says about itself (security headers, unsubscribe links).
-
 // Shared by get_email_by_id and get_emails_by_ids: applies body preference/
 // truncation and strips the full raw header map by default (needless token
 // bloat — get_email_by_id re-adds it when showHeaders is explicitly true).

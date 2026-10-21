@@ -1,10 +1,10 @@
+// Reading a tool's arguments: the checks every handler repeats, and the note about arguments a tool does not declare.
+
 import { TOOLS } from "./definitions.js";
 import { type EmailAction, type EmailAttachmentInput } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { type BodyEdit } from "../services/draft-store-service.js";
-// Reading a tool's arguments: the checks every handler repeats, and the note about arguments a tool does not declare.
-
 // Validates update_draft's `bodyEdits` argument into BodyEdit[] (shape only; whether each
 // find text is present/unambiguous is decided against the stored body by applyBodyEdits).
 export function parseBodyEdits(value: unknown): BodyEdit[] {

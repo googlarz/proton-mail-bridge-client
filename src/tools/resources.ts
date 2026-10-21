@@ -1,7 +1,7 @@
-import { formatAddressList } from "../tools/compose.js";
-import { type EmailSummary, type CitationSource, type EmailAddress, type DraftRecord, type EmailDetail } from "../types/index.js";
 // The protonmail:// resources: addresses for a message, a thread, a draft and an attachment, the citation links a tool result carries, and the text a client gets when it reads one.
 
+import { formatAddressList } from "./compose.js";
+import { type EmailSummary, type CitationSource, type EmailAddress, type DraftRecord, type EmailDetail } from "../types/index.js";
 export const RESOURCE_SCHEME = "protonmail";
 
 export function buildEmailResourceUri(emailId: string): string {

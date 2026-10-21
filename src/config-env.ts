@@ -1,3 +1,5 @@
+// Building the configuration from PROTONMAIL_* environment variables: the safety presets, passwords from a file or a command, additional accounts, and the checks on every value.
+
 import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES } from "./utils/pdf-text.js";
 import { isLocalBridgeHost, parseHostList } from "./utils/tls.js";
 import { logger } from "./utils/logger.js";
@@ -8,8 +10,6 @@ import { parseListValues } from "./tools/args.js";
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { type EmailAction, type SafetyMode, type AccountConfig, type ProtonMailConfig } from "./types/index.js";
-// Building the configuration from PROTONMAIL_* environment variables: the safety presets, passwords from a file or a command, additional accounts, and the checks on every value.
-
 export const ALL_EMAIL_ACTIONS: EmailAction[] = [
   "mark_read",
   "mark_unread",

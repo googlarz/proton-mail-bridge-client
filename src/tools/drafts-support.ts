@@ -1,8 +1,8 @@
+// Draft and attachment helpers a handler needs: what a listing hides, what counts as no change, and writing an attachment under the download directory.
+
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { isPathInside } from "../utils/helpers.js";
 import { type DraftRecord, type SendEmailInput } from "../types/index.js";
-// Draft and attachment helpers a handler needs: what a listing hides, what counts as no change, and writing an attachment under the download directory.
-
 // list_drafts has no filter and returns every draft unconditionally — unlike get_draft/create_draft,
 // which each touch exactly one draft the caller already knows the content of. DraftRecord.attachments
 // carries full base64 `content`, and createTextResult() serializes the whole payload TWICE (once into

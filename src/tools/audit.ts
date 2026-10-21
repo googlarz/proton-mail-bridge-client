@@ -1,8 +1,8 @@
-import { logger } from "../utils/logger.js";
-import { AuditService } from "../services/audit-service.js";
-import { asObject } from "../tools/args.js";
 // Recording what a tool did in the audit log, with secrets and message text taken out of the arguments.
 
+import { logger } from "../utils/logger.js";
+import { AuditService } from "../services/audit-service.js";
+import { asObject } from "./args.js";
 // Bounded on purpose. The audited `result` of a handler can contain arbitrary objects —
 // found live: list_scheduled_sends/list_snoozed returned `{ bundle, items }` per account
 // from inside withAudit, and once an account had an open IMAP connection the recursive

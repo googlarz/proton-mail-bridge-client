@@ -1,10 +1,10 @@
+// The bulk tools' shared rules: batch size limit, ids that were not found, grouping ids by account and merging the results.
+
 import { AccountManager, type AccountBundle } from "../services/account-manager.js";
 import { type BulkOperationResult } from "../types/index.js";
 import { UID_VALIDITY_MISMATCH_ERROR } from "../services/simple-imap-service.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { normalizeLimit, parseEmailId, splitAccountPrefix, withAccountPrefix } from "../utils/helpers.js";
-// The bulk tools' shared rules: batch size limit, ids that were not found, grouping ids by account and merging the results.
-
 export function getBulkMaxBatchSize(args: Record<string, unknown>): number {
   return normalizeLimit(args.maxBatchSize, 500, 1, 2000);
 }

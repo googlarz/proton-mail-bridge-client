@@ -1,7 +1,7 @@
+// The shape of what a tool answers with, and the one function that builds it (text, structured content and links to the messages it names).
+
 import type { CitationSource } from "../types/index.js";
 import { normalizeJsonValue, stringifyForJson } from "../utils/helpers.js";
-
-// The shape of what a tool answers with, and the one function that builds it (text, structured content and links to the messages it names).
 
 export type ToolResult = {
   content: Array<
