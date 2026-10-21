@@ -30,7 +30,7 @@ export class BackgroundSyncService {
   private activeRun?: Promise<void>;
   private idleLoop?: Promise<void>;
   private started = false;
-  private newMailHandler?: (emails: EmailSummary[]) => Promise<void>;
+  private readonly newMailHandlers: Array<(emails: EmailSummary[]) => Promise<void>> = [];
   private authFailureCount = 0;
   private transientFailureCount = 0;
 
@@ -55,9 +55,9 @@ export class BackgroundSyncService {
     };
   }
 
-  /** Called with the messages of each completed sync (for the autoresponder). A failure here never fails the sync. */
-  setNewMailHandler(handler: ((emails: EmailSummary[]) => Promise<void>) | undefined): void {
-    this.newMailHandler = handler;
+  /** Called with the messages of each completed sync (the rules, then the autoresponder). A failure in one never fails the sync or stops the next. */
+  addNewMailHandler(handler: (emails: EmailSummary[]) => Promise<void>): void {
+    this.newMailHandlers.push(handler);
   }
 
   start(): void {
@@ -149,9 +149,9 @@ export class BackgroundSyncService {
           folderStats: snapshot.folderStats,
         });
 
-        if (this.newMailHandler) {
+        for (const handler of this.newMailHandlers) {
           try {
-            await this.newMailHandler(snapshot.emails);
+            await handler(snapshot.emails);
           } catch (handlerError) {
             this.log.warn("Handling new mail failed", "BackgroundSyncService", { error: handlerError });
           }

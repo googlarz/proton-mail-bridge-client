@@ -917,6 +917,99 @@ export const TOOLS = [
     },
   },
   {
+    name: "suggest_rules",
+    description: "Scan the mail in the local index and PROPOSE rules: newsletters and other automatic mail that you never open (archive and mark as read, or move to Trash when old), people whose mail you always file in the same folder, and an old Trash or Spam that was never emptied. Each proposal says why (how many messages, how many never opened, examples) and how risky it is (low: only moves and marks; recoverable: moves to Trash; permanent: deletes). Nothing is changed: accept one with set_rule (proposalId) or refuse it for good with delete_rule. Only mail in the index is scanned (INBOX and Sent by default); run sync_emails for other folders first.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        days: { type: "integer", description: "How far back to look (7-365, default 90).", minimum: 7, maximum: 365 },
+        minMessages: { type: "integer", description: "A sender needs at least this many messages to be proposed (3-50, default 5).", minimum: 3, maximum: 50 },
+      },
+    },
+  },
+  {
+    name: "get_rules",
+    description: "Show the mailbox rules of one account, the proposals waiting for a decision, and what the rules did lately.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: { account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." } },
+    },
+  },
+  {
+    name: "set_rule",
+    description: "Create or change a mailbox rule, or accept a proposal from suggest_rules (proposalId). A rule is \"when mail matches (when), do (actions)\". It acts by itself on NEW mail after each background sync, but only with actions that are safe (mark read, label, archive, move, forward); a rule that trashes or deletes only runs when you ask, through apply_rules. FORWARDING (actions.forwardTo, up to 3 addresses) sends mail out on its own: it needs sending allowed, allowed recipients, confirmed: true when PROTONMAIL_CONFIRM_DESTRUCTIVE is on and a condition on the sender, the subject or an attachment; it forwards only mail that arrives after the rule is switched on, once per message, at most 50 a day, by default only mail from people, with its attachments. Switching a rule off is always allowed.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        proposalId: { type: "string", description: "Accept this proposal from suggest_rules; name, when and then can still be overridden." },
+        id: { type: "string", description: "The rule to change. Omit to create one." },
+        name: { type: "string", description: "A label for the rule." },
+        enabled: { type: "boolean", description: "false switches the rule off, true on (default on for a new rule)." },
+        when: {
+          type: "object",
+          description: "Conditions, all of which must hold. At least one besides the folder.",
+          properties: {
+            from: { type: "array", items: { type: "string" }, description: "Addresses, or \"*@example.com\" for a whole domain." },
+            subjectContains: { type: "array", items: { type: "string" }, description: "The subject contains any of these." },
+            folder: { type: "string", description: "The folder the message is in (default INBOX)." },
+            olderThanDays: { type: "integer", description: "Arrived more than this many days ago." },
+            hasAttachment: { type: "boolean" },
+            automated: { type: "boolean", description: "true: only newsletters and other automatic mail; false: only mail from people." },
+            unread: { type: "boolean", description: "Only mail that has not been read." },
+          },
+        },
+        actions: {
+          type: "object",
+          description: "Actions. At most one of archive, moveTo, trash and delete.",
+          properties: {
+            markRead: { type: "boolean" },
+            label: { type: "string", description: "Add this label." },
+            archive: { type: "boolean" },
+            moveTo: { type: "string", description: "Move to this folder." },
+            trash: { type: "boolean", description: "Move to Trash (recoverable). Only runs through apply_rules." },
+            delete: { type: "boolean", description: "Delete for good. Only runs through apply_rules, with confirmation." },
+            forwardTo: { type: "array", items: { type: "string" }, description: "Send a copy to these addresses (up to 3)." },
+            forwardNote: { type: "string", description: "Text above the forwarded message." },
+          },
+        },
+        confirmed: { type: "boolean", description: "Set to true to confirm switching on a forwarding rule when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
+      },
+    },
+  },
+  {
+    name: "delete_rule",
+    description: "Delete a rule, or dismiss a proposal from suggest_rules (it is then not proposed again). Always allowed.",
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        id: { type: "string", description: "A rule id (r-...) or a proposal id (p-...)." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "apply_rules",
+    description: "Run the enabled rules (or one, ruleId) on mail that is already in the index. By default a PREVIEW (dryRun true): it lists what would be done to which message and changes nothing. With dryRun false it marks, labels, archives, moves, trashes, deletes and forwards through the same permissions as the other tools; deleting for good needs confirmed: true. It works from the local index, so run sync_emails first if it may be stale.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        ruleId: { type: "string", description: "Run only this rule (even if it is switched off, to try it)." },
+        dryRun: { type: "boolean", description: "true (default) only previews.", default: true },
+        limit: { type: "integer", description: "At most this many messages in one run (1-1000, default 200).", minimum: 1, maximum: 1000 },
+        confirmed: { type: "boolean", description: "Set to true to confirm deleting messages for good." },
+      },
+    },
+  },
+  {
     name: "list_templates",
     description: "List all saved email templates.",
     annotations: { readOnlyHint: true },

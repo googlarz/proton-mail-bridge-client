@@ -24,7 +24,7 @@
 
 ---
 
-Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 103 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
+Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 108 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
 
 > **Using Proton Drive too?** See [**proton-drive-mcp**](https://github.com/googlarz/proton-drive-mcp), the companion MCP server and CLI for Proton Drive (upload, download, share and manage your encrypted files from Claude). Run both side by side to handle mail and files in one conversation, for example save an attachment from here, then upload it to Drive. More in [Related projects](#related-projects).
 
@@ -44,7 +44,7 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
    - "Find the last email from `alice@example.com` and draft a reply for me to review." (nothing is sent until you say so)
    - "Which of my emails have attachments from this month?"
    - "Show me my drafts and tighten the oldest one."
-5. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 103), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
+5. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 108), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
 
 ---
 
@@ -54,8 +54,9 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
 - **Safety you choose** — `PROTONMAIL_MODE` presets (`read-only`, `drafts`, `assisted`, `full`), a send gate, confirmation for destructive actions, a per-action allowlist, and a [threat model](docs/threat-model.md) that says what is and is not covered
 - **Several addresses at once** — each Proton login (or each address Bridge exposes) is its own isolated account with its own index, drafts and settings
 - **Fast local search** — full-text search across your inbox from a local index that keeps its read state in step with the server
+- **Rules that suggest themselves** — a scan proposes filters and cleanup from your own mail, applies them to existing mail after a preview, and can forward by condition; see [Mailbox rules](#mailbox-rules-suggestions-filters-cleanup-forwarding)
 - **Automatic reply, per address, with rules** — off by default, with a preview of what it would do, draft-for-approval mode and working-hours; see [Autoresponder](#autoresponder-automatic-reply-per-address) (Proton's own auto-reply may be all you need)
-- **Full CLI** — a dedicated command for every one of the 103 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
+- **Full CLI** — a dedicated command for every one of the 108 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
 - **Runs where you do** — Claude Desktop bundle, npm, Homebrew, or a [Docker image](#running-in-docker-headless-machines) for a headless machine
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
 
@@ -332,6 +333,30 @@ get_autoresponder  account=work@example.com                      # state, counts
 
 `outgoingNote` is appended, after the signature, to every mail sent from that address while the rule is active (a send with `appendSignature: false` opts out). On the command line: `set-autoresponder`, `autoresponder` and `preview-autoresponder`. The rule, the log and the memory of who was answered live in `autoresponder.json` in the account's data directory; every account (every address Bridge exposes) has its own.
 
+## Mailbox rules (suggestions, filters, cleanup, forwarding)
+
+Proton's own filters act on **new** mail, the free plan has one custom filter, and auto-delete of Trash and Spam is a paid feature with a fixed 30 days (see Proton's pages on [filters](https://proton.me/support/email-inbox-filters) and [auto-delete](https://proton.me/support/auto-delete-unwanted-messages)). These rules work alongside them: on mail that is already there, with a preview, and with a scan that suggests rules instead of waiting for you to write them. They run on this server, so they only act while it runs.
+
+**Scan, then decide.** `suggest_rules` looks through the mail in the local index and proposes, with the evidence for each: newsletters and other automatic mail you never open (archive and mark as read; or move to Trash when old), people whose mail you always file in the same folder, and an old Trash or Spam that was never emptied. Each says how risky it is (`low`: only moves and marks; `recoverable`: moves to Trash; `permanent`: deletes). **Nothing changes** until you accept one with `set_rule proposalId=...`; `delete_rule` on a proposal dismisses it for good.
+
+**A rule** is `when` (sender or `*@domain`, words in the subject, folder, `olderThanDays`, `hasAttachment`, `automated`, `unread`) and `actions` (`markRead`, `label`, `archive`, `moveTo`, `trash`, `delete`, `forwardTo`). A rule needs a real condition, so it cannot touch a whole folder.
+
+- **By itself, on new mail**, after each background sync: mark read, label, archive, move, forward. Only mail that arrived after the rule was switched on, once per message.
+- **Only when you ask:** a rule that trashes or deletes never runs by itself. `apply_rules` runs the rules on mail already in the index and is a **preview unless `dryRun: false`**; deleting for good also needs `confirmed: true`. Every action goes through the same permissions as the other tools (`PROTONMAIL_MODE`, allowed actions), and a disallowed one is refused before anything is touched.
+- **Forwarding** (`actions.forwardTo`, up to 3 addresses, optional `forwardNote`) sends mail out on its own, so it is held to the rules of a send: sending must be allowed, the recipients must be allowed (not with `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF`), switching it on needs `confirmed: true` when `PROTONMAIL_CONFIRM_DESTRUCTIVE` is on, and the rule needs a condition on the sender, the subject or an attachment. It forwards mail that arrives after the rule is switched on, once per message, at most 50 a day, with the original attachments, and by default only mail from people (not lists or automatic mail). The copy carries `Auto-Submitted: auto-generated` and `X-Forwarded-By`.
+
+```text
+suggest_rules  days=90                                        # proposals, with evidence; nothing is changed
+set_rule  proposalId=p-1a2b3c4d5e                              # accept one
+set_rule  name="Clients to Projects"  when={"from":["*@client.example"]}  actions={"moveTo":"Projects","markRead":false}
+set_rule  name="Boss to phone"  when={"from":["boss@example.com"]}  actions={"forwardTo":["me@elsewhere.example"]}  confirmed=true
+apply_rules                                                    # preview of what the rules would do to existing mail
+apply_rules  dryRun=false  limit=100
+get_rules                                                      # rules, waiting proposals, what the rules did lately
+```
+
+The scan and `apply_rules` work from the local index (by default INBOX and Sent; run `sync_emails` for other folders), so check that it is fresh. Rules, proposals and the log live in `rules.json` in the account's data directory; each account has its own.
+
 ## Multi-account support (v2.1.0+)
 
 Use more than one Proton mailbox from the same server: either several addresses of one account (Bridge's **Split Addresses** feature) or separate Proton accounts signed in to the same Bridge. Each one gets its own isolated service stack, local index, and drafts storage.
@@ -471,7 +496,7 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 
 `<command> --help` prints that command's usage without running it. Flags accept `--flag value` or `--flag=value` (a value starting with `--` needs the `=` form, or must come after a bare `--`); unknown flags are an error. Exit codes: `0` success, `1` failure (including a failed `doctor` or `connection-status` check, or a failed item in a `batch`/`bulk-*` run), `2` usage error.
 
-**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 103 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
+**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 108 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
 
 ---
 
@@ -493,7 +518,7 @@ A mode is a floor: the individual flags below can make things stricter (`PROTONM
 All flags work in both the MCP server and CLI:
 
 ```bash
-PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 103 — saves context window
+PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 108 — saves context window
 PROTONMAIL_READ_ONLY=true            # disable all write operations
 PROTONMAIL_ALLOW_SEND=false          # disable SMTP sends only (other writes still work)
 PROTONMAIL_CONFIRM_DESTRUCTIVE=true  # require confirmed:true on send, reply, forward, delete
@@ -716,7 +741,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - Defaults are bounded: `search_emails`/`search_indexed_emails` return 50 (pass `limit` for more), `list_drafts` 20, `list_scheduled_sends` 50 newest first. Each reports `hasMore`; page with `offset`.
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_KB`.
-- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 103: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 108: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 
 **Working with drafts**

@@ -333,6 +333,13 @@ proton-mail-bridge-client cancel-snooze <id>
 
 ```bash
 proton-mail-bridge-client create-template welcome "Welcome, {{firstName}}!" "Hi {{firstName}}, thanks for joining."
+proton-mail-bridge-client suggest-rules --days 90              # scan the index and PROPOSE rules; changes nothing
+proton-mail-bridge-client rules                                # rules, waiting proposals and what the rules did
+proton-mail-bridge-client set-rule --proposalId p-1a2b3c4d5e   # accept a proposal as a rule
+proton-mail-bridge-client set-rule --name "Boss to phone" --when '{"from":["boss@example.com"]}' --actions '{"forwardTo":["me@elsewhere.example"]}' --confirmed true
+proton-mail-bridge-client apply-rules                          # preview of the rules on mail already in the index
+proton-mail-bridge-client apply-rules --dryRun false --limit 100
+proton-mail-bridge-client delete-rule p-1a2b3c4d5e             # delete a rule, or dismiss a proposal for good
 proton-mail-bridge-client preview-autoresponder --account work@example.com --days 3      # what it would do with recent mail, without doing it
 proton-mail-bridge-client autoresponder --account work@example.com            # show the automatic reply of an address
 proton-mail-bridge-client set-autoresponder --account work@example.com --enabled true --confirmed true --body 'Away until 4 January' --startsAt 2026-12-24 --endsAt 2027-01-04

@@ -30,6 +30,7 @@ import { PACKAGE_VERSION } from "./package-info.js";
 import { createToolContext } from "./tools/context.js";
 import { handleAttachmentTool } from "./tools/attachments.js";
 import { handleFolderTool } from "./tools/folders.js";
+import { handleRuleTool } from "./tools/rules.js";
 import { handleSendingTool } from "./tools/sending.js";
 import { handleDraftTool } from "./tools/drafts.js";
 import { handleReadingTool } from "./tools/reading.js";
@@ -343,7 +344,7 @@ export function createServer(
         case "render_template":
         case "set_autoresponder":
         case "get_autoresponder":
-    case "preview_autoresponder":
+        case "preview_autoresponder":
         case "set_reply_reminder":
         case "list_reply_reminders":
         case "cancel_reply_reminder":
@@ -351,6 +352,12 @@ export function createServer(
         case "cancel_snooze":
         case "list_snoozed":
           return await handleTemplateAndReminderTool(name, args, ctx);
+        case "suggest_rules":
+        case "get_rules":
+        case "set_rule":
+        case "delete_rule":
+        case "apply_rules":
+          return await handleRuleTool(name, args, ctx);
 
         case "create_draft":
         case "create_reply_draft":
