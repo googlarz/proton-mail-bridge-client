@@ -25,7 +25,7 @@ import { findMailPrompt, MAIL_PROMPTS } from "./utils/mail-prompts.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { DraftStoreService, applyBodyEdits, draftSyncFingerprint } from "./services/draft-store-service.js";
 import { LocalIndexService } from "./services/local-index-service.js";
-import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService, UID_VALIDITY_MISMATCH_ERROR } from "./services/simple-imap-service.js";
+import { BULK_ITEM_TIMEOUT_MS, describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService } from "./services/simple-imap-service.js";
 import { applySignature, SMTPService } from "./services/smtp-service.js";
 import type {
   AccountConfig,
@@ -40,13 +40,10 @@ import type {
   SafetyMode,
   EmailAddress,
   EmailSummary,
-  ContactStats,
-  MailboxLabel,
   ProtonMailConfig,
   ProtonRuntimeConfig,
   SendEmailInput,
   ThreadDetail,
-  VolumeTrendPoint,
 } from "./types/index.js";
 import {
   ensureValidEmails,
@@ -93,6 +90,12 @@ import { parseBodyEdits, withIgnoredArgumentsNote, asObject, requireString, opti
 import { sanitizeAuditValue, withAudit } from "./tools/audit.js";
 import { formatEmailDetailOutput, extractUnsubscribeInfo, uniqueAddresses, prefixedSubject, replyReferences, buildReplyText, buildForwardText, buildReplyHtml, buildForwardHtml, getReplyRecipients } from "./tools/compose.js";
 import { buildEmailResourceUri, buildThreadResourceUri, buildDraftResourceUri, emailSource, threadSource, draftSource, attachmentSource, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
+import { getBulkMaxBatchSize, ensureBulkBatchSize, BulkExcludedEmailId, getBulkNotFoundEmailIds, withBulkNotFound, groupEmailIdsByAccount, prefixBulkResult, prefixNotFound, mergeBulkResults } from "./tools/bulk.js";
+import { tagAccountIds, THREAD_LIST_RESPONSE_BUDGET_CHARS, trimThreadsToBudget, paginationFields, accountSlugForTag, sortByDateDesc, paginateMergedAccountResults, mergeMailboxLabels, mergeContactStats, mergeCountedEntries, mergeVolumeTrends, paginateRecentRecords } from "./tools/merge.js";
+import { redactDraftAttachmentsForListing, isNoopDraftPatch, truncateDraftBodyForResponse, redactQueueRecordAttachments, writeAttachmentToDownloadDir } from "./tools/drafts-support.js";
+export { redactDraftAttachmentsForListing, isNoopDraftPatch, truncateDraftBodyForResponse, redactQueueRecordAttachments, writeAttachmentToDownloadDir } from "./tools/drafts-support.js";
+export { tagAccountIds, THREAD_LIST_RESPONSE_BUDGET_CHARS, trimThreadsToBudget, paginateMergedAccountResults } from "./tools/merge.js";
+export { getBulkMaxBatchSize, ensureBulkBatchSize, getBulkNotFoundEmailIds, withBulkNotFound, groupEmailIdsByAccount, prefixBulkResult, prefixNotFound, mergeBulkResults } from "./tools/bulk.js";
 export { headerString, parseAuthenticationResults, buildSecurityInfo, parseUnsubscribeMailto, extractUnsubscribeInfo, formatQuoteDate, stripUnshippableImages, buildReplyText, buildForwardText, buildReplyHtml, buildForwardHtml, getReplyRecipients } from "./tools/compose.js";
 export { withSources } from "./tools/results.js";
 export { ignoredArguments, optionalClearableString } from "./tools/args.js";
@@ -145,220 +148,6 @@ async function ensureMoveTargetAllowed(
       `Cannot tell whether ${targetFolder} is the Trash folder (the folder list could not be read), and the trash action is not allowed. Try again when Bridge answers.`,
     );
   }
-}
-
-// Recursively prefixes every id-bearing field on a thread (or array of threads) with
-// the owning account's slug via withAccountPrefix, so ids returned by a tool fanned
-// out across accounts (see accountManager.all() usages below) stay globally unique
-// and resolvable back to the right account by splitAccountPrefix. slug is undefined
-// for the primary account, and withAccountPrefix(undefined, id) === id, so the
-// primary's own threads/messages are returned byte-for-byte unchanged — zero
-// behavior change for single-account setups. Deep-clones via JSON round-trip since
-// every field tagged here is plain, already-JSON-serializable data.
-export function tagAccountIds<T>(slug: string | undefined, value: T): T {
-  if (!slug || value === undefined || value === null) {
-    return value;
-  }
-  const clone = JSON.parse(JSON.stringify(value));
-  const prefix = (id: unknown) => (typeof id === "string" ? withAccountPrefix(slug, id) : id);
-  const tagThread = (thread: unknown) => {
-    if (!thread || typeof thread !== "object") {
-      return;
-    }
-    const t = thread as Record<string, unknown>;
-    if (typeof t.id === "string") t.id = prefix(t.id);
-    if (typeof t.latestEmailId === "string") t.latestEmailId = prefix(t.latestEmailId);
-    if (Array.isArray(t.messageIds)) t.messageIds = t.messageIds.map(prefix);
-    if (Array.isArray(t.documents)) {
-      for (const doc of t.documents) {
-        if (doc && typeof doc === "object" && typeof (doc as Record<string, unknown>).emailId === "string") {
-          (doc as Record<string, unknown>).emailId = prefix((doc as Record<string, unknown>).emailId);
-        }
-      }
-    }
-    if (Array.isArray(t.messages)) {
-      for (const message of t.messages) {
-        if (!message || typeof message !== "object") continue;
-        const m = message as Record<string, unknown>;
-        if (typeof m.id === "string") m.id = prefix(m.id);
-        if (typeof m.primaryEmailId === "string") m.primaryEmailId = prefix(m.primaryEmailId);
-        if (typeof m.canonicalId === "string") m.canonicalId = prefix(m.canonicalId);
-        if (Array.isArray(m.locations)) {
-          for (const loc of m.locations) {
-            if (loc && typeof loc === "object" && typeof (loc as Record<string, unknown>).emailId === "string") {
-              (loc as Record<string, unknown>).emailId = prefix((loc as Record<string, unknown>).emailId);
-            }
-          }
-        }
-      }
-    }
-  };
-  if (Array.isArray(clone)) {
-    clone.forEach(tagThread);
-  } else {
-    tagThread(clone);
-  }
-  return clone as T;
-}
-
-// list_drafts has no filter and returns every draft unconditionally — unlike get_draft/create_draft,
-// which each touch exactly one draft the caller already knows the content of. DraftRecord.attachments
-// carries full base64 `content`, and createTextResult() serializes the whole payload TWICE (once into
-// content[0].text, again into structuredContent). A single draft with a few-MB attachment already
-// roughly doubles in response size; list_drafts sums every draft's attachments into one response with
-// no cap, so one large attachment on any draft makes list_drafts exceed the MCP stdio client's read
-// buffer on every call — including the very next session's startup listing — permanently bricking the
-// tool until that draft is deleted out-of-band. Redact attachment content here the same way emails
-// already do (EmailAttachmentSummary carries no content; see get_attachment_content for the real bytes).
-// No explicit return-type annotation: the `size` field isn't part of EmailAttachmentInput, and this
-// value is only ever handed to createTextResult() (which takes `unknown`), so nothing needs the exact
-// DraftRecord shape here.
-export function redactDraftAttachmentsForListing(draft: DraftRecord) {
-  return {
-    ...draft,
-    attachments: draft.attachments.map((attachment) => ({
-      filename: attachment.filename,
-      contentType: attachment.contentType,
-      cid: attachment.cid,
-      contentDisposition: attachment.contentDisposition,
-      content: "",
-      size: Buffer.byteLength(attachment.content, "base64"),
-    })),
-  };
-}
-
-// How much of a draft's body survives into a mutation/listing response before
-// it's truncated — long enough to recognize the draft at a glance, short
-// enough that a large body (a long thread quoted into a reply, a big pasted
-// table) doesn't dominate the response the way redactDraftAttachmentsForListing
-// already stops a base64 attachment from doing.
-const DRAFT_BODY_PREVIEW_LENGTH = 500;
-
-// Found live (external review, repeated across three rounds): create_draft,
-// update_draft, create_reply_draft, create_forward_draft,
-// create_thread_reply_draft, sync_draft_to_remote, and list_drafts all echoed
-// the draft's COMPLETE body back — confirmed live at ~40k tokens for a single
-// update_draft call that only changed the subject of a ~202 KB draft, and
-// ~261k tokens for list_drafts with 107 drafts. The caller supplied the body
-// itself (create/update) or already has it from a prior call (list) — same
-// "caller already knows what it sent" reasoning as attachment redaction, just
-// for the text body instead of base64. get_draft deliberately keeps the full
-// body — it's the "let me look at this one draft" call, not a repeated-edit
-// or bulk-listing one.
-// True when applying `patch` would leave the draft exactly as it is — used to skip
-// the store write and the remote (IMAP) resync for an update that changes nothing.
-export function isNoopDraftPatch(existing: DraftRecord, patch: Record<string, unknown>): boolean {
-  return Object.entries(patch).every(([key, value]) => {
-    if (value === undefined) {
-      return true;
-    }
-    const current = (existing as unknown as Record<string, unknown>)[key];
-    return JSON.stringify(current ?? (typeof value === "string" ? "" : undefined)) === JSON.stringify(value);
-  });
-}
-
-export function truncateDraftBodyForResponse<T extends { body: string }>(draft: T) {
-  if (draft.body.length <= DRAFT_BODY_PREVIEW_LENGTH) {
-    return draft;
-  }
-  return {
-    ...draft,
-    body: `${draft.body.slice(0, DRAFT_BODY_PREVIEW_LENGTH)}…`,
-    bodyLength: draft.body.length,
-    bodyTruncated: true,
-  };
-}
-
-// Same fix as redactDraftAttachmentsForListing, for list_scheduled_sends — a
-// queued send's payload carries the same full base64 EmailAttachmentInput
-// content (found live: ~955k tokens for a single 1 MiB attachment on ONE
-// record, canceled records included, and list_scheduled_sends has no filter
-// or cap any more than list_drafts did). No explicit return-type annotation
-// for the same reason as the function above.
-export function redactQueueRecordAttachments<T extends { payload: SendEmailInput }>(record: T) {
-  const attachments = record.payload.attachments;
-  const body = record.payload.body;
-  const bodyTooLong = typeof body === "string" && body.length > DRAFT_BODY_PREVIEW_LENGTH;
-  // send_email(markdownBody) also stores the full rendered HTML in payload.htmlBody —
-  // a parallel copy of the whole message that the body preview alone doesn't cover.
-  const hasHtmlBody = typeof record.payload.htmlBody === "string" && record.payload.htmlBody.length > 0;
-  if ((!attachments || attachments.length === 0) && !bodyTooLong && !hasHtmlBody) {
-    return record;
-  }
-  return {
-    ...record,
-    payload: {
-      ...record.payload,
-      ...(bodyTooLong ? truncateDraftBodyForResponse({ body }) : {}),
-      ...(hasHtmlBody ? { htmlBody: undefined, htmlBodyOmitted: true } : {}),
-      ...(attachments && attachments.length > 0
-        ? {
-            attachments: attachments.map((attachment) => ({
-              filename: attachment.filename,
-              contentType: attachment.contentType,
-              cid: attachment.cid,
-              contentDisposition: attachment.contentDisposition,
-              content: "",
-              size: Buffer.byteLength(attachment.content, "base64"),
-            })),
-          }
-        : {}),
-    },
-  };
-}
-
-// Writes attachment bytes to <downloadDir>/<saveTo>, refusing any path that escapes the
-// download dir (lexically or through a symlink). The containment check canonicalizes
-// BOTH sides — comparing a canonical target with a merely-resolved allowed dir rejected
-// every save when the allowed dir is or sits under a symlink (macOS /var/folders is
-// really /private/var/folders). Attachments are private mail content, so directories
-// created here are owner-only (0700) and the file is 0600, existing files included.
-export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: string, data: Buffer): Promise<string> {
-  const { resolve: pathResolve, join: pathJoin, dirname, basename, sep } = await import("node:path");
-  const { realpathSync, existsSync } = await import("node:fs");
-  const { writeFile: wf, mkdir: mkd, chmod: chm } = await import("node:fs/promises");
-  const absDir = pathResolve(downloadDir);
-  const absTarget = pathJoin(absDir, saveTo);
-  // A hardcoded "/" never matched on win32 (path.resolve/join produce
-  // backslash-separated paths there), hence `sep`.
-  if (!isPathInside(absDir, absTarget, sep)) {
-    throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
-  }
-  // The allowed directory itself may be created. Then check, BEFORE creating anything below it, that the
-  // deepest directory that already exists on the way to the target really is inside it: otherwise a
-  // symlink in the allowed dir could make mkdir create new directories outside it before the final
-  // containment check below refuses the save.
-  await mkd(absDir, { recursive: true, mode: 0o700 });
-  const realDir = realpathSync(absDir);
-  let probe = pathResolve(absTarget, "..");
-  while (!existsSync(probe)) probe = dirname(probe);
-  let realProbe: string;
-  try {
-    realProbe = realpathSync(probe);
-  } catch {
-    throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
-  }
-  if (!isPathInside(realDir, realProbe, sep)) {
-    throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
-  }
-  await mkd(pathResolve(absTarget, ".."), { recursive: true, mode: 0o700 });
-  let realTarget: string;
-  try {
-    realTarget = realpathSync(absTarget);
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
-      realTarget = realpathSync(dirname(absTarget)) + sep + basename(absTarget);
-    } else {
-      throw error;
-    }
-  }
-  if (!isPathInside(realDir, realTarget, sep)) {
-    throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
-  }
-  await wf(absTarget, data, { mode: 0o600 });
-  // writeFile's mode only applies to a newly created file; tighten an existing one too.
-  await chm(absTarget, 0o600);
-  return absTarget;
 }
 
 // Syncs run one at a time per draft, and re-read the draft once they hold the lock: a
@@ -518,40 +307,6 @@ async function ensureFreshLocalIndex(
   };
 }
 
-// Default cap on the serialized size of a thread-list response (get_actionable_threads,
-// get_threads, get_follow_up_candidates, get_inbox_digest). Per-thread payloads are already
-// bounded (shapeThreadForList); this is the backstop that keeps a large `limit` from
-// producing a response over the client's tool-output limit. Rows past the budget are dropped
-// from the end and reported via truncatedForSize/nextOffset so the caller can page on.
-export const THREAD_LIST_RESPONSE_BUDGET_CHARS = 60_000;
-
-export function trimThreadsToBudget<T>(
-  threads: T[],
-  budgetChars = THREAD_LIST_RESPONSE_BUDGET_CHARS,
-): { threads: T[]; trimmed: number } {
-  let used = 0;
-  const kept: T[] = [];
-  for (const thread of threads) {
-    const size = JSON.stringify(thread).length;
-    if (kept.length > 0 && used + size > budgetChars) {
-      break;
-    }
-    used += size;
-    kept.push(thread);
-  }
-  return { threads: kept, trimmed: threads.length - kept.length };
-}
-
-function paginationFields(total: number, offset: number, shown: number, trimmed: number) {
-  const nextOffset = offset + shown;
-  return {
-    hasMore: total > nextOffset,
-    offset,
-    ...(total > nextOffset ? { nextOffset } : {}),
-    ...(trimmed > 0 ? { truncatedForSize: true } : {}),
-  };
-}
-
 export async function mailboxChangedSinceCheckpoint(
   imapService: Pick<SimpleIMAPService, "getFolderStats">,
   localIndexService: Pick<LocalIndexService, "getSyncCheckpointMap">,
@@ -683,127 +438,6 @@ async function getAnalyticsSampleFromIndex(
 // single-account setup produces byte-for-byte the same response it always
 // did. These helpers exist purely to keep each case-block's merge logic
 // short and readable.
-
-function accountSlugForTag(bundle: AccountBundle, primarySlug: string): string | undefined {
-  return bundle.account.slug === primarySlug ? undefined : bundle.account.slug;
-}
-
-// Re-sorts a merged, cross-account list of date-bearing items newest-first.
-// Each account's own list already arrives pre-sorted (by relevance, then
-// recency) — this is a reasonable global approximation once several
-// independently-sorted lists are interleaved, not a re-derivation of each
-// service's original relevance score.
-function sortByDateDesc<T>(items: T[], dateOf: (item: T) => string | undefined): T[] {
-  return [...items].sort((left, right) => {
-    const leftTime = new Date(dateOf(left) || 0).getTime();
-    const rightTime = new Date(dateOf(right) || 0).getTime();
-    return rightTime - leftTime;
-  });
-}
-
-// get_emails' multi-account offset/limit pagination math, pulled out for direct
-// testing. Applying `offset` separately to EACH account's own page before merging
-// is wrong — page 2 (offset=25,limit=25) would skip each account's own first 25
-// messages independently, then concatenate their page-2 results, which drops
-// items relative to page 2 of the globally-merged, newest-first timeline (found
-// live with interleaved messages across two accounts: page 2 skipped the
-// second-newest message overall). The caller is expected to have already fetched
-// each account from offset 0 up to (offset + limit) — since every account's own
-// list already arrives newest-first, that's guaranteed to include every item that
-// could rank in the global top (offset + limit) — and passes the sorted,
-// concatenated superset in here to be paginated as one timeline.
-export function paginateMergedAccountResults<T>(sortedMerged: T[], offset: number, limit: number): { page: T[]; hasMore: boolean } {
-  return {
-    page: sortedMerged.slice(offset, offset + limit),
-    hasMore: sortedMerged.length > offset + limit,
-  };
-}
-
-function mergeMailboxLabels(perAccountLabels: MailboxLabel[][]): MailboxLabel[] {
-  const merged = new Map<string, MailboxLabel>();
-  for (const labels of perAccountLabels) {
-    for (const label of labels) {
-      const key = `${label.type}:${label.name}`;
-      const existing = merged.get(key);
-      if (existing) {
-        existing.messageCount += label.messageCount;
-        existing.unreadCount += label.unreadCount;
-        existing.threadCount += label.threadCount;
-      } else {
-        merged.set(key, { ...label });
-      }
-    }
-  }
-  return [...merged.values()];
-}
-
-function mergeContactStats(perAccountContacts: ContactStats[][], limit: number): ContactStats[] {
-  const merged = new Map<string, ContactStats>();
-  for (const contacts of perAccountContacts) {
-    for (const contact of contacts) {
-      const existing = merged.get(contact.address);
-      if (existing) {
-        existing.incoming += contact.incoming;
-        existing.outgoing += contact.outgoing;
-        existing.totalMessages += contact.totalMessages;
-        if (
-          contact.lastContactAt &&
-          (!existing.lastContactAt || new Date(contact.lastContactAt).getTime() > new Date(existing.lastContactAt).getTime())
-        ) {
-          existing.lastContactAt = contact.lastContactAt;
-        }
-      } else {
-        merged.set(contact.address, { ...contact });
-      }
-    }
-  }
-  return [...merged.values()]
-    .sort((left, right) => {
-      if (right.totalMessages !== left.totalMessages) {
-        return right.totalMessages - left.totalMessages;
-      }
-      return (right.lastContactAt ?? "").localeCompare(left.lastContactAt ?? "");
-    })
-    .slice(0, limit);
-}
-
-function mergeCountedEntries<T extends { count: number }>(
-  perAccountEntries: T[][],
-  keyOf: (entry: T) => string,
-  topN: number,
-): T[] {
-  const merged = new Map<string, T>();
-  for (const entries of perAccountEntries) {
-    for (const entry of entries) {
-      const key = keyOf(entry);
-      const existing = merged.get(key);
-      if (existing) {
-        existing.count += entry.count;
-      } else {
-        merged.set(key, { ...entry });
-      }
-    }
-  }
-  return [...merged.values()].sort((left, right) => right.count - left.count).slice(0, topN);
-}
-
-function mergeVolumeTrends(perAccountTrends: VolumeTrendPoint[][]): VolumeTrendPoint[] {
-  const merged = new Map<string, VolumeTrendPoint>();
-  for (const trends of perAccountTrends) {
-    for (const point of trends) {
-      const existing = merged.get(point.date);
-      if (existing) {
-        existing.count += point.count;
-        existing.unreadCount += point.unreadCount;
-        existing.starredCount += point.starredCount;
-        existing.attachmentCount += point.attachmentCount;
-      } else {
-        merged.set(point.date, { ...point });
-      }
-    }
-  }
-  return [...merged.values()].sort((left, right) => left.date.localeCompare(right.date));
-}
 
 async function runEmailAction(
   imapService: SimpleIMAPService,
@@ -971,172 +605,6 @@ async function verifySentCopy(
   messageId: string,
 ): Promise<{ found: boolean; uid?: number }> {
   return imapService.sentCopyVerify(messageId, "Sent", 8_000);
-}
-
-export function getBulkMaxBatchSize(args: Record<string, unknown>): number {
-  return normalizeLimit(args.maxBatchSize, 500, 1, 2000);
-}
-
-export function ensureBulkBatchSize(uidsLength: number, max: number): void {
-  if (uidsLength > max) {
-    throw new McpError(
-      ErrorCode.InvalidParams,
-      "Batch size " + uidsLength + " exceeds limit " + max + ". Use match criteria to narrow the scope, or increase maxBatchSize.",
-    );
-  }
-}
-
-interface BulkExcludedEmailId {
-  emailId: string;
-  error: string;
-}
-
-// `currentUidValidity` is optional and, when omitted, preserves the exact
-// original behavior (folder/format check only) — every caller that already
-// knows the folder's current UIDVALIDITY (the bulk_delete/bulk_update_flags/
-// bulk_update_labels handlers below, via a single shared getMailboxUidValidity
-// call reused for both this and resolveUidsForBulkOp) should pass it, so a
-// stale-generation id gets its own clear error instead of being lumped in
-// with a genuinely malformed one.
-export function getBulkNotFoundEmailIds(
-  emailIds: string[] | undefined,
-  folder: string,
-  currentUidValidity?: string,
-): BulkExcludedEmailId[] {
-  if (!emailIds) {
-    return [];
-  }
-
-  const excluded: BulkExcludedEmailId[] = [];
-  for (const emailId of emailIds) {
-    // Found live: this compared the emailId's folder segment against
-    // `folder` as raw, still-percent-encoded text — createEmailId encodes
-    // it (Folders/MCP-Snoozed -> Folders%2FMCP-Snoozed) but `folder` here
-    // is the plain path callers actually pass. Every real emailId in any
-    // folder with a "/" or other encoded character (any Folders/* or
-    // Labels/* path, not just top-level INBOX/Archive/etc.) never matched,
-    // so bulk_move/bulk_delete/bulk_update_flags/bulk_update_labels
-    // reported genuinely valid ids as notFound. parseEmailId already does
-    // the matching decodeURIComponent correctly — reuse it instead of
-    // hand-rolling the same parse a second, inconsistent way.
-    let parsed: ReturnType<typeof parseEmailId>;
-    try {
-      parsed = parseEmailId(emailId);
-    } catch {
-      excluded.push({ emailId, error: "Email ID could not be resolved to a UID." });
-      continue;
-    }
-    if (parsed.folder !== folder) {
-      excluded.push({ emailId, error: "Email ID could not be resolved to a UID." });
-      continue;
-    }
-    // An id with no embedded uidValidity (pre-this-fix format) is
-    // unverifiable, not stale — same "can't check it, so don't block on
-    // it" stance assertMailboxUidValidity already takes for the
-    // single-message mutation path. Only a *checkable* mismatch is
-    // treated as a stale reference. resolveUidsForBulkOp applies this
-    // exact same exclusion (see its own comment) against the exact same
-    // currentUidValidity value, so the uid this method silently drops from
-    // execution and the id this method reports as excluded here always
-    // agree.
-    if (
-      currentUidValidity !== undefined &&
-      parsed.uidValidity !== undefined &&
-      parsed.uidValidity !== currentUidValidity
-    ) {
-      excluded.push({ emailId, error: UID_VALIDITY_MISMATCH_ERROR });
-    }
-  }
-  return excluded;
-}
-
-export function withBulkNotFound(
-  result: BulkOperationResult,
-  excludedEmailIds: BulkExcludedEmailId[],
-): BulkOperationResult {
-  if (excludedEmailIds.length === 0) {
-    return result;
-  }
-
-  return {
-    ...result,
-    total: result.total + excludedEmailIds.length,
-    notFound: result.notFound + excludedEmailIds.length,
-    results: [
-      ...result.results,
-      ...excludedEmailIds.map(({ emailId, error }) => ({
-        uid: 0,
-        emailId,
-        ok: false,
-        error,
-      })),
-    ],
-  };
-}
-
-// Groups a bulk/batch tool's emailIds array by the account each id's optional
-// "<slug>::" prefix names (see splitAccountPrefix/resolveAccountForEmailId),
-// so bulk_delete/bulk_move/bulk_update_flags/bulk_update_labels/
-// batch_email_action can run each account's ids against that account's own
-// SimpleIMAPService instance instead of always hitting the primary bundle's
-// shared `imapService`. Map key is the resolved account slug (undefined for
-// the primary account — the same "no prefix" convention as everywhere else),
-// so results can be merged back with each entry's original, possibly
-// prefixed, emailId.
-export function groupEmailIdsByAccount(
-  accountManager: AccountManager,
-  emailIds: string[],
-): Map<string | undefined, { bundle: AccountBundle; restIds: string[] }> {
-  const groups = new Map<string | undefined, { bundle: AccountBundle; restIds: string[] }>();
-  for (const emailId of emailIds) {
-    const { accountSlug, rest } = splitAccountPrefix(emailId, accountManager.additionalSlugs());
-    let group = groups.get(accountSlug);
-    if (!group) {
-      group = { bundle: accountManager.bySlugOrPrimary(accountSlug), restIds: [] };
-      groups.set(accountSlug, group);
-    }
-    group.restIds.push(rest);
-  }
-  return groups;
-}
-
-// Re-applies a group's account-slug prefix to every emailId a BulkOperationResult
-// or notFound entry references — those are built inside SimpleIMAPService (or from
-// the group's own restIds), which knows nothing about account slugs, so the prefix
-// stripped off when grouping (groupEmailIdsByAccount) must be put back before the
-// per-group results are merged into the single response the tool returns.
-export function prefixBulkResult(result: BulkOperationResult, slug: string | undefined): BulkOperationResult {
-  if (!slug) {
-    return result;
-  }
-  return {
-    ...result,
-    results: result.results.map((entry) => ({ ...entry, emailId: withAccountPrefix(slug, entry.emailId) })),
-  };
-}
-
-export function prefixNotFound(excluded: BulkExcludedEmailId[], slug: string | undefined): BulkExcludedEmailId[] {
-  if (!slug) {
-    return excluded;
-  }
-  return excluded.map((entry) => ({ ...entry, emailId: withAccountPrefix(slug, entry.emailId) }));
-}
-
-// Merges the per-account-group BulkOperationResults produced by the bulk_*
-// handlers into the single combined shape the tool actually returns.
-export function mergeBulkResults(results: BulkOperationResult[]): BulkOperationResult {
-  return results.reduce((acc, result) => ({
-    dryRun: acc.dryRun || result.dryRun,
-    total: acc.total + result.total,
-    succeeded: acc.succeeded + result.succeeded,
-    failed: acc.failed + result.failed,
-    notFound: acc.notFound + result.notFound,
-    results: [...acc.results, ...result.results],
-  }), { dryRun: false, total: 0, succeeded: 0, failed: 0, notFound: 0, results: [] } as BulkOperationResult);
-}
-
-function paginateRecentRecords<T>(records: T[], limit: number, offset: number): T[] {
-  return records.slice(offset, offset + limit);
 }
 
 function pickReplyTargetFromThread(
