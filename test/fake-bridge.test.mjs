@@ -37,9 +37,9 @@ async function withBridge(options, fn) {
   }
 }
 
-for (const [name, mode, secure, extra] of [
-  ["implicit TLS", "implicit", true, needsOpenssl],
-  ["STARTTLS", "starttls", false, needsOpenssl],
+for (const [name, mode, extra] of [
+  ["implicit TLS", "implicit", needsOpenssl],
+  ["STARTTLS", "starttls", needsOpenssl],
 ]) {
   test(`the client logs in and lists folders against Bridge in ${name} mode`, extra, async () => {
     await withBridge({ mode }, async ({ service, bridge }) => {

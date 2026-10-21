@@ -74,7 +74,6 @@ export async function startFakeBridge(options) {
     rawSocket.on("close", () => sockets.delete(rawSocket));
     let socket = rawSocket;
     let buffer = Buffer.alloc(0);
-    let authenticated = false;
     let upgraded = mode !== "starttls";
     let selected;
     let idleTag;
@@ -87,7 +86,6 @@ export async function startFakeBridge(options) {
 
     const finishLogin = (tag, user, password) => {
       if (accounts[user] !== undefined && accounts[user] === password) {
-        authenticated = true;
         state.logins += 1;
         return write(`${tag} OK [CAPABILITY ${capability()}] Authentication successful\r\n`);
       }
@@ -188,9 +186,9 @@ export async function startFakeBridge(options) {
             const inSet = parseSet(set, maxUid);
             const flags = flagList.split(/\s+/).filter(Boolean);
             for (const m of messages.filter((entry) => inSet(entry.uid))) {
-              if (/^\+/.test(mode)) flags.forEach((f) => m.flags.add(f));
-              else if (/^-/.test(mode)) flags.forEach((f) => m.flags.delete(f));
-              else { m.flags.clear(); flags.forEach((f) => m.flags.add(f)); }
+              if (/^\+/.test(mode)) for (const f of flags) m.flags.add(f);
+              else if (/^-/.test(mode)) for (const f of flags) m.flags.delete(f);
+              else { m.flags.clear(); for (const f of flags) m.flags.add(f); }
               if (!/SILENT/i.test(mode)) write(`* ${messages.indexOf(m) + 1} FETCH (UID ${m.uid} FLAGS (${[...m.flags].join(" ")}))\r\n`);
             }
             return write(`${tag} OK UID STORE completed\r\n`);
