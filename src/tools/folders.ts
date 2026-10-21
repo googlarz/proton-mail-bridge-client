@@ -1,5 +1,5 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { normalizeBoolean, normalizeLimit, optionalBoolean, optionalNumber } from "../utils/helpers.js";
+import { normalizeBoolean, normalizeLimit, optionalBoolean, optionalNumber, splitAccountPrefix } from "../utils/helpers.js";
 import { withAudit } from "./audit.js";
 import { requireString, optionalString } from "./args.js";
 import { ensureMailboxWriteAllowed, ensureEmailActionAllowed, ensureDestructiveConfirmed } from "../utils/runtime-policy.js";
@@ -107,7 +107,12 @@ export async function handleFolderTool(name: string, args: Record<string, unknow
     }
 
     case "folder_stats": {
-      const folderStatsFolder = optionalString(args, "folder");
+      const requestedStatsFolder = optionalString(args, "folder");
+      // A "<slug>::" prefix on the folder names the account, like the account argument.
+      const statsOwner = requestedStatsFolder ? resolveFolderTarget(args, requestedStatsFolder) : undefined;
+      const statsPrefixed = requestedStatsFolder ? splitAccountPrefix(requestedStatsFolder, accountManager.additionalSlugs()).accountSlug : undefined;
+      const statsNamed = resolveAccountArg(args) ?? (statsPrefixed ? statsOwner?.bundle : undefined);
+      const folderStatsFolder = statsOwner ? statsOwner.paths[0] : requestedStatsFolder;
       if (accountManager.all().length === 1) {
         resolveAccountArg(args);
         const result = await imapService.getFolderStats(folderStatsFolder);
@@ -116,16 +121,27 @@ export async function handleFolderTool(name: string, args: Record<string, unknow
       // Merge strategy: fetch stats for the same folder in every account and
       // sum the numeric fields (total/unseen); uidNext/uidValidity are
       // per-account concepts and only make sense in the breakdown.
-      const perAccount = await Promise.all(
-        selectedBundles(args).map(async (bundle) => ({
+      // One account lacking the folder (or unreachable) must not fail the whole call: report it and return the rest.
+      // Every account failing still throws.
+      const statsBundles = statsNamed ? [statsNamed] : accountManager.all();
+      const settledStats = await Promise.allSettled(
+        statsBundles.map(async (bundle) => ({
           slug: bundle.account.slug,
           ...(await bundle.imapService.getFolderStats(folderStatsFolder)),
         })),
+      );
+      const perAccount = settledStats.flatMap((entry) => (entry.status === "fulfilled" ? [entry.value] : []));
+      if (perAccount.length === 0) throw (settledStats[0] as PromiseRejectedResult).reason;
+      const failedStats = settledStats.flatMap((entry, index) =>
+        entry.status === "rejected"
+          ? [{ account: statsBundles[index].account.slug, error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }]
+          : [],
       );
       return createTextResult({
         folder: folderStatsFolder ?? "INBOX",
         total: perAccount.reduce((sum, entry) => sum + entry.total, 0),
         unseen: perAccount.reduce((sum, entry) => sum + entry.unseen, 0),
+        ...(failedStats.length > 0 ? { failedAccounts: failedStats } : {}),
         byAccount: perAccount,
       });
     }

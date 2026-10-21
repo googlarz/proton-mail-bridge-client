@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+From zotabee's check of 2.13.1 (#32):
+
+- **`notify` no longer exits after its first error**: its wait between attempts did not keep the process alive, so the "works again" notice could never come. It now stays running, announces the problem once and the recovery.
+- **A certificate Node does not trust is explained** in `doctor`, `run_doctor` and every tool error, with the two options that fix it (`PROTONMAIL_TLS_CA_FILE`, `PROTONMAIL_TLS_INSECURE_HOSTS`) instead of Node's own text.
+- **`get_emails` and `folder_stats` without `account`** no longer fail when only one account has the folder: that account is reported in `failedAccounts` and the rest is returned. Both accept the `<slug>::` folder prefix that `get_folders` shows.
+- **`bulk_update_flags`, `bulk_move`, `bulk_delete` and `bulk_update_labels` with `emailIds` and no `folder`** look in the folder the ids come from, not in INBOX; ids from several folders are refused with a clear message.
+- **The Store build of Claude Desktop on Windows**: its config now lives in `%LOCALAPPDATA%\Claude-Data\claude_<id>\`; `claude check`, `report` and `claude install` find it there (and still in the old package folder).
+
 - **Mailbox rules with suggestions** (`suggest_rules`, `get_rules`, `set_rule`, `delete_rule`, `apply_rules`; CLI `suggest-rules`, `rules`, `set-rule`, `delete-rule`, `apply-rules`): `suggest_rules` scans the local index and proposes rules with the evidence (newsletters you never open, senders you always file in one folder, an old Trash or Spam), and changes nothing. A rule (`when` / `actions`) marks, labels, archives, moves, trashes, deletes or forwards. Rules act by themselves on new mail after a sync, but only with safe actions; rules that trash or delete run through `apply_rules`, which is a preview unless `dryRun: false`, and needs confirmation to delete for good. **Forwarding** is an action: sending must be allowed, recipients allowed, confirmed when set up, a condition on sender/subject/attachment required, only mail after switching on, once per message, 50 a day, with attachments, by default only from people. See the README.
 
 ## [2.14.0] — 2026-10-21

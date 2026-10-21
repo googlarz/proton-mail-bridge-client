@@ -2,7 +2,7 @@ import { PACKAGE_VERSION } from "../package-info.js";
 import { paginateRecentRecords } from "./merge.js";
 import { logger } from "../utils/logger.js";
 import { optionalString } from "./args.js";
-import { describeImapError, isLikelyAuthenticationError, isLikelyTlsMismatchError, isLikelyConnectionError } from "../services/simple-imap-service.js";
+import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyTlsMismatchError, isLikelyConnectionError } from "../services/simple-imap-service.js";
 import { normalizeBoolean, normalizeLimit, optionalBoolean, optionalInteger } from "../utils/helpers.js";
 import { sanitizeRuntimeConfig, ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { healthProblems } from "../utils/health.js";
@@ -226,6 +226,13 @@ export async function handleDiagnosticTool(name: string, args: Record<string, un
             cause: "authentication_failed",
             suggestion:
               "PROTONMAIL_PASSWORD must be the Proton Bridge password (Bridge app -> account -> Mailbox details), not your Proton account password. Confirm you're signed in inside the Bridge app.",
+          };
+        }
+        if (isLikelyCertificateError(reason)) {
+          return {
+            cause: "certificate_untrusted",
+            suggestion:
+              "Bridge's certificate is not trusted. Bridge presents a self-signed certificate made for localhost, which is accepted for 127.0.0.1, localhost and ::1. For another host name (another container, another machine) set PROTONMAIL_TLS_CA_FILE to Bridge's exported certificate, or list the host in PROTONMAIL_TLS_INSECURE_HOSTS.",
           };
         }
         // Checked before the generic connection-error case: an EPROTO/

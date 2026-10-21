@@ -23,8 +23,14 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
   switch (name) {
     case "get_emails": {
       const effectiveLimit = normalizeLimit(args.limit, 50);
+      // A "<slug>::" prefix on the folder (as get_folders shows it) names the account, like the account argument; the two
+      // must not name different accounts.
+      const requestedFolder = optionalString(args, "folder");
+      const folderOwner = requestedFolder ? resolveFolderTarget(args, requestedFolder) : undefined;
+      const prefixedSlug = requestedFolder ? splitAccountPrefix(requestedFolder, accountManager.additionalSlugs()).accountSlug : undefined;
+      const namedAccount = resolveAccountArg(args) ?? (prefixedSlug ? folderOwner?.bundle : undefined);
       const getEmailsInput = {
-        folder: optionalString(args, "folder"),
+        folder: folderOwner ? folderOwner.paths[0] : requestedFolder,
         limit: effectiveLimit,
         offset: optionalInteger(args.offset, 0, 1_000_000),
         beforeUid: typeof args?.beforeUid === "number" ? args.beforeUid : undefined,
@@ -45,6 +51,7 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
           result.emails.map(emailSource),
         );
       }
+      const getEmailsBundles = namedAccount ? [namedAccount] : accountManager.all();
       // Merge strategy: an `offset` applied separately to each account's own page
       // BEFORE merging is wrong — e.g. offset=25,limit=25 (page 2) would skip each
       // account's own first 25 messages independently, then concatenate their
@@ -78,11 +85,20 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
       // than inferring it from a count that can be either capped-by-fetch or
       // filter-blind depending on which one you pick.
       const perAccountFetchLimit = requestedOffset + effectiveLimit + 1;
-      const perAccount = await Promise.all(
-        selectedBundles(args).map(async (bundle) => {
+      // One account lacking the folder (or unreachable) must not fail the whole page: report it and return the rest,
+      // as count_messages and search_emails do. Every account failing still throws.
+      const settledEmails = await Promise.allSettled(
+        getEmailsBundles.map(async (bundle) => {
           const result = await bundle.imapService.getEmails({ ...getEmailsInput, offset: 0, limit: perAccountFetchLimit });
           return { bundle, result };
         }),
+      );
+      const perAccount = settledEmails.flatMap((entry) => (entry.status === "fulfilled" ? [entry.value] : []));
+      if (perAccount.length === 0) throw (settledEmails[0] as PromiseRejectedResult).reason;
+      const failedAccounts = settledEmails.flatMap((entry, index) =>
+        entry.status === "rejected"
+          ? [{ account: getEmailsBundles[index].account.slug, error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }]
+          : [],
       );
       const taggedEmails = perAccount.flatMap(({ bundle, result }) =>
         result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlug), email.id) })),
@@ -99,6 +115,7 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
           emails: projectFields(merged, parseFieldsArg(args.fields)),
           returned: merged.length,
           hasMore,
+          ...(failedAccounts.length > 0 ? { failedAccounts } : {}),
           byAccount: perAccount.map(({ bundle, result }) => ({ slug: bundle.account.slug, total: result.total })),
         },
         false,

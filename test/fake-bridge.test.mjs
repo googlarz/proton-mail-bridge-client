@@ -275,3 +275,25 @@ test("reading opens a folder read-only (EXAMINE), and only a change opens it rea
     assert.ok(bridge.state.commands.some((c) => c.startsWith("SELECT")), "a flag change opens the folder read-write");
   });
 });
+
+test("notify keeps running after a failed connection, announces the problem once and the recovery when Bridge comes back", needsOpenssl, async () => {
+  const { spawn } = await import("node:child_process");
+  const bridge = await startFakeBridge({ mode: "starttls", certificate, accounts: { "owner@example.com": "right" }, folders: mailbox() });
+  const dir = await mkdtemp(join(tmpdir(), "fake-bridge-notify-"));
+  const env = { ...process.env, PROTONMAIL_USERNAME: "owner@example.com", PROTONMAIL_PASSWORD: "wrong", PROTONMAIL_IMAP_PORT: String(bridge.port), PROTONMAIL_SMTP_PORT: "9", PROTONMAIL_DATA_DIR: dir, PROTONMAIL_IDLE_WATCH: "false", PROTONMAIL_AUTO_SYNC: "false" };
+  const child = spawn(process.execPath, ["dist/cli.js", "notify", "--timeout", "1"], { env });
+  let out = "";
+  let exited = false;
+  child.stdout.on("data", (chunk) => { out += chunk; });
+  child.on("exit", () => { exited = true; });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 3500));
+    assert.match(out, /"event":"problem"/, "the problem is announced");
+    assert.equal(exited, false, "and the daemon is still running, waiting to try again");
+  } finally {
+    child.kill("SIGINT");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await bridge.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

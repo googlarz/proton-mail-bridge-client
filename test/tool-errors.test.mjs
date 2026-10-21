@@ -178,3 +178,54 @@ test("every tool that names a message answers with the account's prefix on a non
     }
   }, ["delete", "move", "archive", "trash", "restore", "mark_read", "mark_unread", "star", "unstar"]);
 });
+
+test("get_emails and folder_stats ask every account, report the one that lacks the folder, and honour a <slug>:: prefix", async () => {
+  await withServer(["owner@example.com", "work@example.com"], async ({ client, bundles }) => {
+    const [primary, work] = bundles;
+    const asked = [];
+    const page = (total) => ({ folder: "Folders/News", total, limit: 50, offset: 0, emails: [] });
+    primary.imapService.getEmails = async () => { throw new Error("Command failed: no such mailbox"); };
+    work.imapService.getEmails = async (input) => { asked.push(input.folder); return page(3); };
+    primary.imapService.getFolderStats = async () => { throw new Error("Command failed: no such mailbox"); };
+    work.imapService.getFolderStats = async () => ({ folder: "Folders/News", total: 3, unseen: 1, uidNext: 4, uidValidity: "1" });
+
+    const emails = JSON.parse((await client.callTool({ name: "get_emails", arguments: { folder: "Folders/News" } })).content[0].text);
+    assert.equal(emails.total, 3);
+    assert.equal(emails.failedAccounts.length, 1, "the account without the folder is reported, not fatal");
+    assert.match(emails.failedAccounts[0].error, /no such mailbox/);
+
+    const stats = JSON.parse((await client.callTool({ name: "folder_stats", arguments: { folder: "Folders/News" } })).content[0].text);
+    assert.deepEqual([stats.total, stats.unseen, stats.failedAccounts.length], [3, 1, 1]);
+
+    asked.length = 0;
+    const prefixed = JSON.parse((await client.callTool({ name: "get_emails", arguments: { folder: `${work.account.slug}::Folders/News` } })).content[0].text);
+    assert.equal(prefixed.failedAccounts, undefined, "the prefix names the account, so the other is not asked");
+    assert.deepEqual(asked, ["Folders/News"], "and the folder reaches it without the prefix");
+    const prefixedStats = JSON.parse((await client.callTool({ name: "folder_stats", arguments: { folder: `${work.account.slug}::Folders/News` } })).content[0].text);
+    assert.equal(prefixedStats.byAccount.length, 1);
+
+    primary.imapService.getEmails = async () => { throw new Error("boom one"); };
+    work.imapService.getEmails = async () => { throw new Error("boom two"); };
+    const allFail = await client.callTool({ name: "get_emails", arguments: { folder: "Folders/News" } });
+    assert.equal(allFail.isError, true, "every account failing is still an error");
+  });
+});
+
+test("bulk calls with ids and no folder look in the folder the ids come from", async () => {
+  await withServer(["owner@example.com", "work@example.com"], async ({ client, bundles }) => {
+    const seen = [];
+    bundles[0].imapService.getMailboxUidValidity = async (folder) => { seen.push(folder); throw new Error("stop here"); };
+    const id = createEmailId("Archive", 7, "100");
+    for (const [tool, extra] of [["bulk_update_flags", { flagsToAdd: ["\\Seen"] }], ["bulk_move", { targetFolder: "Trash" }], ["bulk_delete", {}], ["bulk_update_labels", { labelsToAdd: ["X"] }]]) {
+      seen.length = 0;
+      await client.callTool({ name: tool, arguments: { emailIds: [id], ...extra } });
+      assert.deepEqual(seen.slice(0, 1), ["Archive"], `${tool} must look in Archive`);
+    }
+    seen.length = 0;
+    const mixed = await client.callTool({ name: "bulk_update_flags", arguments: { emailIds: [id, createEmailId("INBOX", 1, "200")], flagsToAdd: ["\\Seen"] } });
+    assert.equal(mixed.isError, true);
+    assert.match(mixed.content[0].text, /different folders/);
+    await client.callTool({ name: "bulk_update_flags", arguments: { emailIds: [id], folder: "INBOX", flagsToAdd: ["\\Seen"] } });
+    assert.deepEqual(seen.slice(0, 1), ["INBOX"], "an explicit folder still wins");
+  }, ["delete", "move", "trash", "mark_read", "mark_unread", "star", "unstar", "archive"]);
+});

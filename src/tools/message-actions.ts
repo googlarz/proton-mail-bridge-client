@@ -1,7 +1,7 @@
 import { maybeRefreshLocalIndex } from "./index-refresh.js";
 import { type AccountBundle } from "../services/account-manager.js";
 import { type BatchActionResult, type BatchActionEntry, type BulkMatchCriteria, type BulkOperationResult } from "../types/index.js";
-import { ensureBulkBatchSize, getBulkMaxBatchSize, groupEmailIdsByAccount, BulkExcludedEmailId, getBulkNotFoundEmailIds, withBulkNotFound, prefixBulkResult, prefixNotFound, mergeBulkResults } from "./bulk.js";
+import { bulkFolder, ensureBulkBatchSize, getBulkMaxBatchSize, groupEmailIdsByAccount, BulkExcludedEmailId, getBulkNotFoundEmailIds, withBulkNotFound, prefixBulkResult, prefixNotFound, mergeBulkResults } from "./bulk.js";
 import { buildEmailResourceUri, emailSource, threadSource } from "./resources.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { ensureMoveTargetAllowed, isMissingTargetFolderError, applyBatchEmailAction, emailSourceFromActionResult } from "./actions.js";
@@ -320,7 +320,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       if (emailIds && emailIds.length === 0) throw new McpError(ErrorCode.InvalidParams, "emailIds must contain at least one email id.");
       if (!emailIds && !match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds or match.");
       if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
-      const folder = optionalString(args, "folder") ?? "INBOX";
+      const folder = bulkFolder(accountManager, optionalString(args, "folder"), emailIds);
       const targetFolder = requireString(args, "targetFolder");
       await ensureMoveTargetAllowed(config.runtime, accountManager.all().map((entry) => entry.imapService), targetFolder);
       const max = getBulkMaxBatchSize(args);
@@ -400,7 +400,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       if (emailIds && emailIds.length === 0) throw new McpError(ErrorCode.InvalidParams, "emailIds must contain at least one email id.");
       if (!emailIds && !match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds or match.");
       if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
-      const folder = optionalString(args, "folder") ?? "INBOX";
+      const folder = bulkFolder(accountManager, optionalString(args, "folder"), emailIds);
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
 
@@ -479,7 +479,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const flagsToRemove = Array.isArray(args.flagsToRemove) ? (args.flagsToRemove as unknown[]).map(String) : [];
       if (flagsToAdd.length === 0 && flagsToRemove.length === 0) throw new McpError(ErrorCode.InvalidParams, "Provide flagsToAdd or flagsToRemove.");
       ensureFlagChangeAllowed(config.runtime, flagsToAdd, flagsToRemove, normalizeBoolean(args.confirmed, false));
-      const folder = optionalString(args, "folder") ?? "INBOX";
+      const folder = bulkFolder(accountManager, optionalString(args, "folder"), emailIds);
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
 
@@ -552,7 +552,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
       const labelsToAdd = Array.isArray(args.labelsToAdd) ? (args.labelsToAdd as unknown[]).map(String) : [];
       const labelsToRemove = Array.isArray(args.labelsToRemove) ? (args.labelsToRemove as unknown[]).map(String) : [];
-      const folder = optionalString(args, "folder") ?? "INBOX";
+      const folder = bulkFolder(accountManager, optionalString(args, "folder"), emailIds);
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
 

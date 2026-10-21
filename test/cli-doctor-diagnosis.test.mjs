@@ -38,3 +38,16 @@ test("report prints how many folders are synced, not their names, and writes the
   assert.doesNotMatch(JSON.stringify(out), /ACME|someone/);
   assert.equal(reportRuntime({ ...runtime, autoSyncFolder: "INBOX" }, "/Users/someone").autoSyncFolder, "1 folder");
 });
+
+test("a certificate Node does not trust is explained with the options that fix it", () => {
+  for (const text of [
+    "self-signed certificate; if the root CA is installed locally, try running Node.js with --use-system-ca",
+    "unable to verify the first certificate",
+    "Hostname/IP does not match certificate's altnames",
+  ]) {
+    const diagnosis = diagnoseConnectionFailure(new Error(text));
+    assert.equal(diagnosis?.cause, "certificate_untrusted", text);
+    assert.match(diagnosis.suggestion, /PROTONMAIL_TLS_CA_FILE/);
+    assert.match(diagnosis.suggestion, /PROTONMAIL_TLS_INSECURE_HOSTS/);
+  }
+});

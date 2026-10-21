@@ -4,7 +4,7 @@ import { AccountManager, type AccountBundle } from "../services/account-manager.
 import { type BulkOperationResult } from "../types/index.js";
 import { UID_VALIDITY_MISMATCH_ERROR } from "../services/simple-imap-service.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { normalizeLimit, parseEmailId, splitAccountPrefix, withAccountPrefix } from "../utils/helpers.js";
+import { InvalidArgumentError, normalizeLimit, parseEmailId, splitAccountPrefix, withAccountPrefix } from "../utils/helpers.js";
 export function getBulkMaxBatchSize(args: Record<string, unknown>): number {
   return normalizeLimit(args.maxBatchSize, 500, 1, 2000);
 }
@@ -130,6 +130,27 @@ export function groupEmailIdsByAccount(
     group.restIds.push(rest);
   }
   return groups;
+}
+
+// The folder a bulk call works in. Given, it wins. Otherwise the ids say: an id carries its folder, so ids from Archive
+// are looked up in Archive, not in INBOX. Ids from several folders are refused instead of guessed (pass `folder`, or split
+// the call). With no ids (a `match`) it is INBOX, as before.
+export function bulkFolder(accountManager: AccountManager, explicit: string | undefined, emailIds: string[] | undefined): string {
+  if (explicit) return explicit;
+  if (!emailIds?.length) return "INBOX";
+  const folders = new Set<string>();
+  for (const id of emailIds) {
+    try {
+      folders.add(parseEmailId(splitAccountPrefix(id, accountManager.additionalSlugs()).rest).folder);
+    } catch {
+      // not a readable id: it is reported as not found below, where it always was
+    }
+  }
+  if (folders.size === 0) return "INBOX";
+  if (folders.size > 1) {
+    throw new InvalidArgumentError(`These ids are in different folders (${[...folders].join(", ")}). Pass folder, or split the call.`);
+  }
+  return [...folders][0];
 }
 
 // Re-applies a group's account-slug prefix to every emailId a BulkOperationResult

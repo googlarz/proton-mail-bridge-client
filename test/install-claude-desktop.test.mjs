@@ -287,3 +287,37 @@ test("installClaudeDesktopConfig writes the config file, its directory, and any 
   assert.equal((await stat(second.backupPath)).mode & 0o777, 0o600, "the backup must not be group/world-readable either");
   assert.ok((await readdir(configDir)).some((name) => name.startsWith("claude_desktop_config.json.bak-")));
 });
+
+import { findMsixClaudeConfig } from "../dist/scripts/install-claude-desktop.js";
+import { mkdir as mkdirp, mkdtemp as mkdtempp, rm as rmrf, utimes, writeFile as writeFilep } from "node:fs/promises";
+import { tmpdir as osTmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+
+test("the Store build's config is found in Claude-Data (since October 2026) or in the old package folder, whichever exists", async () => {
+  const root = await mkdtempp(joinPath(osTmpdir(), "msix-"));
+  try {
+    assert.equal(findMsixClaudeConfig(root), undefined, "not a Store install");
+
+    const oldDir = joinPath(root, "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude");
+    await mkdirp(oldDir, { recursive: true });
+    await writeFilep(joinPath(oldDir, ".user-data-left.claude_pzs8sxrjxfjjc"), "");
+    assert.equal(findMsixClaudeConfig(root), undefined, "the old folder holds only a marker, no config");
+
+    const dataDir = joinPath(root, "Claude-Data", "claude_pzs8sxrjxfjjc");
+    await mkdirp(dataDir, { recursive: true });
+    assert.equal(findMsixClaudeConfig(root), joinPath(dataDir, "claude_desktop_config.json"), "no config yet: that is where one belongs");
+
+    await writeFilep(joinPath(dataDir, "claude_desktop_config.json"), "{}");
+    assert.equal(findMsixClaudeConfig(root), joinPath(dataDir, "claude_desktop_config.json"));
+
+    // An older config in the package folder loses to the newer one in Claude-Data, and wins if it is the newer.
+    const oldConfig = joinPath(oldDir, "claude_desktop_config.json");
+    await writeFilep(oldConfig, "{}");
+    await utimes(oldConfig, new Date(Date.now() - 86_400_000), new Date(Date.now() - 86_400_000));
+    assert.equal(findMsixClaudeConfig(root), joinPath(dataDir, "claude_desktop_config.json"));
+    await utimes(oldConfig, new Date(Date.now() + 86_400_000), new Date(Date.now() + 86_400_000));
+    assert.equal(findMsixClaudeConfig(root), oldConfig);
+  } finally {
+    await rmrf(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

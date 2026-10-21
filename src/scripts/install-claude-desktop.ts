@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { constants as fsConstants, existsSync, readdirSync, realpathSync } from "node:fs";
+import { constants as fsConstants, readdirSync, realpathSync, statSync } from "node:fs";
 import { access, chmod, copyFile, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -138,20 +138,40 @@ export function resolveClaudeDesktopConfigPath(explicitPath?: string): string {
   }
 }
 
-// The Microsoft Store (MSIX) build of Claude Desktop virtualises %APPDATA%, so its config
-// lives under the package folder instead of the classic Roaming path.
-function findMsixClaudeConfig(): string | undefined {
-  const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
+// The Microsoft Store (MSIX) build of Claude Desktop keeps its data outside the classic %APPDATA%. Since October 2026
+// that is %LOCALAPPDATA%\\Claude-Data\\claude_<package id>\\; before it was inside the package folder,
+// %LOCALAPPDATA%\\Packages\\Claude_<package id>\\LocalCache\\Roaming\\Claude\\ (which now holds only a marker file). The
+// config that exists wins (the newest, if both do); with a Claude-Data folder but no config yet, that folder is where
+// one belongs.
+export function findMsixClaudeConfig(localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local")): string | undefined {
+  const found: Array<{ path: string; modified: number }> = [];
+  const note = (candidate: string) => {
+    try {
+      found.push({ path: candidate, modified: statSync(candidate).mtimeMs });
+    } catch {
+      // no config there
+    }
+  };
+  let claudeDataFolder: string | undefined;
+  try {
+    for (const entry of readdirSync(join(localAppData, "Claude-Data"))) {
+      if (!/^claude_/i.test(entry)) continue;
+      claudeDataFolder ??= join(localAppData, "Claude-Data", entry, "claude_desktop_config.json");
+      note(join(localAppData, "Claude-Data", entry, "claude_desktop_config.json"));
+    }
+  } catch {
+    // no Claude-Data folder
+  }
   try {
     for (const entry of readdirSync(join(localAppData, "Packages"))) {
       if (!/^(Claude|AnthropicPBC\.Claude)_/i.test(entry)) continue;
-      const candidate = join(localAppData, "Packages", entry, "LocalCache", "Roaming", "Claude", "claude_desktop_config.json");
-      if (existsSync(candidate)) return candidate;
+      note(join(localAppData, "Packages", entry, "LocalCache", "Roaming", "Claude", "claude_desktop_config.json"));
     }
   } catch {
-    // No Packages folder (non-Store install): fall back to the classic path.
+    // no Packages folder (not a Store install)
   }
-  return undefined;
+  if (found.length > 0) return found.sort((a, b) => b.modified - a.modified)[0].path;
+  return claudeDataFolder;
 }
 
 export function resolveClaudeDesktopRuntimeDir(explicitPath?: string): string {

@@ -16,7 +16,7 @@ import {
 import { isMainModule } from "./is-main.js";
 import { CORE_TOOL_NAMES, listedTools } from "./tools/definitions.js";
 import { findMailPrompt, MAIL_PROMPTS } from "./utils/mail-prompts.js";
-import { describeImapError, isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./services/simple-imap-service.js";
+import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./services/simple-imap-service.js";
 import type {
   ProtonMailConfig,
 } from "./types/index.js";
@@ -459,6 +459,11 @@ export function createServer(
       if (isLikelyAuthenticationError(error)) {
         return failed(
           "IMAP authentication failed. Check that PROTONMAIL_PASSWORD is your Proton Bridge password (not your Proton account password) and that you're signed in inside the Bridge app. Run run_doctor for a full connectivity check.",
+        );
+      }
+      if (isLikelyCertificateError(error)) {
+        return failed(
+          "Bridge's certificate is not trusted. Bridge presents a self-signed certificate made for localhost, which is accepted for 127.0.0.1, localhost and ::1. For another host name (another container, another machine) set PROTONMAIL_TLS_CA_FILE to Bridge's exported certificate, or list the host in PROTONMAIL_TLS_INSECURE_HOSTS. Run run_doctor for a full connectivity check.",
         );
       }
       if (isLikelyTlsMismatchError(error)) {

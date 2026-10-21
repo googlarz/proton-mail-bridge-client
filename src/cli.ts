@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { buildConfigFromEnv, createServer, withAudit } from "./index.js";
 import { isMainModule } from "./is-main.js";
-import { isLikelyAuthenticationError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService } from "./services/simple-imap-service.js";
+import { isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService } from "./services/simple-imap-service.js";
 import type { EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
 import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
 import { isValidEmail, parseEmails } from "./utils/helpers.js";
@@ -184,7 +184,7 @@ function printHelp(): void {
       "  watch                  Wait for mailbox changes via IMAP IDLE (--timeout)",
       "  clear-cache            Clear in-memory MCP server caches",
       "  get-logs               Return recent in-memory MCP server logs",
-      "  notify                 Daemon: watch INBOX and send a system notification on new mail (--folder --timeout)",
+      "  notify                 Daemon: watch INBOX and send a system notification on new mail and when the connection to Bridge breaks or comes back (--folder --timeout)",
       "  drafts                 List local drafts",
       "  remote-drafts          List drafts in the Proton Drafts mailbox",
       "  draft-create           Create a draft (--to --subject --body or stdin)",
@@ -845,6 +845,9 @@ export function diagnoseConnectionFailure(reason: unknown): { cause: string; sug
       cause: "authentication_failed",
       suggestion: "PROTONMAIL_PASSWORD must be the Bridge password (Bridge app -> account -> Mailbox details), not your Proton account password.",
     };
+  }
+  if (isLikelyCertificateError(reason)) {
+    return { cause: "certificate_untrusted", suggestion: "Bridge's certificate is not trusted. Bridge presents a self-signed certificate made for localhost, which is accepted for 127.0.0.1, localhost and ::1. For another host name (another container, another machine) set PROTONMAIL_TLS_CA_FILE to Bridge's exported certificate, or list the host in PROTONMAIL_TLS_INSECURE_HOSTS." };
   }
   if (isLikelyTlsMismatchError(reason)) {
     return {
@@ -1908,7 +1911,9 @@ async function runNotify(parsed: ParsedCliArgs): Promise<void> {
         process.stdout.write(JSON.stringify({ event: "problem", cause: health.cause, message: health.notice.body }) + "\n");
       }
       // Simple backoff before retrying; a rejected login will not fix itself in seconds.
-      await new Promise<void>((resolve) => { setTimeout(resolve, health.cause === "authentication_failed" ? 120_000 : 15_000).unref(); });
+      // Not unref'd: this wait is what keeps the daemon alive between attempts, and the notice that the connection works
+      // again can only come from a process that is still running.
+      await new Promise<void>((resolve) => { setTimeout(resolve, health.cause === "authentication_failed" ? 120_000 : 15_000); });
     }
   }
 

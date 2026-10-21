@@ -345,6 +345,29 @@ export function isLikelyTlsMismatchError(error: unknown): boolean {
   );
 }
 
+// A certificate Node does not trust: Bridge's own is self-signed, so a host reached by another name than localhost
+// fails this way until the certificate is pinned (PROTONMAIL_TLS_CA_FILE) or the host is listed.
+export function isLikelyCertificateError(error: unknown): boolean {
+  if (!error) {
+    return false;
+  }
+  const haystack = collectErrorText(error);
+  if (!haystack) {
+    return false;
+  }
+  return [
+    "self-signed certificate",
+    "self signed certificate",
+    "depth_zero_self_signed_cert",
+    "unable to verify the first certificate",
+    "unable_to_verify_leaf_signature",
+    "unable to get local issuer certificate",
+    "certificate has expired",
+    "err_tls_cert_altname_invalid",
+    "does not match certificate",
+  ].some((needle) => haystack.includes(needle));
+}
+
 export function isLikelyConnectionError(error: unknown): boolean {
   if (!error) {
     return false;
