@@ -2,7 +2,7 @@
 # (a server next to a headless Bridge). It talks to Bridge over IMAP/SMTP, so the container must be able to reach
 # Bridge's ports: share Bridge's network namespace (--network container:<bridge>) or use --network host.
 #
-#   docker build -f docker/Dockerfile --build-arg VERSION=2.14.0 -t proton-mail-bridge-client .
+#   docker build -f docker/Dockerfile --build-arg VERSION=2.15.0 -t proton-mail-bridge-client .
 #   docker run -i --rm --network host -e PROTONMAIL_USERNAME=... -e PROTONMAIL_PASSWORD_FILE=/run/secrets/bridge \
 #     -v bridge-client-data:/data proton-mail-bridge-client
 #

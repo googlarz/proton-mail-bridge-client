@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.15.0] — 2026-10-22
+
 From zotabee's check of 2.13.1 (#32):
 
 - **`notify` no longer exits after its first error**: its wait between attempts did not keep the process alive, so the "works again" notice could never come. It now stays running, announces the problem once and the recovery.
