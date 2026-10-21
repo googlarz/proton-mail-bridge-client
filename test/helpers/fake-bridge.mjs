@@ -258,6 +258,8 @@ export async function startFakeBridge(options) {
     port: server.address().port,
     state,
     folders,
+    // What Bridge does to a connection when something it depends on goes away.
+    dropConnections: () => { for (const socket of sockets) socket.destroy(); },
     close: () => new Promise((resolve) => {
       server.close(() => resolve());
       for (const socket of sockets) socket.destroy();

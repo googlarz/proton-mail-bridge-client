@@ -150,3 +150,32 @@ test("PROTONMAIL_SHORTEN_LINKS shortens long tracking links in a message read fr
     }
   }
 });
+
+test("the first call after Bridge drops the connection reconnects instead of failing", needsOpenssl, async () => {
+  await withBridge({}, async ({ service, bridge }) => {
+    await service.collectEmailsForIndex({ folder: "INBOX", limitPerFolder: 10 });
+    const logins = bridge.state.logins;
+    bridge.dropConnections();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const again = await service.collectEmailsForIndex({ folder: "INBOX", limitPerFolder: 10 });
+    assert.equal(again.emails.length, 3, "the first call after the drop succeeds");
+    assert.ok(bridge.state.logins > logins, "through a new login");
+  });
+});
+
+test("a NoConnection while taking the mailbox lock opens a new connection and takes the lock again", async () => {
+  const imap = { host: "127.0.0.1", port: 1, secure: false, username: "o@example.com", password: "x" };
+  const service = new SimpleIMAPService({ imap, smtp: { ...imap, port: 9 }, dataDir: "/tmp/fake-bridge-retry", debug: false, runtime });
+  const stale = { getMailboxLock: async () => { throw Object.assign(new Error("Connection not available"), { code: "NoConnection" }); } };
+  let released = 0;
+  const fresh = { getMailboxLock: async () => ({ release: () => { released += 1; } }) };
+  const clients = [stale, fresh];
+  service.ensureConnected = async () => clients.shift();
+  service.disconnect = async () => {};
+  const result = await service.withMailbox("INBOX", true, async (client) => (client === fresh ? "ok" : "stale client"));
+  assert.equal(result, "ok");
+  assert.equal(released, 1);
+  // Any other lock error is still reported.
+  service.ensureConnected = async () => ({ getMailboxLock: async () => { throw new Error("Mailbox does not exist"); } });
+  await assert.rejects(service.withMailbox("Nope", true, async () => "x"), /does not exist/);
+});

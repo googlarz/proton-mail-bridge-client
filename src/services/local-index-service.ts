@@ -3323,7 +3323,8 @@ export class LocalIndexService {
           indexedMessages,
           serverMessages,
           ...(serverMessages ? { percent: Math.min(100, Math.round((indexedMessages / serverMessages) * 100)) } : {}),
-          historyComplete: checkpoint.backfilledToUid !== undefined && checkpoint.backfilledToUid <= 1,
+          // A folder with no messages has nothing to walk back through.
+          historyComplete: checkpoint.strategy === "empty" || (checkpoint.backfilledToUid !== undefined && checkpoint.backfilledToUid <= 1),
         };
       }),
       folders: snapshot.indexedFolders,

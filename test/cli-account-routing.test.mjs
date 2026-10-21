@@ -170,6 +170,7 @@ test("report prints a masked diagnostic summary without secrets", async () => {
     assert.equal(parsed.accounts[0].account, "u***@example.com");
     assert.ok(parsed.version && parsed.node && parsed.platform);
     assert.doesNotMatch(result.stdout, /super-secret-password|user@example\.com/);
+    assert.ok("bridge" in parsed.accounts[0] && "secureInUse" in parsed.accounts[0].smtp, "Bridge info and the SMTP mode in use are reported");
   } finally {
     await Promise.all([primary.close(), rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })]);
   }

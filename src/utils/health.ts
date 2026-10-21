@@ -13,15 +13,18 @@ export function healthProblems(
   index: { isStale: boolean; storedMessageCount: number },
   now = Date.now(),
 ): HealthProblem[] {
-  if (!sync.enabled || sync.leader === false) return [];
+  if (!sync.enabled) return [];
   const problems: HealthProblem[] = [];
-  if (sync.lastFailureKind === "auth") {
+  // An instance without the sync lease does not run the sync, so it cannot say why the sync fails; the index check
+  // below still applies, because the index is shared.
+  const syncsHere = sync.leader !== false;
+  if (syncsHere && sync.lastFailureKind === "auth") {
     problems.push({
       code: "authentication_failed",
       message: "Background sync cannot log in to Bridge.",
       fix: "The Bridge password probably changed (for example after signing in to Bridge again). Copy the current one from the Bridge app into PROTONMAIL_PASSWORD.",
     });
-  } else if (sync.lastFailureKind === "transient") {
+  } else if (syncsHere && sync.lastFailureKind === "transient") {
     problems.push({
       code: "bridge_unreachable",
       message: `Background sync is failing: ${sync.lastFailureMessage ?? "Bridge did not answer"}.`,
@@ -29,7 +32,7 @@ export function healthProblems(
     });
   }
   const lastSuccess = sync.lastSuccessAt ? Date.parse(sync.lastSuccessAt) : Number.NaN;
-  if (sync.lastRunAt && Number.isFinite(lastSuccess) && now - lastSuccess > 3 * Math.max(1, sync.intervalMinutes) * 60_000 && !problems.length) {
+  if (syncsHere && sync.lastRunAt && Number.isFinite(lastSuccess) && now - lastSuccess > 3 * Math.max(1, sync.intervalMinutes) * 60_000 && !problems.length) {
     problems.push({
       code: "sync_stalled",
       message: "Background sync has not completed for a while.",

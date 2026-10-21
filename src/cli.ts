@@ -3,6 +3,7 @@
 import { execFile } from "node:child_process";
 import { accessSync, constants as fsConstants, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { homedir, release as osRelease } from "node:os";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -954,6 +955,18 @@ export function maskAddress(address: string): string {
   return at <= 0 ? "***" : `${address[0]}***${address.slice(at)}`;
 }
 
+// The runtime settings for a bug report: folder lists become a count, and the home directory is written as ~.
+export function reportRuntime(runtime: ProtonMailConfig["runtime"], home = homedir()): Record<string, unknown> {
+  const sanitized = sanitizeRuntimeConfig(runtime) as Record<string, unknown>;
+  const folders = typeof sanitized.autoSyncFolder === "string" ? sanitized.autoSyncFolder.split(",").filter((entry) => entry.trim()).length : undefined;
+  const download = typeof sanitized.allowFileDownloadDir === "string" ? sanitized.allowFileDownloadDir : undefined;
+  return {
+    ...sanitized,
+    autoSyncFolder: folders === undefined ? undefined : `${folders} folder${folders === 1 ? "" : "s"}`,
+    allowFileDownloadDir: download ? (home && download.startsWith(home) ? `~${download.slice(home.length)}` : download) : sanitized.allowFileDownloadDir,
+  };
+}
+
 async function runReport(): Promise<void> {
   await withServices(async ({ config, accountManager }) => {
     const accounts = await Promise.all(
@@ -976,10 +989,19 @@ async function runReport(): Promise<void> {
         return {
           account: maskAddress(bundle.account.address),
           imap: { host: bundle.config.imap.host, port: bundle.config.imap.port, secure: bundle.config.imap.secure, check: imap },
-          smtp: { host: bundle.config.smtp.host, port: bundle.config.smtp.port, secure: bundle.config.smtp.secure, userSet: bundle.config.smtp.secureExplicit === true, check: smtp },
+          smtp: {
+            host: bundle.config.smtp.host,
+            port: bundle.config.smtp.port,
+            configuredSecure: bundle.config.smtp.secure,
+            secureInUse: bundle.smtpService.effectiveSecure,
+            userSet: bundle.config.smtp.secureExplicit === true,
+            check: smtp,
+          },
+          bridge: bundle.imapService.getServerInfo(),
           folderCount,
           index: { storedMessageCount: index.storedMessageCount, updatedAt: index.updatedAt, isStale: index.isStale },
-          backgroundSync: { folder: bundle.backgroundSyncService.getStatus().folder, full: bundle.backgroundSyncService.getStatus().full },
+          // Folder names can be as private as an address: only how many are synced.
+          backgroundSync: { syncedFolderCount: bundle.imapService.getSyncFolderList().length, full: bundle.backgroundSyncService.getStatus().full },
         };
       }),
     );
@@ -988,9 +1010,9 @@ async function runReport(): Promise<void> {
       json({
         version: await getPkgVersion(),
         node: process.version,
-        platform: `${process.platform} ${process.arch}`,
+        platform: `${process.platform} ${process.arch} ${osRelease()}`,
         claudeDesktopInstalled: claudeDesktop.installed,
-        runtime: sanitizeRuntimeConfig(config.runtime),
+        runtime: reportRuntime(config.runtime),
         accounts,
       }),
     );

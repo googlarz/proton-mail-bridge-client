@@ -76,6 +76,9 @@ test("index status shows how much of each synced folder is indexed", async () =>
     });
     const status = await index.getStatus();
     assert.deepEqual(status.history, [{ folder: "INBOX", indexedMessages: 2, serverMessages: 8, percent: 25, historyComplete: false }]);
+    await index.recordSnapshot({ syncedAt: "2026-03-24T12:05:00.000Z", folders: [], emails: [], folderStats: [{ folder: "Empty", strategy: "empty", fetched: 0, total: 0, folderObservedEmpty: true }] });
+    const empty = (await index.getStatus()).history.find((entry) => entry.folder === "Empty");
+    assert.equal(empty.historyComplete, true, "a folder with no messages is complete");
   } finally {
     await index.close();
     await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

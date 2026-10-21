@@ -1891,7 +1891,8 @@ const TOOLS = [
       properties: {
         raw: { type: "string", description: "Full raw RFC822 message source (the .eml file content) as a UTF-8 string. Use rawBase64 instead for non-UTF-8 content. Exactly one of raw/rawBase64 is required." },
         rawBase64: { type: "string", description: "Full raw RFC822 message source (the .eml file content), base64-encoded, for byte-exact import of non-UTF-8 content. Exactly one of raw/rawBase64 is required." },
-        targetFolder: { type: "string", description: "Destination folder. Defaults to INBOX." },
+        targetFolder: { type: "string", description: "Destination folder. Defaults to INBOX. A '<slug>::' prefix (as get_folders shows it) selects the account, like the account argument." },
+        account: { type: "string", description: "Account address or slug to import into. Defaults to the primary account." },
         markAsRead: { type: "boolean", description: "Set the \\Seen flag on import.", default: false },
       },
     },
@@ -4772,7 +4773,7 @@ export function createServer(
     try {
       switch (name) {
         case "send_email": {
-          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Send email to ${String(args.to ?? "?")} — "${String(args.subject ?? "?")}"`);
+          ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Send email to ${String(args.to ?? "?")} — "${String(args.subject ?? "?")}"`);
           ensureSendAllowed(config.runtime);
           const to = parseEmails(requireString(args, "to"));
           const cc = parseEmails(optionalString(args, "cc"));
@@ -5041,7 +5042,7 @@ export function createServer(
         }
 
         case "reply_to_email": {
-          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Reply to email ${String(args.emailId ?? "?")}`);
+          ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Reply to email ${String(args.emailId ?? "?")}`);
           ensureSendAllowed(config.runtime);
           // The message being replied to might belong to a non-primary account (its
           // emailId carries that account's slug prefix) — resolve it the same way
@@ -5152,7 +5153,7 @@ export function createServer(
         }
 
         case "reply_all_email": {
-          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Reply-all to email ${String(args.emailId ?? "?")}`);
+          ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Reply-all to email ${String(args.emailId ?? "?")}`);
           ensureSendAllowed(config.runtime);
           // Same emailId account resolution as reply_to_email — see its comment.
           const { bundle: readBundleRa, rest: emailIdRaRest } = resolveAccountForEmailId(
@@ -5310,7 +5311,7 @@ export function createServer(
         }
 
         case "respond_to_invite": {
-          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Answer calendar invitation ${String(args.emailId ?? "?")}`);
+          ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Answer calendar invitation ${String(args.emailId ?? "?")}`);
           ensureSendAllowed(config.runtime);
           const { bundle: inviteBundle, rest: inviteEmailId } = resolveAccountForEmailId(requireString(args, "emailId"));
           const responseArg = requireString(args, "response");
@@ -5406,7 +5407,7 @@ export function createServer(
         }
 
         case "forward_email": {
-          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Forward email ${String(args.emailId ?? "?")} to ${String(args.to ?? "?")}`);
+          ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Forward email ${String(args.emailId ?? "?")} to ${String(args.to ?? "?")}`);
           ensureSendAllowed(config.runtime);
           // Same emailId account resolution as reply_to_email — see its comment.
           const { bundle: readBundleFwd, rest: emailIdFwdRest } = resolveAccountForEmailId(
@@ -6117,7 +6118,7 @@ export function createServer(
         }
 
         case "send_draft": {
-          ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Send draft ${String(args.draftId ?? "?")}`);
+          ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Send draft ${String(args.draftId ?? "?")}`);
           ensureSendAllowed(config.runtime);
           const { bundle: sendDraftBundle, rest: sendDraftIdRest } = resolveAccountForDraftId(
             requireString(args, "draftId"),
@@ -6931,7 +6932,7 @@ export function createServer(
 
         case "bulk_delete": {
           const permanent = normalizeBoolean(args.permanent, false);
-          if (permanent) ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), "Permanently delete multiple emails");
+          if (permanent) ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), "Permanently delete multiple emails");
           // Same distinction as delete_email/delete_thread: a non-permanent
           // bulk_delete only moves messages to Trash, so it's gated as
           // "trash" (which a policy may allow independently of "delete").
@@ -7230,7 +7231,7 @@ export function createServer(
 
         case "delete_thread": {
           const permanentThread = normalizeBoolean(args.permanent, false);
-          if (permanentThread) ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), "Permanently delete thread");
+          if (permanentThread) ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), "Permanently delete thread");
           // Same "trash" vs "delete" distinction as bulk_delete above.
           ensureEmailActionAllowed(config.runtime, permanentThread ? "delete" : "trash");
           // See move_thread's comment on scoping by the threadId's own
@@ -7435,7 +7436,11 @@ export function createServer(
                 },
               ]
             : [];
-          return createTextResult({ ...result, targetEmailId }, false, sources);
+          return createTextResult(
+            { ...result, emailId: prefixedIdFor(bundle, result.emailId), sourceEmailId: prefixedIdFor(bundle, result.sourceEmailId), targetEmailId },
+            false,
+            sources,
+          );
         }
 
         case "archive_email":
@@ -7669,7 +7674,7 @@ export function createServer(
           const action = requireEmailAction(args);
           ensureEmailActionAllowed(config.runtime, action);
           if (action === "delete") {
-            ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${emailIds.length} email(s) (cannot be recovered)`);
+            ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Permanently delete ${emailIds.length} email(s) (cannot be recovered)`);
           }
           // emailIds can span multiple configured accounts — group them so
           // each account's ids run against that account's own imapService
@@ -9062,7 +9067,7 @@ export function createServer(
           // processed in full with no size limit at all.
           ensureBulkBatchSize(emailIds.length, getBulkMaxBatchSize(args));
           if (action === "delete") {
-            ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Permanently delete ${emailIds.length} email(s) in thread (cannot be recovered)`);
+            ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Permanently delete ${emailIds.length} email(s) in thread (cannot be recovered)`);
           }
 
           const result = await withAudit(bundle.auditService, name, args, async () =>
@@ -9249,14 +9254,19 @@ export function createServer(
           const raw = rawBase64
             ? Buffer.from(rawBase64, "base64")
             : Buffer.from(rawText as string, "utf8");
-          const result = await withAudit(auditService, name, args, async () =>
-            imapService.importEmail({
+          const { bundle: importBundle, paths: [importFolder] } = resolveFolderTarget(args, optionalString(args, "targetFolder") ?? "INBOX");
+          const result = await withAudit(importBundle.auditService, name, args, async () =>
+            importBundle.imapService.importEmail({
               raw,
-              targetFolder: optionalString(args, "targetFolder"),
+              targetFolder: importFolder,
               flags: normalizeBoolean(args.markAsRead, false) ? ["\\Seen"] : [],
             }),
           );
-          return createTextResult(result);
+          return createTextResult({
+            ...result,
+            ...(result.emailId ? { emailId: prefixedIdFor(importBundle, result.emailId) } : {}),
+            ...(result.existingEmailId ? { existingEmailId: prefixedIdFor(importBundle, result.existingEmailId) } : {}),
+          });
         }
 
         case "save_attachments":
@@ -9337,13 +9347,15 @@ export function createServer(
       // with its own exit codes, which scripts rely on.
       const asProtocolError = process.env.PROTONMAIL_TOOL_ERRORS?.trim().toLowerCase() === "protocol";
       const failed = (message: string, code: ErrorCode = ErrorCode.InternalError): ToolResult => {
-        if (asProtocolError) throw new McpError(code, message);
+        // An McpError's own message already starts with "MCP error <code>:", and the client adds that prefix again to
+        // what it receives. A plain Error with a code is sent with the message as written.
+        if (asProtocolError) throw Object.assign(new Error(message), { code });
         return createTextResult(message, true);
       };
       if (error instanceof McpError) {
-        const message = error.message.replace(/^MCP error -?\d+: /, "");
+        const message = error.message.replace(/^(?:MCP error -?\d+: )+/, "");
         if (error.code === ErrorCode.InvalidParams && message.startsWith("Unknown tool")) {
-          throw error;
+          throw Object.assign(new Error(message), { code: error.code });
         }
         return failed(message, error.code);
       }

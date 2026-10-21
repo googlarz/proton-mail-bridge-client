@@ -10,6 +10,11 @@ test("a healthy or disabled sync reports no problem", () => {
   assert.deepEqual(healthProblems({ ...base, lastRunAt: "2026-10-18T11:58:00Z", lastSuccessAt: "2026-10-18T11:58:00Z" }, fresh, now), []);
   assert.deepEqual(healthProblems({ ...base, enabled: false, lastFailureKind: "auth" }, fresh, now), []);
   assert.deepEqual(healthProblems({ ...base, leader: false, lastFailureKind: "auth" }, fresh, now), [], "another instance runs the sync");
+  assert.equal(
+    healthProblems({ ...base, leader: false }, { isStale: true, storedMessageCount: 3 }, now)[0].code,
+    "index_stale",
+    "the shared index is still checked on an instance that does not run the sync",
+  );
 });
 
 test("each failure is named with what to do about it", () => {

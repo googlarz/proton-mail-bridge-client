@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { mkdir, open, stat, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ImapFlow, type FetchMessageObject, type ListResponse, type SearchObject } from "imapflow";
 import { simpleParser, type ParsedMail } from "mailparser";
 import type {
@@ -73,6 +73,18 @@ const FETCH_DETAIL_QUERY = {
 // Non-enumerable, so the (large) sweep never shows up in a tool's JSON output or in a persisted checkpoint.
 function attachFlagSweep(checkpoint: MailboxSyncCheckpoint, sweep: MailboxSyncCheckpoint["flagSweep"]): void {
   if (sweep) Object.defineProperty(checkpoint, "flagSweep", { value: sweep, enumerable: false });
+}
+
+// A folder name inside an id may already be percent-encoded, and encoding the whole id again gave names like
+// "Folders%252FNews%252F...". Decode once, then make the characters a file system dislikes safe.
+export function attachmentDirName(emailId: string): string {
+  let decoded = emailId;
+  try {
+    decoded = decodeURIComponent(emailId);
+  } catch {
+    // not percent-encoded
+  }
+  return decoded.replace(/[\\/:*?"<>|\s]+/g, "_").replace(/^_+|_+$/g, "") || "message";
 }
 
 const FLAG_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
@@ -964,6 +976,18 @@ export class SimpleIMAPService {
   async ping(): Promise<void> {
     const client = await this.ensureConnected();
     await client.noop();
+  }
+
+  // What Bridge announces about itself (its greeting and ID answer), for bug reports. Empty before a connection.
+  getServerInfo(): { greeting?: string; version?: string; os?: string; name?: string } {
+    const client = this.client as unknown as { greeting?: unknown; serverInfo?: Record<string, unknown> | null } | undefined;
+    const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim().slice(0, 120) : undefined);
+    return {
+      greeting: text(client?.greeting),
+      version: text(client?.serverInfo?.version),
+      os: text(client?.serverInfo?.os),
+      name: text(client?.serverInfo?.name),
+    };
   }
 
   // PROTONMAIL_SHORTEN_LINKS (off by default): long tracking links in the Markdown body become host/…
@@ -1963,7 +1987,7 @@ export class SimpleIMAPService {
       let targetPath: string | undefined;
       if (input.outputPath && attachment.filename) {
         const sanitized = sanitizeFileName(attachment.filename, attachmentId);
-        const base = join(resolve(input.outputPath), sanitized);
+        const base = join(resolve(this.resolveOutputPath(input.outputPath)), sanitized);
         // Deduplicate: if path already used, append numeric suffix (image.png → image (1).png)
         if (!usedPaths.has(base.toLowerCase())) {
           targetPath = base;
@@ -1973,14 +1997,14 @@ export class SimpleIMAPService {
           let counter = 1;
           let candidate: string;
           do {
-            candidate = join(resolve(input.outputPath), `${stem} (${counter})${ext}`);
+            candidate = join(resolve(this.resolveOutputPath(input.outputPath)), `${stem} (${counter})${ext}`);
             counter++;
           } while (usedPaths.has(candidate.toLowerCase()));
           targetPath = candidate;
         }
         usedPaths.add(targetPath.toLowerCase());
       } else {
-        targetPath = input.outputPath;
+        targetPath = input.outputPath ? this.resolveOutputPath(input.outputPath) : input.outputPath;
       }
 
       // One attachment that cannot be written must not lose the ones already saved or still to come.
@@ -3991,13 +4015,23 @@ export class SimpleIMAPService {
     action: (client: ImapFlow) => Promise<T>,
   ): Promise<T> {
     await this._throttle(this.opDelayMs);
-    const client = await this.ensureConnected();
+    let client = await this.ensureConnected();
     // Announce that we are waiting so the IDLE watcher yields the lock instead of
     // holding it for its whole idle period (see IDLE_YIELD_* above).
     this._pendingMailboxOps += 1;
     let lock;
     try {
-      lock = await client.getMailboxLock(folder, { readOnly });
+      try {
+        lock = await client.getMailboxLock(folder, { readOnly });
+      } catch (error) {
+        // Bridge closes a connection whose selected folder another client deletes, and the client only finds out
+        // when the next command fails with NoConnection. Nothing has been sent yet, so open a new connection and
+        // take the lock once more instead of failing this call and succeeding on the one after.
+        if ((error as { code?: string } | undefined)?.code !== "NoConnection") throw error;
+        await this.disconnect().catch(() => {});
+        client = await this.ensureConnected();
+        lock = await client.getMailboxLock(folder, { readOnly });
+      }
     } finally {
       this._pendingMailboxOps -= 1;
     }
@@ -4771,6 +4805,13 @@ export class SimpleIMAPService {
   // Where a save with no path given goes. Attachments are only meant to be written into the configured
   // download directory (PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR); the server's private data directory is only the
   // fallback when none is configured.
+  // A relative outputPath is relative to the download directory (as saveTo is), not to wherever the server happens to
+  // run; the guard below would refuse most of those anyway.
+  private resolveOutputPath(outputPath: string): string {
+    const allowed = this.config.runtime?.allowFileDownloadDir?.trim();
+    return allowed && !isAbsolute(outputPath) ? join(resolve(allowed), outputPath) : outputPath;
+  }
+
   private defaultAttachmentDir(): string {
     const allowed = this.config.runtime?.allowFileDownloadDir;
     return allowed ? resolve(allowed) : join(this.config.dataDir, "attachments");
@@ -4804,7 +4845,7 @@ export class SimpleIMAPService {
         this.identityChecked = true;
       }
       const filename = sanitizeFileName(attachment.filename, attachment.id || "attachment");
-      const dirPath = join(this.defaultAttachmentDir(), encodeURIComponent(emailId));
+      const dirPath = join(this.defaultAttachmentDir(), attachmentDirName(emailId));
       // 0o700/0o600: this writes the user's own private email content — restrict
       // it to the owner regardless of the destination directory's own permissions.
       await mkdir(dirPath, { recursive: true, mode: 0o700 });
@@ -4920,12 +4961,12 @@ export class SimpleIMAPService {
   ): Promise<string> {
     const filename = sanitizeFileName(attachment.filename, attachment.id || "attachment");
     if (!outputPath) {
-      return join(this.defaultAttachmentDir(), encodeURIComponent(emailId), filename);
+      return join(this.defaultAttachmentDir(), attachmentDirName(emailId), filename);
     }
 
     // Whether a directory was meant has to be read from the string as given: resolve() strips a trailing slash.
     const wantsDirectory = /[\\/]$/.test(outputPath);
-    const resolved = resolve(outputPath);
+    const resolved = resolve(this.resolveOutputPath(outputPath));
     try {
       const existing = await stat(resolved);
       if (existing.isDirectory()) {

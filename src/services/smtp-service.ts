@@ -156,6 +156,12 @@ export class SMTPService {
   private transporter?: Transporter;
   // Implicit TLS unless told otherwise; see withTlsFallback.
   private secure: boolean;
+
+  /** The TLS mode in use: the configured one, or the other after a detected mismatch. */
+  get effectiveSecure(): boolean {
+    return this.secure;
+  }
+
   private mayDetectTlsMode: boolean;
 
   constructor(private readonly config: ProtonMailConfig) {

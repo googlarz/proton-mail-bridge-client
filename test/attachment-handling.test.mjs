@@ -300,3 +300,21 @@ test("saveTo with a trailing slash saves into that folder under the attachment's
     });
   });
 });
+
+test("a relative outputPath is relative to the download directory, and the default folder name is not encoded twice", async () => {
+  await withDirs(async ({ downloads }) => {
+    const svc = service(downloads);
+    withAttachments(svc, [att("a.txt", "hello")]);
+    const viaRelative = await svc.saveAttachments({ emailId: "INBOX::1::x", outputPath: "sub/dir/" });
+    assert.equal(await readFile(join(downloads, "sub", "dir", "a.txt"), "utf8"), "hello");
+    assert.ok(viaRelative.saved[0].outputPath.startsWith(join(downloads, "sub")) || viaRelative.saved[0].outputPath.includes("sub"));
+
+    withAttachments(svc, [att("b.txt", "world")]);
+    const alreadyEncoded = await svc.saveAttachments({ emailId: "Folders%2FNews::116870800::51::d673a4f9" });
+    const folder = alreadyEncoded.saved[0].outputPath.split(/[\\/]/).at(-2);
+    assert.equal(folder, "Folders_News_116870800_51_d673a4f9");
+    withAttachments(svc, [att("c.txt", "again")]);
+    const plain = await svc.saveAttachments({ emailId: "Folders/News::116870800::51::d673a4f9" });
+    assert.equal(plain.saved[0].outputPath.split(/[\\/]/).at(-2), "Folders_News_116870800_51_d673a4f9", "the same folder for the same message");
+  });
+});
