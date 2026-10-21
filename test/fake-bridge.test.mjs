@@ -264,3 +264,14 @@ test("moving, importing, deleting and flagging reach the server and give back us
     assert.equal(folders.Sent.messages.filter((m) => m.messageId === "<imp1@x>").length, 1);
   });
 });
+
+test("reading opens a folder read-only (EXAMINE), and only a change opens it read-write (SELECT)", needsOpenssl, async () => {
+  await withBridge({}, async ({ service, bridge }) => {
+    const snapshot = await service.collectEmailsForIndex({ folder: "INBOX", limitPerFolder: 10 });
+    await service.getEmailById(snapshot.emails[0].id);
+    const reading = bridge.state.commands.filter((c) => /^(SELECT|EXAMINE)\b/.test(c));
+    assert.ok(reading.length > 0 && reading.every((c) => c.startsWith("EXAMINE")), `reads must not select read-write: ${reading.join(" | ")}`);
+    await service.markEmailRead(snapshot.emails[0].id, true);
+    assert.ok(bridge.state.commands.some((c) => c.startsWith("SELECT")), "a flag change opens the folder read-write");
+  });
+});
