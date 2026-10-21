@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.13.1] — 2026-10-21
+
 From zotabee's testing of 2.13.0 (#52–#57):
 
 - **`PROTONMAIL_SHORTEN_LINKS` now works** (#52). It only matched Markdown links, but a message body is mailparser's text, where links read `text [url]` or are bare addresses. Both are shortened now; unsubscribe, confirm and similar links are still kept.
