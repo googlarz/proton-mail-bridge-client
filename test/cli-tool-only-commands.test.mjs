@@ -33,7 +33,7 @@ test("TOOL_ONLY_COMMANDS never shadows a hand-written command", () => {
 });
 
 test("every TOOL_ONLY_COMMANDS entry references a real MCP tool name", async () => {
-  const srcPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
+  const srcPath = fileURLToPath(new URL("../src/tools/definitions.ts", import.meta.url));
   const source = await readFile(srcPath, "utf8");
   const realToolNames = new Set([...source.matchAll(/^\s*name:\s*"([a-z_0-9]+)",$/gm)].map((m) => m[1]));
 
@@ -51,7 +51,7 @@ test("every TOOL_ONLY_COMMANDS entry has a non-empty help string", () => {
 // least appear in the CLI source — either as a TOOL_ONLY_COMMANDS entry or in one of the
 // hand-written commands' callTool/handler — so a new tool with no CLI path fails here.
 test("every MCP tool is reachable from the CLI", async () => {
-  const indexSource = await readFile(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
+  const indexSource = await readFile(fileURLToPath(new URL("../src/tools/definitions.ts", import.meta.url)), "utf8");
   const cliSource = await readFile(fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "utf8");
   const realToolNames = [...new Set([...indexSource.matchAll(/^\s*name:\s*"([a-z_0-9]+)",$/gm)].map((m) => m[1]))];
   assert.ok(realToolNames.length >= 90, "found the tool list");

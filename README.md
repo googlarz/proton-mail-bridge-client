@@ -304,6 +304,8 @@ docker run -i --rm --network host \
 
 ## Autoresponder (automatic reply per address)
 
+**Proton Mail has its own auto-reply** (Settings → Filters / Forward and auto-reply; Proton lists it on its paid plans). If that fits, use it and leave this one off: it runs inside Proton, not inside this server, and enabling both would send each sender two replies. This one exists for what Claude can do around it, such as setting the text and dates from a chat, or a note on outgoing mail.
+
 An automatic reply for one address, plus a note that address appends to what it sends. **Off by default**, and it sends mail without asking each time, so it is held to stricter rules than a normal send:
 
 - It runs after a background sync has indexed new mail, so it works only while this server is running with background sync on (`PROTONMAIL_AUTO_SYNC`), and only when `PROTONMAIL_MODE` / `PROTONMAIL_ALLOW_SEND` let this server send and `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF` is off. With several clients open, the instance that holds the sync lock does it.
