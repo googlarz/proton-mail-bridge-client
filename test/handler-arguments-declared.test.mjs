@@ -10,7 +10,15 @@ import { createUnconfiguredServer } from "../dist/index.js";
 // argument its schema leaves out. This reads the handler source (a static scan, so it cannot see a read hidden
 // behind a helper, which is why the helpers that read `account` and `undoWindowSeconds` are listed below).
 
-const source = readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
+import { readdirSync } from "node:fs";
+
+const read = (relative) => readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
+const source = read("../src/index.ts");
+// Handlers moved out of createServer() live in src/tools/*.ts (a switch over their tool names, cases indented by 4).
+const handlerFiles = readdirSync(fileURLToPath(new URL("../src/tools/", import.meta.url))).filter((file) => /^handle|^[a-z-]+\.ts$/.test(file));
+const handlerSources = handlerFiles
+  .map((file) => read(`../src/tools/${file}`))
+  .filter((text) => /export async function handle\w+Tool\(/.test(text));
 const HELPER_READS = [
   [/resolveAccountArg\(args\)/, "account"],
   [/resolveUndoWindowSeconds\(args\)/, "undoWindowSeconds"],
@@ -26,12 +34,17 @@ test("no tool handler reads an argument that its schema does not declare", async
   await server.close();
 
   const body = source.slice(source.indexOf("withIgnoredArgumentsNote(async (request) => {"));
-  const cases = [...body.matchAll(/\n {8}case "([a-z_]+)":/g)];
-  assert.ok(cases.length >= 90, `found only ${cases.length} cases`);
+  // Every case with the text of its handler: those still in createServer() (indent 8) and those moved out (indent 4).
+  const segments = [];
+  for (const [text, indent] of [[body, 8], ...handlerSources.map((text) => [text, 4])]) {
+    const found = [...text.matchAll(new RegExp(`\\n {${indent}}case "([a-z_]+)":`, "g"))];
+    for (let i = 0; i < found.length; i += 1) {
+      segments.push({ name: found[i][1], segment: text.slice(found[i].index, (found[i + 1] ?? { index: text.length }).index) });
+    }
+  }
+  assert.ok(segments.length >= 90, `found only ${segments.length} cases`);
   const problems = [];
-  for (let i = 0; i < cases.length; i += 1) {
-    const name = cases[i][1];
-    const segment = body.slice(cases[i].index, (cases[i + 1] ?? { index: body.length }).index);
+  for (const { name, segment } of segments) {
     const tool = tools.find((candidate) => candidate.name === name);
     if (!tool) continue;
     const declared = new Set(Object.keys(tool.inputSchema.properties ?? {}));
