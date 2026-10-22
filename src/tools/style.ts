@@ -14,6 +14,7 @@ import type { ToolResult } from "./results.js";
 // machine, cached for a week in style-profile.json (patterns and counts only, no sentences, no names).
 
 const MAX_AGE_MS = 7 * 86_400_000;
+const FETCH_BATCH = 6;
 
 async function readCached(path: string): Promise<StyleProfile | undefined> {
   try {
@@ -25,6 +26,29 @@ async function readCached(path: string): Promise<StyleProfile | undefined> {
   }
 }
 
+// A profile being built, per file: reading sent mail from Bridge can take longer than a client waits for one answer, so
+// the build continues in the background and the next call picks up the result.
+const building = new Map<string, Promise<StyleProfile>>();
+const DEFAULT_WAIT_SECONDS = 25;
+
+async function buildAndStore(bundle: ToolContext["primaryBundle"], path: string, limit: number): Promise<StyleProfile> {
+  await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, { force: false, folder: "INBOX", limitPerFolder: 100 });
+  const found = await bundle.localIndexService.search({ folder: "Sent", limit });
+  const samples: SentSample[] = [];
+  for (let start = 0; start < found.emails.length; start += FETCH_BATCH) {
+    const batch = found.emails.slice(start, start + FETCH_BATCH);
+    const details = await Promise.all(batch.map((email) => bundle.imapService.getEmailById(email.id).catch(() => undefined)));
+    details.forEach((detail, index) => {
+      const email = batch[index];
+      if (detail?.text && email.to.length > 0) samples.push({ to: email.to.flatMap((entry) => (entry.address ? [entry.address] : [])), text: detail.text });
+    });
+  }
+  const profile = buildProfile(samples);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFileAtomic(path, JSON.stringify(profile, null, 2));
+  return profile;
+}
+
 export async function handleStyleTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   if (name !== "get_style_profile") throw new Error(`Unknown style tool: ${name}`);
   const bundle = ctx.resolveAccountArg(args) ?? ctx.primaryBundle;
@@ -34,17 +58,29 @@ export async function handleStyleTool(name: string, args: Record<string, unknown
   if (profile && Date.now() - Date.parse(profile.generatedAt) > MAX_AGE_MS) profile = undefined;
   let rebuilt = false;
   if (!profile) {
-    const limit = normalizeLimit(args.limit, 60, 10, 150);
-    await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, { force: false, folder: "INBOX", limitPerFolder: 100 });
-    const found = await bundle.localIndexService.search({ folder: "Sent", limit });
-    const samples: SentSample[] = [];
-    for (const email of found.emails) {
-      const detail = await bundle.imapService.getEmailById(email.id).catch(() => undefined);
-      if (detail?.text && email.to.length > 0) samples.push({ to: email.to.flatMap((entry) => (entry.address ? [entry.address] : [])), text: detail.text });
+    const waitSeconds = normalizeLimit(args.waitSeconds, DEFAULT_WAIT_SECONDS, 1, 280);
+    let job = building.get(path);
+    if (!job) {
+      job = buildAndStore(bundle, path, normalizeLimit(args.limit, 40, 10, 150)).finally(() => building.delete(path));
+      building.set(path, job);
+      job.catch(() => undefined);
     }
-    profile = buildProfile(samples);
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    await writeFileAtomic(path, JSON.stringify(profile, null, 2));
+    let timer: NodeJS.Timeout | undefined;
+    const ready = await Promise.race([
+      job,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), waitSeconds * 1000);
+        timer.unref();
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (!ready) {
+      return createTextResult({
+        account: bundle.account.address,
+        building: true,
+        note: "Still reading sent mail to learn the style; this runs in the background. Ask again in a minute.",
+      });
+    }
+    profile = ready;
     rebuilt = true;
   }
   const hints = styleHints(profile, recipient);

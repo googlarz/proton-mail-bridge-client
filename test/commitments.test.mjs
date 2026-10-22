@@ -37,6 +37,17 @@ test("promises are found, ordinary sentences and quoted text are not", () => {
   ]);
 });
 
+test("named months, hard-wrapped lines and the word 'well' behave", () => {
+  assert.equal(parseDue("I will send you my comments by 16 October 2026, as agreed.", WEDNESDAY), "2026-10-16");
+  assert.equal(parseDue("do 5 listopada", WEDNESDAY), "2026-11-05");
+  assert.equal(parseDue("bis 3. Dezember", WEDNESDAY), "2026-12-03");
+  assert.equal(parseDue("by October 30th", WEDNESDAY), "2026-10-30");
+  assert.equal(parseDue("I may stay", WEDNESDAY), undefined, "'may' alone is not a month without a day");
+  assert.deepEqual(extractCommitments("It went well and we need to adjust ours as well.", WEDNESDAY), [], "'well' is not we'll");
+  const wrapped = extractCommitments("We'll check the dates and\nsend the new plan by Friday.\n", WEDNESDAY);
+  assert.deepEqual(wrapped.map((c) => [c.sentence, c.due]), [["We'll check the dates and send the new plan by Friday.", "2026-10-23"]]);
+});
+
 test("the ledger adds, does not duplicate, and closes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ledger-"));
   try {

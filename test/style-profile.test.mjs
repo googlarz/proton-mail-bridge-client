@@ -36,7 +36,7 @@ test("hints follow the recipient: a company's habits, a person's, or the overall
   assert.match(forPat.join(" "), /Dzień dobry \{name\},/);
   assert.match(forPat.join(" "), /Tone is formal/);
   const forUnknown = styleHints(profile, "new@elsewhere.example");
-  assert.match(forUnknown[0], /in general/);
+  assert.match(forUnknown[0], /You mostly write in Polish/);
   assert.deepEqual(styleHints(buildProfile([])), []);
 });
 

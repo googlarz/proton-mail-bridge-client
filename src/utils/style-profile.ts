@@ -140,7 +140,8 @@ export function styleHints(profile: StyleProfile, recipient?: string): string[] 
   const summary = (address && profile.byRecipient[address]) || (address && profile.byDomain[domainOf(address)]) || profile.overall;
   const scope = summary === profile.overall ? "in general" : address && profile.byRecipient[address] ? `to ${address}` : `to ${domainOf(address ?? "")}`;
   const lines: string[] = [];
-  if (summary.languages[0]) lines.push(`You write ${scope} in ${{ en: "English", pl: "Polish", de: "German" }[summary.languages[0].text] ?? summary.languages[0].text}.`);
+  const language = summary.languages[0] ? ({ en: "English", pl: "Polish", de: "German" }[summary.languages[0].text] ?? summary.languages[0].text) : undefined;
+  if (language) lines.push(summary === profile.overall ? `You mostly write in ${language}.` : `You write ${scope} in ${language}.`);
   if (summary.greetings[0]) lines.push(`You open with "${summary.greetings[0].text}".`);
   if (summary.closings[0]) lines.push(`You close with "${summary.closings[0].text}".`);
   if (summary.formality !== "unknown") lines.push(`Tone is ${summary.formality}.`);

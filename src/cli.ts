@@ -2302,8 +2302,12 @@ async function runToolOnlyCommand(entry: ToolOnlyCommand, parsed: ParsedCliArgs)
     throw new Error(`${entry.command} requires --file <path>, or ${requiredFileField} via --args.`);
   }
 
+  // Reading sent mail for the style profile is slow on a large mailbox and a command line has nothing to run it in the
+  // background, so it waits for the whole build.
+  const slow = entry.tool === "get_style_profile";
+  if (slow && args.waitSeconds === undefined) args.waitSeconds = 280;
   await withMcpClient(async (client) => {
-    const result = await client.callTool({ name: entry.tool, arguments: args });
+    const result = await client.callTool({ name: entry.tool, arguments: args }, undefined, slow ? { timeout: 290_000 } : undefined);
     printToolCallResult(result as Record<string, unknown>, wantJson);
   });
 }

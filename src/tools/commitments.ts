@@ -1,5 +1,6 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { AccountBundle } from "../services/account-manager.js";
+import type { EmailSummary } from "../types/index.js";
 import type { Commitment } from "../services/commitment-service.js";
 import { extractCommitments } from "../utils/commitment-phrases.js";
 import { normalizeLimit } from "../utils/helpers.js";
@@ -15,6 +16,7 @@ import type { ToolResult } from "./results.js";
 // assistant confirms which are real. Listing says which open ones are overdue, and which probably settled because the
 // thread moved on.
 
+const FETCH_BATCH = 6;
 const todayUtc = (now: Date) => now.toISOString().slice(0, 10);
 
 export async function evaluateCommitments(bundle: AccountBundle, own: string[], status: "open" | "done" | "dismissed" | "all", idFor: (id: string) => string) {
@@ -58,7 +60,7 @@ export async function handleCommitmentTool(name: string, args: Record<string, un
   switch (name) {
     case "find_commitments": {
       const days = normalizeLimit(args.days, 7, 1, 60);
-      const limit = normalizeLimit(args.limit, 30, 1, 100);
+      const limit = normalizeLimit(args.limit, 10, 1, 100);
       const direction = args.direction === "mine" || args.direction === "theirs" ? args.direction : "both";
       await maybeRefreshLocalIndex(bundle.imapService, bundle.localIndexService, { force: false, folder: "INBOX", limitPerFolder: 100 });
       const now = new Date();
@@ -67,29 +69,38 @@ export async function handleCommitmentTool(name: string, args: Record<string, un
       const sources: Array<{ folder: string; direction: "mine" | "theirs" }> = [];
       if (direction !== "theirs") sources.push({ folder: "Sent", direction: "mine" });
       if (direction !== "mine") sources.push({ folder: "INBOX", direction: "theirs" });
-      const candidates: Array<Record<string, unknown>> = [];
-      let looked = 0;
+      // Which messages to read: the newest of each source, up to `limit` in all, none already in the ledger.
+      const toRead: Array<{ email: EmailSummary; direction: "mine" | "theirs" }> = [];
       for (const source of sources) {
         const found = await bundle.localIndexService.search({ folder: source.folder, dateFrom, limit: limit * 2 });
         for (const email of found.emails) {
-          if (looked >= limit) break;
+          if (toRead.length >= limit) break;
           if (source.direction === "theirs" && email.isAutomated === true) continue;
           if (email.messageId && known.has(email.messageId)) continue;
-          looked += 1;
-          const detail = await bundle.imapService.getEmailById(email.id).catch(() => undefined);
-          if (!detail?.text) continue;
+          toRead.push({ email, direction: source.direction });
+        }
+      }
+      const looked = toRead.length;
+      const candidates: Array<Record<string, unknown>> = [];
+      // A few at a time: each message is a round trip to Bridge, and one after the other they outlast a client's timeout.
+      for (let start = 0; start < toRead.length; start += FETCH_BATCH) {
+        const batch = toRead.slice(start, start + FETCH_BATCH);
+        const details = await Promise.all(batch.map(({ email }) => bundle.imapService.getEmailById(email.id).catch(() => undefined)));
+        details.forEach((detail, index) => {
+          const { email, direction: side } = batch[index];
+          if (!detail?.text) return;
           for (const hit of extractCommitments(detail.text, now)) {
             candidates.push({
               emailId: prefixedIdFor(bundle, email.id),
               messageId: email.messageId,
-              direction: source.direction,
-              with: (source.direction === "mine" ? email.to[0]?.address : email.from[0]?.address) ?? "",
+              direction: side,
+              with: (side === "mine" ? email.to[0]?.address : email.from[0]?.address) ?? "",
               subject: email.subject,
               sentence: hit.sentence,
               ...(hit.due ? { due: hit.due } : {}),
             });
           }
-        }
+        });
       }
       return createTextResult({
         account: bundle.account.address,
