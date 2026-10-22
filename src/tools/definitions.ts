@@ -909,6 +909,53 @@ export const TOOLS = [
     },
   },
   {
+    name: "plan_inbox",
+    description: "Prepare a batch of mailbox changes to be approved at once, without changing anything. The batch comes from items you give (emailId + action archive | move | mark_read | label, with target for move/label and a short reason) and, unless scan is false, from a scan of the INBOX for automatic mail nobody reads (unread for minAgeDays, or read and over 14 days old) outside senders the user already declined. Returns a numbered list and a planId. Show it to the user, then approve_plan (all, a subset, or all but some). Never contains delete or trash. Use for 'tidy my inbox'.",
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account; one plan covers one account." },
+        items: {
+          type: "array",
+          description: "Changes you propose: [{emailId, action, target?, reason?}]. action is archive, move, mark_read or label; move needs target = folder path, label needs target = label name.",
+          items: { type: "object" },
+        },
+        scan: { type: "boolean", description: "Also add automatic mail nobody reads from the INBOX (default true)." },
+        limit: { type: "integer", description: "At most this many scanned items (1-200, default 30).", minimum: 1, maximum: 200 },
+        minAgeDays: { type: "integer", description: "Unread automatic mail must be at least this many days old to be proposed (default 3).", minimum: 0, maximum: 365 },
+      },
+    },
+  },
+  {
+    name: "approve_plan",
+    description: "Apply a plan made by plan_inbox: all of it, only the numbers in items, or everything except those in exclude. Each change is done under the same runtime policy as the single tools (an item the policy forbids is skipped and reported) and recorded so undo_plan can put it back. Scanned items you leave out teach the scan not to propose that sender again. A plan can be approved once.",
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        planId: { type: "string", description: "The planId from plan_inbox." },
+        account: { type: "string", description: "Address or slug of the account the plan was made for." },
+        items: { type: "array", description: "Apply only these item numbers.", items: { type: "integer" } },
+        exclude: { type: "array", description: "Apply everything except these item numbers.", items: { type: "integer" } },
+      },
+      required: ["planId"],
+    },
+  },
+  {
+    name: "undo_plan",
+    description: "Put back what approve_plan changed: moved and archived mail returns to its folder, marked-read mail becomes unread, added labels are removed. Items that cannot be put back (the message was moved or deleted since) are reported.",
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        planId: { type: "string", description: "The planId of an approved plan." },
+        account: { type: "string", description: "Address or slug of the account the plan was made for." },
+      },
+      required: ["planId"],
+    },
+  },
+  {
     name: "get_autoresponder",
     description: "Show the automatic reply of one address: the rule, whether it is active now, what this server can do for it (send, draft; background sync running), counts and who wrote while it was on (replied, drafted, skipped and why), and the latest entries of its log.",
     annotations: { readOnlyHint: true },

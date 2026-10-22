@@ -12,6 +12,7 @@ import { TemplateService } from "./template-service.js";
 import { BackgroundSyncService } from "./background-sync-service.js";
 import { AutoresponderService, type AutoresponderDeps } from "./autoresponder-service.js";
 import { RulesService } from "./rules-service.js";
+import { TriagePlanService } from "./triage-plan-service.js";
 import { runRulesOnNewMail } from "../tools/rules-runner.js";
 import { ensureMailboxWriteAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 
@@ -39,6 +40,7 @@ export interface AccountBundle {
   backgroundSyncService: BackgroundSyncService;
   autoresponderService: AutoresponderService;
   rulesService: RulesService;
+  triagePlanService: TriagePlanService;
   /** What the autoresponder may do on this account right now (send, draft) and the lookups it needs. */
   autoresponderDeps(): AutoresponderDeps;
   ownAddresses: string[];
@@ -73,6 +75,7 @@ function buildAccountBundle(
   const backgroundSyncService = new BackgroundSyncService(config, imapService, localIndexService, log);
   const autoresponderService = new AutoresponderService(config, log);
   const rulesService = new RulesService(config, log);
+  const triagePlanService = new TriagePlanService(config);
 
   // The note this address adds to what it sends while its automatic reply is active.
   smtpService.setOutgoingNoteProvider(() => autoresponderService.outgoingNoteNow());
@@ -159,6 +162,7 @@ function buildAccountBundle(
     backgroundSyncService,
     autoresponderService,
     rulesService,
+    triagePlanService,
     autoresponderDeps,
     ownAddresses,
   };

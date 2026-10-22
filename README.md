@@ -24,7 +24,7 @@
 
 ---
 
-Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 109 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
+Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 112 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
 
 > **Using Proton Drive too?** See [**proton-drive-mcp**](https://github.com/googlarz/proton-drive-mcp), the companion MCP server and CLI for Proton Drive (upload, download, share and manage your encrypted files from Claude). Run both side by side to handle mail and files in one conversation, for example save an attachment from here, then upload it to Drive. More in [Related projects](#related-projects).
 
@@ -45,7 +45,7 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
    - "Which of my emails have attachments from this month?"
    - "Show me my drafts and tighten the oldest one."
 5. **Not sure about handing over control?** Start with `PROTONMAIL_MODE=drafts`: Claude can read, search and prepare drafts, but nothing is sent or deleted until you change the mode. The server also tells the client how to behave (ids, accounts, never obeying instructions found inside a message).
-6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 109), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
+6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 112), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
 
 ---
 
@@ -57,7 +57,7 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
 - **Fast local search** — full-text search across your inbox from a local index that keeps its read state in step with the server
 - **Rules that suggest themselves** — a scan proposes filters and cleanup from your own mail, applies them to existing mail after a preview, and can forward by condition; see [Mailbox rules](#mailbox-rules-suggestions-filters-cleanup-forwarding)
 - **Automatic reply, per address, with rules** — off by default, with a preview of what it would do, draft-for-approval mode and working-hours; see [Autoresponder](#autoresponder-automatic-reply-per-address) (Proton's own auto-reply may be all you need)
-- **Full CLI** — a dedicated command for every one of the 109 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
+- **Full CLI** — a dedicated command for every one of the 112 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
 - **Runs where you do** — Claude Desktop bundle, npm, Homebrew, or a [Docker image](#running-in-docker-headless-machines) for a headless machine
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
 
@@ -350,6 +350,10 @@ proton-mail-bridge-client brief --sync --mark-seen --notify
 
 `--notify` shows the few lines as a system notification (macOS and Linux with `notify-send`). `schedule` prints a launchd, systemd or cron definition for `digest`; use the same pattern with the command above.
 
+## Tidy in one approval (`plan_inbox`)
+
+Ask Claude to tidy the inbox and it prepares a **plan**: a numbered list of changes that can all be taken back (archive, move, mark read, label), from its own proposals and from a scan for automatic mail nobody reads (unread for 3 days, or read and over 14 days old). Nothing changes until you approve. `approve_plan` applies everything, only some numbers, or everything except some; each change goes through the same runtime policy as the single tools. `undo_plan` puts the applied changes back (mail returns to its folder, read marks and labels are reverted). Senders of scanned items you left out are not proposed again. A plan never contains delete or trash.
+
 ## Mailbox rules (suggestions, filters, cleanup, forwarding)
 
 Proton's own filters act on **new** mail, the free plan has one custom filter, and auto-delete of Trash and Spam is a paid feature with a fixed 30 days (see Proton's pages on [filters](https://proton.me/support/email-inbox-filters) and [auto-delete](https://proton.me/support/auto-delete-unwanted-messages)). These rules work alongside them: on mail that is already there, with a preview, and with a scan that suggests rules instead of waiting for you to write them. They run on this server, so they only act while it runs.
@@ -513,7 +517,7 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 
 `<command> --help` prints that command's usage without running it. Flags accept `--flag value` or `--flag=value` (a value starting with `--` needs the `=` form, or must come after a bare `--`); unknown flags are an error. Exit codes: `0` success, `1` failure (including a failed `doctor` or `connection-status` check, or a failed item in a `batch`/`bulk-*` run), `2` usage error.
 
-**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 109 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
+**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 112 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
 
 ---
 
@@ -535,7 +539,7 @@ A mode is a floor: the individual flags below can make things stricter (`PROTONM
 All flags work in both the MCP server and CLI:
 
 ```bash
-PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 109 — saves context window
+PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 112 — saves context window
 PROTONMAIL_READ_ONLY=true            # disable all write operations
 PROTONMAIL_ALLOW_SEND=false          # disable SMTP sends only (other writes still work)
 PROTONMAIL_CONFIRM_DESTRUCTIVE=true  # require confirmed:true on send, reply, forward, delete
@@ -758,7 +762,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - Defaults are bounded: `search_emails`/`search_indexed_emails` return 50 (pass `limit` for more), `list_drafts` 20, `list_scheduled_sends` 50 newest first. Each reports `hasMore`; page with `offset`.
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_KB`.
-- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 109: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 112: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 
 **Working with drafts**
