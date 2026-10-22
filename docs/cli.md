@@ -307,6 +307,9 @@ proton-mail-bridge-client get-threads
 proton-mail-bridge-client get-inbox-digest
 proton-mail-bridge-client get-brief
 proton-mail-bridge-client plan-inbox
+proton-mail-bridge-client find-commitments
+proton-mail-bridge-client set-commitment --args '{"text":"send the offer","direction":"mine","due":"2026-11-05"}'
+proton-mail-bridge-client commitments
 proton-mail-bridge-client approve-plan plan-1a2b3c4d --args '{"exclude":[3]}'
 proton-mail-bridge-client undo-plan plan-1a2b3c4d
 proton-mail-bridge-client get-follow-up-candidates

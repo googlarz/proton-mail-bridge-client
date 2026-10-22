@@ -956,6 +956,51 @@ export const TOOLS = [
     },
   },
   {
+    name: "find_commitments",
+    description: "Look through recent sent mail (promises you made) and received mail from people (promises made to you) for sentences that look like commitments (\"I'll send it by Friday\", \"wyślę do piątku\", \"ich schicke es bis Freitag\") and the date each names. Read-only; the sentences are only candidates. Confirm with the user, then record the real ones with set_commitment. Messages already in the ledger are not offered again.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        days: { type: "integer", description: "How many days back to look (1-60, default 7).", minimum: 1, maximum: 60 },
+        direction: { type: "string", enum: ["mine", "theirs", "both"], description: "mine = promises you made (Sent), theirs = promises made to you (INBOX). Default both." },
+        limit: { type: "integer", description: "At most this many messages are read (1-100, default 30).", minimum: 1, maximum: 100 },
+      },
+    },
+  },
+  {
+    name: "set_commitment",
+    description: "Record a commitment in the local ledger (text, direction mine|theirs, optional due YYYY-MM-DD, with = the other party, emailId = the message it was made in so the thread can be followed), or close one with id and status done|dismissed. Changes nothing in the mailbox.",
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        id: { type: "string", description: "To close an existing commitment: its id (from list_commitments). Then pass status." },
+        status: { type: "string", enum: ["done", "dismissed"], description: "With id: how it is closed." },
+        text: { type: "string", description: "What was promised, in a short sentence." },
+        direction: { type: "string", enum: ["mine", "theirs"], description: "mine = you promised; theirs = somebody promised you." },
+        due: { type: "string", description: "Date it is due, YYYY-MM-DD." },
+        with: { type: "string", description: "The other party's address (defaults from the message)." },
+        emailId: { type: "string", description: "The message the promise was made in." },
+        messageId: { type: "string", description: "Its Message-ID header, when you have no emailId." },
+      },
+    },
+  },
+  {
+    name: "list_commitments",
+    description: "The commitment ledger with a state for each open entry: overdue (past its due date), due-today, open, or probably-done (the thread has a newer message from the person who owed it, so it was likely kept). Overdue first. Read-only.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        status: { type: "string", enum: ["open", "done", "dismissed", "all"], description: "Which entries (default open)." },
+      },
+    },
+  },
+  {
     name: "get_autoresponder",
     description: "Show the automatic reply of one address: the rule, whether it is active now, what this server can do for it (send, draft; background sync running), counts and who wrote while it was on (replied, drafted, skipped and why), and the latest entries of its log.",
     annotations: { readOnlyHint: true },

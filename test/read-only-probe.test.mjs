@@ -62,7 +62,7 @@ test("in read-only mode no tool reaches a method that writes", async () => {
         seen.add(key);
         let value;
         try { value = object[key]; } catch { continue; }
-        if (typeof value === "function" && WRITES.test(key)) object[key] = function () { touched.push(`${service}.${key}`); throw new Error(`trapped ${service}.${key}`); };
+        if (typeof value === "function" && WRITES.test(key)) object[key] = () => { touched.push(`${service}.${key}`); throw new Error(`trapped ${service}.${key}`); };
       }
     }
   }

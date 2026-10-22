@@ -43,6 +43,7 @@ import { ToolResult, createTextResult } from "./tools/results.js";
 import { withIgnoredArgumentsNote, asObject } from "./tools/args.js";
 import { handleBriefTool } from "./tools/brief.js";
 import { handleTriageTool } from "./tools/triage.js";
+import { handleCommitmentTool } from "./tools/commitments.js";
 import { TAINT_GATED_TOOLS } from "./utils/mail-security.js";
 import { buildEmailResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
@@ -339,6 +340,11 @@ export function createServer(
 
         case "get_brief":
           return await handleBriefTool(name, args, ctx);
+
+        case "find_commitments":
+        case "set_commitment":
+        case "list_commitments":
+          return await handleCommitmentTool(name, args, ctx);
 
         case "plan_inbox":
         case "approve_plan":

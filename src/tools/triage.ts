@@ -144,7 +144,7 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
     case "undo_plan": {
       const planId = requireString(args, "planId");
       const plan = await plans.get(planId);
-      if (!plan || !plan.applied) throw new McpError(ErrorCode.InvalidParams, `Plan ${planId} was not applied, so there is nothing to undo.`);
+      if (!plan?.applied) throw new McpError(ErrorCode.InvalidParams, `Plan ${planId} was not applied, so there is nothing to undo.`);
       const outcome = await withAudit(bundle.auditService, name, args, async () => {
         const next: AppliedItem[] = [];
         for (const item of plan.applied as AppliedItem[]) {

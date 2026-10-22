@@ -3,6 +3,7 @@ import { BriefStore, briefLines } from "../services/brief-service.js";
 import { assessMail } from "../utils/mail-security.js";
 import { normalizeBoolean, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
 import { optionalString } from "./args.js";
+import { evaluateCommitments } from "./commitments.js";
 import { maybeRefreshLocalIndex } from "./index-refresh.js";
 import { tagAccountIds } from "./merge.js";
 import { createTextResult } from "./results.js";
@@ -53,6 +54,10 @@ export async function handleBriefTool(name: string, args: Record<string, unknown
     .map((email) => ({ email, risk: assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview }) }))
     .filter((entry) => entry.risk.level === "high")
     .map(({ email, risk }) => ({ id: email.id, from: email.from[0]?.address ?? "", subject: email.subject, level: risk.level, reasons: risk.reasons }));
+  const own = ctx.accountManager.all().map((entry) => entry.account.address);
+  const commitments = (
+    await Promise.all(bundles.map(async (bundle) => (await evaluateCommitments(bundle, own, "open", (id) => withAccountPrefix(slugForBundle(bundle), id))).filter((item) => item.state === "overdue" || item.state === "due-today")))
+  ).flat();
   const reminders = (await evaluateReminders(bundles)).filter((reminder) => reminder.state === "due");
 
   const brief = {
@@ -67,6 +72,7 @@ export async function handleBriefTool(name: string, args: Record<string, unknown
     needsReply: needsReply.map((thread) => ({ id: thread.latestEmailId, threadId: thread.id, subject: thread.subject, from: thread.latestFrom?.[0]?.address ?? "", ageHours: undefined as number | undefined })),
     waitingOnOthers: reminders.map((reminder) => ({ id: reminder.emailId, subject: reminder.subject, to: reminder.to?.[0], daysOverdue: reminder.daysOverdue })),
     flagged,
+    commitments: commitments.map((item) => ({ text: item.text, direction: item.direction, due: item.due, overdue: item.state === "overdue" })),
   };
   const lines = briefLines(brief);
   if (normalizeBoolean(args.markSeen, false)) await store.markSeen(brief.generatedAt);

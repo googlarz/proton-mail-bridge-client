@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Commitments ledger** (`find_commitments`, `set_commitment`, `list_commitments`): promises you made or were given, found in mail (English, Polish, German, with the date they name), recorded after you confirm, shown as overdue / due today / open / probably done, and included in the brief.
+
 - **`plan_inbox`, `approve_plan`, `undo_plan`**: tidy the mailbox in one reviewed batch (archive, move, mark read, label; never delete), approve all, some or all-but-some, undo the whole batch. Senders left out of an approved plan are not proposed again.
 
 - **`get_brief` / `brief`**: what changed since the last brief (new mail by people and automatic, what waits for you, overdue replies, suspicious mail), with `--mark-seen` and `--notify` for a scheduled run.

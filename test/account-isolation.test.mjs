@@ -26,7 +26,7 @@ function trap(object, label, touched) {
       let value;
       try { value = object[key]; } catch { continue; }
       if (typeof value === "function") {
-        object[key] = function () { touched?.push(`${label}.${key}`); throw new Error(`trapped ${label}.${key}`); };
+        object[key] = () => { touched?.push(`${label}.${key}`); throw new Error(`trapped ${label}.${key}`); };
       }
     }
   }
