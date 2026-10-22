@@ -1,7 +1,7 @@
 import { maybeRefreshLocalIndex } from "./index-refresh.js";
 import { type AccountBundle } from "../services/account-manager.js";
 import { type BatchActionResult, type BatchActionEntry, type BulkMatchCriteria, type BulkOperationResult } from "../types/index.js";
-import { bulkFolder, ensureBulkBatchSize, getBulkMaxBatchSize, groupEmailIdsByAccount, BulkExcludedEmailId, getBulkNotFoundEmailIds, withBulkNotFound, prefixBulkResult, prefixNotFound, mergeBulkResults } from "./bulk.js";
+import { bulkFolderOfIds, ensureBulkBatchSize, getBulkMaxBatchSize, groupEmailIdsByAccount, BulkExcludedEmailId, getBulkNotFoundEmailIds, withBulkNotFound, prefixBulkResult, prefixNotFound, mergeBulkResults } from "./bulk.js";
 import { buildEmailResourceUri, emailSource, threadSource } from "./resources.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { ensureMoveTargetAllowed, isMissingTargetFolderError, applyBatchEmailAction, emailSourceFromActionResult } from "./actions.js";
@@ -16,7 +16,7 @@ import type { ToolResult } from "./results.js";
 // Single-message actions (read, star, move, archive, trash, restore, delete) and the batch and bulk forms.
 
 export async function handleMessageActionTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const { config, accountManager, primaryBundle, auditService, resolveAccountForEmailId, prefixedIdFor, withPrefixedIds } = ctx;
+  const { config, accountManager, primaryBundle, auditService, resolveAccountForEmailId, prefixedIdFor, withPrefixedIds, resolveFolderTarget, resolveAccountArg } = ctx;
   switch (name) {
     case "mark_email_read": {
       ensureEmailActionAllowed(
@@ -320,7 +320,13 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       if (emailIds && emailIds.length === 0) throw new McpError(ErrorCode.InvalidParams, "emailIds must contain at least one email id.");
       if (!emailIds && !match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds or match.");
       if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
-      const folder = bulkFolder(accountManager, optionalString(args, "folder"), emailIds);
+      // A call that selects by `match` works in one account: the `account` argument, or the "<slug>::" prefix on the
+      // folder (as get_folders shows it), else the primary. Ids carry their own account.
+      const requestedFolder = optionalString(args, "folder");
+      const folderOwner = requestedFolder ? resolveFolderTarget(args, requestedFolder) : undefined;
+      const matchBundle = folderOwner ? folderOwner.bundle : (resolveAccountArg(args) ?? primaryBundle);
+      const matchSlug = matchBundle === primaryBundle ? undefined : matchBundle.account.slug;
+      const explicitFolder = folderOwner ? folderOwner.paths[0] : undefined;
       const targetFolder = requireString(args, "targetFolder");
       await ensureMoveTargetAllowed(config.runtime, accountManager.all().map((entry) => entry.imapService), targetFolder);
       const max = getBulkMaxBatchSize(args);
@@ -335,7 +341,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const groups = emailIds
         ? groupEmailIdsByAccount(accountManager, emailIds)
         : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
-            [undefined, { bundle: primaryBundle, restIds: undefined }],
+            [matchSlug, { bundle: matchBundle, restIds: undefined }],
           ]);
 
       let totalUids = 0;
@@ -346,6 +352,8 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         run: () => Promise<BulkOperationResult>;
       }> = [];
       for (const [slug, group] of groups) {
+        // Each account's ids say their own folder, so ids from different accounts may sit in different folders.
+        const folder = bulkFolderOfIds(explicitFolder, group.restIds);
         // Only fetched (an extra STATUS round trip) when there are ids to
         // check against it — a match-only bulk_move has no ids that could
         // be stale, since match resolves directly against the live
@@ -400,7 +408,13 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       if (emailIds && emailIds.length === 0) throw new McpError(ErrorCode.InvalidParams, "emailIds must contain at least one email id.");
       if (!emailIds && !match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds or match.");
       if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
-      const folder = bulkFolder(accountManager, optionalString(args, "folder"), emailIds);
+      // A call that selects by `match` works in one account: the `account` argument, or the "<slug>::" prefix on the
+      // folder (as get_folders shows it), else the primary. Ids carry their own account.
+      const requestedFolder = optionalString(args, "folder");
+      const folderOwner = requestedFolder ? resolveFolderTarget(args, requestedFolder) : undefined;
+      const matchBundle = folderOwner ? folderOwner.bundle : (resolveAccountArg(args) ?? primaryBundle);
+      const matchSlug = matchBundle === primaryBundle ? undefined : matchBundle.account.slug;
+      const explicitFolder = folderOwner ? folderOwner.paths[0] : undefined;
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
 
@@ -412,7 +426,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const groups = emailIds
         ? groupEmailIdsByAccount(accountManager, emailIds)
         : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
-            [undefined, { bundle: primaryBundle, restIds: undefined }],
+            [matchSlug, { bundle: matchBundle, restIds: undefined }],
           ]);
 
       let totalUids = 0;
@@ -423,6 +437,8 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         run: () => Promise<BulkOperationResult>;
       }> = [];
       for (const [slug, group] of groups) {
+        // Each account's ids say their own folder, so ids from different accounts may sit in different folders.
+        const folder = bulkFolderOfIds(explicitFolder, group.restIds);
         // Fetched once, up front, and reused for both the notFound
         // reporting below and resolveUidsForBulkOp's own filtering — a
         // single shared point-in-time value, same "resolve once" spirit
@@ -479,7 +495,13 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const flagsToRemove = Array.isArray(args.flagsToRemove) ? (args.flagsToRemove as unknown[]).map(String) : [];
       if (flagsToAdd.length === 0 && flagsToRemove.length === 0) throw new McpError(ErrorCode.InvalidParams, "Provide flagsToAdd or flagsToRemove.");
       ensureFlagChangeAllowed(config.runtime, flagsToAdd, flagsToRemove, normalizeBoolean(args.confirmed, false));
-      const folder = bulkFolder(accountManager, optionalString(args, "folder"), emailIds);
+      // A call that selects by `match` works in one account: the `account` argument, or the "<slug>::" prefix on the
+      // folder (as get_folders shows it), else the primary. Ids carry their own account.
+      const requestedFolder = optionalString(args, "folder");
+      const folderOwner = requestedFolder ? resolveFolderTarget(args, requestedFolder) : undefined;
+      const matchBundle = folderOwner ? folderOwner.bundle : (resolveAccountArg(args) ?? primaryBundle);
+      const matchSlug = matchBundle === primaryBundle ? undefined : matchBundle.account.slug;
+      const explicitFolder = folderOwner ? folderOwner.paths[0] : undefined;
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
 
@@ -491,7 +513,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const groups = emailIds
         ? groupEmailIdsByAccount(accountManager, emailIds)
         : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
-            [undefined, { bundle: primaryBundle, restIds: undefined }],
+            [matchSlug, { bundle: matchBundle, restIds: undefined }],
           ]);
 
       let totalUids = 0;
@@ -502,6 +524,8 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         run: () => Promise<BulkOperationResult>;
       }> = [];
       for (const [slug, group] of groups) {
+        // Each account's ids say their own folder, so ids from different accounts may sit in different folders.
+        const folder = bulkFolderOfIds(explicitFolder, group.restIds);
         // See the bulk_delete case above for why this is fetched once and
         // shared between notFound reporting and uid resolution.
         const currentUidValidity = await group.bundle.imapService.getMailboxUidValidity(folder);
@@ -552,7 +576,13 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       if (emailIds && match) throw new McpError(ErrorCode.InvalidParams, "Provide emailIds OR match, not both.");
       const labelsToAdd = Array.isArray(args.labelsToAdd) ? (args.labelsToAdd as unknown[]).map(String) : [];
       const labelsToRemove = Array.isArray(args.labelsToRemove) ? (args.labelsToRemove as unknown[]).map(String) : [];
-      const folder = bulkFolder(accountManager, optionalString(args, "folder"), emailIds);
+      // A call that selects by `match` works in one account: the `account` argument, or the "<slug>::" prefix on the
+      // folder (as get_folders shows it), else the primary. Ids carry their own account.
+      const requestedFolder = optionalString(args, "folder");
+      const folderOwner = requestedFolder ? resolveFolderTarget(args, requestedFolder) : undefined;
+      const matchBundle = folderOwner ? folderOwner.bundle : (resolveAccountArg(args) ?? primaryBundle);
+      const matchSlug = matchBundle === primaryBundle ? undefined : matchBundle.account.slug;
+      const explicitFolder = folderOwner ? folderOwner.paths[0] : undefined;
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
 
@@ -564,7 +594,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const groups = emailIds
         ? groupEmailIdsByAccount(accountManager, emailIds)
         : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
-            [undefined, { bundle: primaryBundle, restIds: undefined }],
+            [matchSlug, { bundle: matchBundle, restIds: undefined }],
           ]);
 
       let totalUids = 0;
@@ -575,6 +605,8 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         run: () => Promise<BulkOperationResult>;
       }> = [];
       for (const [slug, group] of groups) {
+        // Each account's ids say their own folder, so ids from different accounts may sit in different folders.
+        const folder = bulkFolderOfIds(explicitFolder, group.restIds);
         // See the bulk_delete case above for why this is fetched once and
         // shared between notFound reporting and uid resolution.
         const currentUidValidity = await group.bundle.imapService.getMailboxUidValidity(folder);

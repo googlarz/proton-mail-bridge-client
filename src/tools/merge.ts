@@ -1,3 +1,4 @@
+import { describeImapError } from "../services/simple-imap-service.js";
 // Putting the answers of several accounts together (sorted, paginated, counted), tagging ids with the account, and keeping a list within the size a client can take.
 
 import { type MailboxLabel, type ContactStats, type VolumeTrendPoint } from "../types/index.js";
@@ -214,4 +215,9 @@ export function mergeVolumeTrends(perAccountTrends: VolumeTrendPoint[][]): Volum
 
 export function paginateRecentRecords<T>(records: T[], limit: number, offset: number): T[] {
   return records.slice(offset, offset + limit);
+}
+
+/** Why one account failed, in the words of the server where it gave any ("no such mailbox") instead of imapflow's bare "Command failed". */
+export function describeAccountFailure(reason: unknown): string {
+  return describeImapError(reason) ?? (reason instanceof Error ? reason.message : String(reason));
 }

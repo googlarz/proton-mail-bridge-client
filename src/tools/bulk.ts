@@ -132,18 +132,19 @@ export function groupEmailIdsByAccount(
   return groups;
 }
 
-// The folder a bulk call works in. Given, it wins. Otherwise the ids say: an id carries its folder, so ids from Archive
-// are looked up in Archive, not in INBOX. Ids from several folders are refused instead of guessed (pass `folder`, or split
-// the call). With no ids (a `match`) it is INBOX, as before.
-export function bulkFolder(accountManager: AccountManager, explicit: string | undefined, emailIds: string[] | undefined): string {
+// The folder a bulk call works in, for the ids of ONE account (prefixes already removed). Given, it wins. Otherwise the
+// ids say: an id carries its folder, so ids from Archive are looked up in Archive, not in INBOX. Ids from several
+// folders of the same account are refused instead of guessed (pass `folder`, or split the call). With no ids (a `match`)
+// it is INBOX, as before.
+export function bulkFolderOfIds(explicit: string | undefined, restIds: string[] | undefined): string {
   if (explicit) return explicit;
-  if (!emailIds?.length) return "INBOX";
+  if (!restIds?.length) return "INBOX";
   const folders = new Set<string>();
-  for (const id of emailIds) {
+  for (const id of restIds) {
     try {
-      folders.add(parseEmailId(splitAccountPrefix(id, accountManager.additionalSlugs()).rest).folder);
+      folders.add(parseEmailId(id).folder);
     } catch {
-      // not a readable id: it is reported as not found below, where it always was
+      // not a readable id: it is reported as not found, where it always was
     }
   }
   if (folders.size === 0) return "INBOX";

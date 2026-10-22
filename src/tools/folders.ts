@@ -3,7 +3,7 @@ import { normalizeBoolean, normalizeLimit, optionalBoolean, optionalNumber, spli
 import { withAudit } from "./audit.js";
 import { requireString, optionalString } from "./args.js";
 import { ensureMailboxWriteAllowed, ensureEmailActionAllowed, ensureDestructiveConfirmed } from "../utils/runtime-policy.js";
-import { accountSlugForTag, mergeMailboxLabels } from "./merge.js";
+import { accountSlugForTag, describeAccountFailure, mergeMailboxLabels } from "./merge.js";
 import { createTextResult } from "./results.js";
 import type { ToolContext } from "./context.js";
 import type { ToolResult } from "./results.js";
@@ -134,7 +134,7 @@ export async function handleFolderTool(name: string, args: Record<string, unknow
       if (perAccount.length === 0) throw (settledStats[0] as PromiseRejectedResult).reason;
       const failedStats = settledStats.flatMap((entry, index) =>
         entry.status === "rejected"
-          ? [{ account: statsBundles[index].account.slug, error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }]
+          ? [{ account: statsBundles[index].account.slug, error: describeAccountFailure(entry.reason) }]
           : [],
       );
       return createTextResult({
@@ -239,7 +239,7 @@ export async function handleFolderTool(name: string, args: Record<string, unknow
       }
       const failedAccounts = settled.flatMap((entry, index) =>
         entry.status === "rejected"
-          ? [{ account: selectedBundles(args)[index].account.slug, error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }]
+          ? [{ account: selectedBundles(args)[index].account.slug, error: describeAccountFailure(entry.reason) }]
           : [],
       );
       return createTextResult({

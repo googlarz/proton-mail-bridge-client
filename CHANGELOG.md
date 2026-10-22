@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.15.1] — 2026-10-22
+
+From zotabee's check of 2.15.0 (#32):
+
+- **A bulk call that selects by `match` could act on the wrong account.** `bulk_move`, `bulk_delete`, `bulk_update_flags` and `bulk_update_labels` had no `account` argument, took no `<slug>::` folder prefix and ignored `account` with a note, so `folder: "Sent"` for the second account ran on the primary's Sent (35 messages instead of 2) and a real run would have moved or deleted the wrong mail. They now take `account` or a prefixed folder; an account and a prefix that name different accounts are refused. With `emailIds` the account still comes from each id. A test lists the tools that have a folder or a match and no `account`, so a new one cannot slip in unnoticed.
+- **Ids from two accounts may now be in different folders** (Archive in one, Sent in the other): each account's ids are looked up in their own folder.
+- **`claude install` no longer needs a C++ toolchain** when `better-sqlite3` already has a prebuilt binary for your Node: it rebuilds only if the module does not load, and says plainly what is missing if the rebuild fails (on Windows without Visual Studio Build Tools, `npm rebuild` used to abort the install).
+- **`failedAccounts` carries the server's reason** ("no such mailbox") instead of "Command failed".
+
 ## [2.15.0] — 2026-10-22
 
 From zotabee's check of 2.13.1 (#32):

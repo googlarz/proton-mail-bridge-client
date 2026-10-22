@@ -314,13 +314,36 @@ async function installRuntimeDependencies(runtimeDir: string, hasLockfile: boole
     ...shellOpts,
   });
 
-  // better-sqlite3 is native; rebuild it in the staged runtime so Claude Desktop
-  // gets the correct binary for the current machine instead of whatever was built elsewhere.
-  await execFileAsync(getNpmExecutable(), ["rebuild", "better-sqlite3"], {
-    cwd: runtimeDir,
-    env: process.env,
-    ...shellOpts,
-  });
+  // better-sqlite3 is native and ships a prebuilt binary for the usual platforms. Use it when it loads; rebuild only when
+  // it does not. A rebuild compiles from source, which needs a C++ toolchain (Visual Studio Build Tools on Windows), so
+  // running it unconditionally broke the install on machines that had no use for it.
+  if (await nativeModuleLoads(runtimeDir)) return;
+  try {
+    await execFileAsync(getNpmExecutable(), ["rebuild", "better-sqlite3"], {
+      cwd: runtimeDir,
+      env: process.env,
+      ...shellOpts,
+    });
+  } catch (error) {
+    throw new Error(
+      "better-sqlite3 has no usable prebuilt binary for this Node, and building it from source failed. " +
+        "Building needs a C++ toolchain (on Windows: Visual Studio Build Tools with the C++ workload). " +
+        `Use a Node version better-sqlite3 ships a binary for, or install the toolchain. Detail: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
+    );
+  }
+}
+
+export async function nativeModuleLoads(runtimeDir: string): Promise<boolean> {
+  try {
+    await execFileAsync(
+      process.execPath,
+      ["-e", 'const { createRequire } = require("node:module"); const req = createRequire(process.cwd() + "/package.json"); const D = req("better-sqlite3"); new D(":memory:").close();'],
+      { cwd: runtimeDir, timeout: 30_000 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Runs in the runtime dir with the node Claude Desktop will use. Exits non-zero (stderr says why)

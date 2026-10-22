@@ -321,3 +321,16 @@ test("the Store build's config is found in Claude-Data (since October 2026) or i
     await rmrf(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+import { nativeModuleLoads } from "../dist/scripts/install-claude-desktop.js";
+
+test("the installer rebuilds better-sqlite3 only when the prebuilt one does not load", async () => {
+  assert.equal(await nativeModuleLoads(process.cwd()), true, "this repository's module loads: no rebuild needed");
+  const empty = await mkdtempp(joinPath(osTmpdir(), "no-native-"));
+  try {
+    await writeFilep(joinPath(empty, "package.json"), "{}");
+    assert.equal(await nativeModuleLoads(empty), false, "nothing installed: the rebuild runs");
+  } finally {
+    await rmrf(empty, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

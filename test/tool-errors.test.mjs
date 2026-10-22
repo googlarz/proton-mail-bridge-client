@@ -229,3 +229,64 @@ test("bulk calls with ids and no folder look in the folder the ids come from", a
     assert.deepEqual(seen.slice(0, 1), ["INBOX"], "an explicit folder still wins");
   }, ["delete", "move", "trash", "mark_read", "mark_unread", "star", "unstar", "archive"]);
 });
+
+test("a bulk call that selects by match works in the account it is told to, by argument or by <slug>:: prefix", async () => {
+  await withServer(["owner@example.com", "work@example.com"], async ({ client, bundles }) => {
+    const [primary, work] = bundles;
+    const seen = [];
+    for (const [label, bundle] of [["primary", primary], ["work", work]]) {
+      bundle.imapService.getMailboxUidValidity = async (folder) => { seen.push(`${label}:${folder}`); throw new Error("stop here"); };
+    }
+    const match = { from: "someone@example.com" };
+    for (const tool of ["bulk_update_flags", "bulk_move", "bulk_delete", "bulk_update_labels"]) {
+      const extra = { bulk_update_flags: { flagsToAdd: ["\\Seen"] }, bulk_move: { targetFolder: "Trash" }, bulk_delete: {}, bulk_update_labels: { labelsToAdd: ["X"] } }[tool];
+      seen.length = 0;
+      await client.callTool({ name: tool, arguments: { match, folder: "Sent", account: work.account.address, dryRun: true, ...extra } });
+      assert.deepEqual(seen.slice(0, 1), ["work:Sent"], `${tool} with account must work in that account`);
+      seen.length = 0;
+      await client.callTool({ name: tool, arguments: { match, folder: `${work.account.slug}::Sent`, dryRun: true, ...extra } });
+      assert.deepEqual(seen.slice(0, 1), ["work:Sent"], `${tool} with a prefixed folder must work in that account`);
+      seen.length = 0;
+      await client.callTool({ name: tool, arguments: { match, folder: "Sent", dryRun: true, ...extra } });
+      assert.deepEqual(seen.slice(0, 1), ["primary:Sent"], `${tool} without either stays in the primary account`);
+    }
+    const clash = await client.callTool({ name: "bulk_update_flags", arguments: { match, folder: `${work.account.slug}::Sent`, account: primary.account.address, flagsToAdd: ["\\Seen"], dryRun: true } });
+    assert.equal(clash.isError, true, "an account and a prefix that name different accounts are refused");
+  }, ["delete", "move", "trash", "mark_read", "mark_unread", "star", "unstar", "archive"]);
+});
+
+test("ids from two accounts may sit in different folders: each account's ids are looked up in their own folder", async () => {
+  await withServer(["owner@example.com", "work@example.com"], async ({ client, bundles }) => {
+    const [primary, work] = bundles;
+    const seen = [];
+    primary.imapService.getMailboxUidValidity = async (folder) => { seen.push(`primary:${folder}`); throw new Error("stop here"); };
+    work.imapService.getMailboxUidValidity = async (folder) => { seen.push(`work:${folder}`); throw new Error("stop here"); };
+    const ids = [createEmailId("Sent", 1, "100"), `${work.account.slug}::${createEmailId("Archive", 2, "200")}`];
+    await client.callTool({ name: "bulk_update_flags", arguments: { emailIds: ids, flagsToAdd: ["\\Seen"], dryRun: true } });
+    assert.ok(seen.includes("primary:Sent") || seen.includes("work:Archive"), JSON.stringify(seen));
+    const result = await client.callTool({ name: "bulk_update_flags", arguments: { emailIds: ids, flagsToAdd: ["\\Seen"], dryRun: true } });
+    assert.doesNotMatch(result.content[0].text, /different folders/, "two accounts, two folders, one each: fine");
+  }, ["delete", "move", "trash", "mark_read", "mark_unread", "star", "unstar", "archive"]);
+});
+
+test("a tool that takes a folder or a match but no account argument is on the list of tools whose account comes from an id", async () => {
+  const { TOOLS } = await import("../dist/tools/definitions.js");
+  const withoutAccount = TOOLS
+    .filter((tool) => {
+      const props = Object.keys(tool.inputSchema.properties ?? {});
+      return !props.includes("account") && (props.includes("folder") || props.includes("path") || props.includes("match") || props.includes("targetFolder"));
+    })
+    .map((tool) => tool.name)
+    .sort();
+  // These take ids (which carry their account) and a target folder on that same account. A new tool with a folder or
+  // a match and no `account` must either take one or be added here on purpose.
+  assert.deepEqual(withoutAccount, ["apply_thread_action", "batch_email_action", "move_email", "restore_email"]);
+});
+
+test("an account that failed is reported with the server's reason, not imapflow's bare 'Command failed'", async () => {
+  const { describeAccountFailure } = await import("../dist/tools/merge.js");
+  const bare = Object.assign(new Error("Command failed"), { responseText: "no such mailbox", serverResponseCode: "NONEXISTENT" });
+  assert.match(describeAccountFailure(bare), /no such mailbox/i);
+  assert.equal(describeAccountFailure(new Error("plain")), "plain");
+  assert.equal(describeAccountFailure("text"), "text");
+});

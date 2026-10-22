@@ -1173,6 +1173,7 @@ export const TOOLS = [
       properties: {
         emailIds: { type: "array", items: { type: "string" }, description: "Explicit email IDs (FOLDER::UID format). XOR with match." },
         match: { type: "object", description: "Search criteria to select messages. XOR with emailIds.", properties: { from: { type: "string" }, subject: { type: "string" }, text: { type: "string" }, since: { type: "string" }, before: { type: "string" }, isRead: { type: "boolean" }, isStarred: { type: "boolean" } } },
+        account: { type: "string", description: "Address or slug of the account a `match` call works in (see list_accounts). A '<slug>::' prefix on `folder` does the same. With `emailIds` the account comes from each id. Defaults to the primary account." },
         folder: { type: "string", description: "Source folder (required when using match)." },
         targetFolder: { type: "string", description: "Destination folder." },
         dryRun: { type: "boolean", description: "Preview without moving.", default: false },
@@ -1190,6 +1191,7 @@ export const TOOLS = [
       properties: {
         emailIds: { type: "array", items: { type: "string" }, description: "Explicit email IDs. XOR with match." },
         match: { type: "object", description: "Search criteria. XOR with emailIds.", properties: { from: { type: "string" }, subject: { type: "string" }, text: { type: "string" }, since: { type: "string" }, before: { type: "string" }, isRead: { type: "boolean" }, isStarred: { type: "boolean" } } },
+        account: { type: "string", description: "Address or slug of the account a `match` call works in (see list_accounts). A '<slug>::' prefix on `folder` does the same. With `emailIds` the account comes from each id. Defaults to the primary account." },
         folder: { type: "string", description: "Source folder (required with match)." },
         permanent: { type: "boolean", description: "Permanently expunge (irreversible). False = move to Trash.", default: false },
         dryRun: { type: "boolean", default: false },
@@ -1207,6 +1209,7 @@ export const TOOLS = [
       properties: {
         emailIds: { type: "array", items: { type: "string" }, description: "Explicit email IDs. XOR with match." },
         match: { type: "object", description: "Search criteria. XOR with emailIds.", properties: { from: { type: "string" }, subject: { type: "string" }, text: { type: "string" }, since: { type: "string" }, before: { type: "string" }, isRead: { type: "boolean" }, isStarred: { type: "boolean" } } },
+        account: { type: "string", description: "Address or slug of the account a `match` call works in (see list_accounts). A '<slug>::' prefix on `folder` does the same. With `emailIds` the account comes from each id. Defaults to the primary account." },
         folder: { type: "string", description: "Source folder (required with match)." },
         flagsToAdd: { type: "array", items: { type: "string" }, description: 'IMAP flags to set, e.g. ["\\\\Seen", "\\\\Flagged"].' },
         flagsToRemove: { type: "array", items: { type: "string" }, description: "IMAP flags to clear." },
@@ -1225,6 +1228,7 @@ export const TOOLS = [
       properties: {
         emailIds: { type: "array", items: { type: "string" }, description: "Explicit email IDs. XOR with match." },
         match: { type: "object", description: "Search criteria. XOR with emailIds.", properties: { from: { type: "string" }, subject: { type: "string" }, text: { type: "string" }, since: { type: "string" }, before: { type: "string" }, isRead: { type: "boolean" }, isStarred: { type: "boolean" } } },
+        account: { type: "string", description: "Address or slug of the account a `match` call works in (see list_accounts). A '<slug>::' prefix on `folder` does the same. With `emailIds` the account comes from each id. Defaults to the primary account." },
         folder: { type: "string", description: "Source folder (required with match)." },
         labelsToAdd: { type: "array", items: { type: "string" }, description: 'Labels to add, e.g. ["Labels/Work"].' },
         labelsToRemove: { type: "array", items: { type: "string" }, description: "Labels to remove." },

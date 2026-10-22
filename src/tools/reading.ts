@@ -6,7 +6,7 @@ import { refreshIndexForSearch, maybeRefreshLocalIndex, getAnalyticsSampleFromIn
 import { type AccountBundle } from "../services/account-manager.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { formatEmailDetailOutput, extractUnsubscribeInfo } from "./compose.js";
-import { accountSlugForTag, sortByDateDesc, paginateMergedAccountResults, trimThreadsToBudget, paginationFields, tagAccountIds, THREAD_LIST_RESPONSE_BUDGET_CHARS, mergeCountedEntries, mergeContactStats, mergeVolumeTrends } from "./merge.js";
+import { describeAccountFailure, accountSlugForTag, sortByDateDesc, paginateMergedAccountResults, trimThreadsToBudget, paginationFields, tagAccountIds, THREAD_LIST_RESPONSE_BUDGET_CHARS, mergeCountedEntries, mergeContactStats, mergeVolumeTrends } from "./merge.js";
 import { emailSource, attachmentSource, threadSource } from "./resources.js";
 import { createTextResult } from "./results.js";
 import { optionalString, parseFieldsArg, requireString, parseStringListArg } from "./args.js";
@@ -97,7 +97,7 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
       if (perAccount.length === 0) throw (settledEmails[0] as PromiseRejectedResult).reason;
       const failedAccounts = settledEmails.flatMap((entry, index) =>
         entry.status === "rejected"
-          ? [{ account: getEmailsBundles[index].account.slug, error: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }]
+          ? [{ account: getEmailsBundles[index].account.slug, error: describeAccountFailure(entry.reason) }]
           : [],
       );
       const taggedEmails = perAccount.flatMap(({ bundle, result }) =>
