@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { exec, execFile } from "node:child_process";
 import { constants as fsConstants, readdirSync, realpathSync, statSync } from "node:fs";
 import { access, chmod, copyFile, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 const DEFAULT_SERVER_NAME = "proton-mail-bridge";
 const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
 
 export interface ClaudeDesktopServerConfig {
   command: string;
@@ -304,26 +305,25 @@ export function buildRuntimeInstallArgs(hasLockfile: boolean): string[] {
     : ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"];
 }
 
-async function installRuntimeDependencies(runtimeDir: string, hasLockfile: boolean): Promise<void> {
-  // On Windows, .cmd files (npm.cmd) require shell: true — execFile cannot run them directly.
-  const shellOpts = process.platform === "win32" ? { shell: true } : {};
+// On Windows npm is npm.cmd, which execFile cannot run without a shell, and Node 22+ warns (DEP0190) when arguments
+// are passed to a shell as an array. The arguments here are fixed words, so they are joined into one command line.
+async function runNpm(args: string[], cwd: string): Promise<void> {
+  if (process.platform === "win32") {
+    await execAsync([getNpmExecutable(), ...args].join(" "), { cwd, env: process.env });
+    return;
+  }
+  await execFileAsync(getNpmExecutable(), args, { cwd, env: process.env });
+}
 
-  await execFileAsync(getNpmExecutable(), buildRuntimeInstallArgs(hasLockfile), {
-    cwd: runtimeDir,
-    env: process.env,
-    ...shellOpts,
-  });
+async function installRuntimeDependencies(runtimeDir: string, hasLockfile: boolean): Promise<void> {
+  await runNpm(buildRuntimeInstallArgs(hasLockfile), runtimeDir);
 
   // better-sqlite3 is native and ships a prebuilt binary for the usual platforms. Use it when it loads; rebuild only when
   // it does not. A rebuild compiles from source, which needs a C++ toolchain (Visual Studio Build Tools on Windows), so
   // running it unconditionally broke the install on machines that had no use for it.
   if (await nativeModuleLoads(runtimeDir)) return;
   try {
-    await execFileAsync(getNpmExecutable(), ["rebuild", "better-sqlite3"], {
-      cwd: runtimeDir,
-      env: process.env,
-      ...shellOpts,
-    });
+    await runNpm(["rebuild", "better-sqlite3"], runtimeDir);
   } catch (error) {
     throw new Error(
       "better-sqlite3 has no usable prebuilt binary for this Node, and building it from source failed. " +

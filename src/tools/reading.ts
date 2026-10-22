@@ -18,6 +18,8 @@ import type { ToolResult } from "./results.js";
 // Reading and searching mail, threads and statistics: lists, single messages, search (live and indexed), digests, follow-ups, contacts, volume, and exporting or importing a message.
 
 const MAX_IMPORT_MESSAGE_BYTES = 50 * 1024 * 1024;
+const MAX_QUERY_VARIANTS = 8;
+const RRF_K = 60;
 
 export async function handleReadingTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { config, accountManager, imapService, analyticsService, auditService, localIndexService, resolveAccountArg, resolveFolderTarget, selectedBundles, evaluateReminders, resolveAccountForEmailId, prefixedIdFor, slugForBundle, taint } = ctx;
@@ -321,41 +323,79 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
       // never block serving the local index, which is the point of this tool.
       const refreshTargets = indexedAccount ? [indexedAccount] : accountManager.all();
       await Promise.all(refreshTargets.map((bundle) => refreshIndexForSearch(bundle)));
-      if (accountManager.all().length === 1) {
-        const result = await localIndexService.search(searchIndexedInput);
+      const primarySlugForSearch = accountManager.primary().account.slug;
+      // One search over the index, in this account or merged over all: each account is searched on its own, ids are
+      // tagged with the account slug and the lists are put newest first (each account's list already arrives
+      // relevance-sorted, so this approximates one global ranking) before the limit is applied.
+      const searchOnce = async (input: typeof searchIndexedInput) => {
+        if (accountManager.all().length === 1) {
+          const result = await localIndexService.search(input);
+          return { total: result.total, emails: result.emails, lastSyncAt: result.lastSyncAt, warnings: result.warnings ?? [], raw: result };
+        }
+        const perAccount = await Promise.all((indexedAccount ? [indexedAccount] : accountManager.all()).map(async (bundle) => ({ bundle, result: await bundle.localIndexService.search(input) })));
+        const tagged = perAccount.flatMap(({ bundle, result }) => result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlugForSearch), email.id) })));
+        const primaryEntry = perAccount.find(({ bundle }) => bundle.account.slug === primarySlugForSearch) ?? perAccount[0];
+        return {
+          total: perAccount.reduce((sum, { result }) => sum + result.total, 0),
+          emails: sortByDateDesc(tagged, (email) => email.internalDate || email.date).slice(0, input.limit ?? 50),
+          lastSyncAt: primaryEntry?.result.lastSyncAt,
+          warnings: perAccount.flatMap(({ result }) => result.warnings ?? []),
+          raw: undefined,
+        };
+      };
+
+      const variants = args.queries === undefined ? [] : [...new Set(parseStringListArg(args, "queries"))];
+      if (variants.length > 0) {
+        // Several wordings of one question (synonyms, other languages): each is searched, and the results are fused by
+        // reciprocal rank, so a message that several wordings find comes first. `matchedBy` says which found it.
+        if (variants.length > MAX_QUERY_VARIANTS) throw new McpError(ErrorCode.InvalidParams, `At most ${MAX_QUERY_VARIANTS} queries.`);
+        const finalLimit = searchIndexedInput.limit ?? 50;
+        const perQuery = Math.min(Math.max(finalLimit * 2, 20), 200);
+        const fused = new Map<string, { email: Awaited<ReturnType<typeof searchOnce>>["emails"][number]; score: number; matchedBy: string[] }>();
+        const warnings: string[] = [];
+        let lastSyncAt: string | undefined;
+        for (const variant of variants) {
+          const result = await searchOnce({ ...searchIndexedInput, query: variant, limit: perQuery });
+          lastSyncAt = lastSyncAt ?? result.lastSyncAt;
+          warnings.push(...result.warnings);
+          result.emails.forEach((email, rank) => {
+            const entry = fused.get(email.id) ?? { email, score: 0, matchedBy: [] };
+            entry.score += 1 / (RRF_K + rank + 1);
+            entry.matchedBy.push(variant);
+            fused.set(email.id, entry);
+          });
+        }
+        const ranked = [...fused.values()].sort((a, b) => b.score - a.score);
+        const emails = ranked.slice(0, finalLimit).map(({ email, matchedBy }) => ({ ...email, matchedBy }));
         return createTextResult(
-          { ...result, emails: projectFields(result.emails, parseFieldsArg(args.fields)) },
+          {
+            total: ranked.length,
+            hasMore: ranked.length > emails.length,
+            queries: variants,
+            emails: projectFields(emails, parseFieldsArg(args.fields)),
+            lastSyncAt,
+            ...(warnings.length > 0 ? { warnings: [...new Set(warnings)] } : {}),
+          },
           false,
-          result.emails.map(emailSource),
+          emails.map(emailSource),
         );
       }
-      // Merge strategy: search every account's local index independently,
-      // tag ids with the account slug, concatenate, re-sort newest-first
-      // (each account's own list already arrives relevance-sorted, so this
-      // is an approximation of a single global ranking), then re-apply the
-      // requested limit across the merged set and sum totals/hasMore.
-      const primarySlugForSearch = accountManager.primary().account.slug;
-      const searchPerAccount = await Promise.all(
-        (indexedAccount ? [indexedAccount] : accountManager.all()).map(async (bundle) => ({ bundle, result: await bundle.localIndexService.search(searchIndexedInput) })),
-      );
-      const searchLimit = searchIndexedInput.limit ?? 50;
-      const taggedSearchEmails = searchPerAccount.flatMap(({ bundle, result }) =>
-        result.emails.map((email) => ({ ...email, id: withAccountPrefix(accountSlugForTag(bundle, primarySlugForSearch), email.id) })),
-      );
-      const mergedSearchEmails = sortByDateDesc(taggedSearchEmails, (email) => email.internalDate || email.date).slice(0, searchLimit);
-      const totalSearch = searchPerAccount.reduce((sum, { result }) => sum + result.total, 0);
-      const warnings = searchPerAccount.flatMap(({ result }) => result.warnings ?? []);
-      const primarySearchEntry = searchPerAccount.find(({ bundle }) => bundle.account.slug === primarySlugForSearch) ?? searchPerAccount[0];
+
+      const single = await searchOnce(searchIndexedInput);
+      if (single.raw) {
+        // One account: the result as the index gives it, with its freshness and stale-index fields.
+        return createTextResult({ ...single.raw, emails: projectFields(single.raw.emails, parseFieldsArg(args.fields)) }, false, single.raw.emails.map(emailSource));
+      }
       return createTextResult(
         {
-          total: totalSearch,
-          hasMore: totalSearch > mergedSearchEmails.length,
-          emails: projectFields(mergedSearchEmails, parseFieldsArg(args.fields)),
-          lastSyncAt: primarySearchEntry?.result.lastSyncAt,
-          ...(warnings.length > 0 ? { warnings } : {}),
+          total: single.total,
+          hasMore: single.total > single.emails.length,
+          emails: projectFields(single.emails, parseFieldsArg(args.fields)),
+          lastSyncAt: single.lastSyncAt,
+          ...(single.warnings.length > 0 ? { warnings: single.warnings } : {}),
         },
         false,
-        mergedSearchEmails.map(emailSource),
+        single.emails.map(emailSource),
       );
     }
 

@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`search_indexed_emails` takes `queries`**: several wordings of one question, searched and fused (reciprocal rank), with `matchedBy` on each hit.
+- **Windows installer**: `claude install` no longer prints Node's `DEP0190` warning (npm is run as one command line instead of an argument array with a shell). Reported by zotabee in #32; not testable here, so unverified on Windows.
+
 - **`get_style_profile`**: how you write (language, greeting, closing, tone, length), worked out locally from sent mail, per recipient or company; patterns and counts only. The server instructions tell Claude to use it before drafting.
 
 - **Commitments ledger** (`find_commitments`, `set_commitment`, `list_commitments`): promises you made or were given, found in mail (English, Polish, German, with the date they name), recorded after you confirm, shown as overdue / due today / open / probably done, and included in the brief.

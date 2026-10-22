@@ -362,6 +362,10 @@ A local ledger of what you promised and what was promised to you. `find_commitme
 
 `get_style_profile` works out how you write from your own sent mail, on your machine: language, how you open and close ("Dzień dobry {name},", "Cheers"), tone, typical length. It returns a few plain hints for drafting, overall and for a given recipient or company ("to pat@client.example you write in Polish, formally"), and the server tells Claude to call it before drafting. The profile is cached for a week in `style-profile.json` and holds patterns and counts only: no sentences, no names.
 
+## Search by meaning (several wordings)
+
+`search_indexed_emails` takes `queries`: several wordings of one question, up to 8. Claude supplies the variants (synonyms, other languages: `["deposit", "kaucja", "Kaution", "rental agreement"]`), the server searches each in the local index and fuses the results, so a message found by several wordings ranks first and every hit says which wordings found it (`matchedBy`). There is no model and no download: the meaning comes from the model you already use. What it cannot find is mail that uses none of the words tried.
+
 ## Mailbox rules (suggestions, filters, cleanup, forwarding)
 
 Proton's own filters act on **new** mail, the free plan has one custom filter, and auto-delete of Trash and Spam is a paid feature with a fixed 30 days (see Proton's pages on [filters](https://proton.me/support/email-inbox-filters) and [auto-delete](https://proton.me/support/auto-delete-unwanted-messages)). These rules work alongside them: on mail that is already there, with a preview, and with a scan that suggests rules instead of waiting for you to write them. They run on this server, so they only act while it runs.

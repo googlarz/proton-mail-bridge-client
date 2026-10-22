@@ -334,3 +334,9 @@ test("the installer rebuilds better-sqlite3 only when the prebuilt one does not 
     await rmrf(empty, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test("the installer never passes an argument array to a shell (Node 22+ warns DEP0190 on Windows)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/scripts/install-claude-desktop.ts", import.meta.url), "utf8");
+  assert.ok(!/shell:\s*true/.test(source), "a command line is built as one string instead");
+});

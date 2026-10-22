@@ -1705,6 +1705,7 @@ export const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
+        queries: { type: "array", items: { type: "string" }, description: "Several wordings of the same question (synonyms, other languages, related terms), at most 8. Each is searched and the results are fused so a message found by several wordings ranks first; every hit lists `matchedBy`. Use this instead of query when you need meaning rather than exact words, for example [\"deposit\", \"kaucja\", \"Kaution\", \"rental agreement\"]." },
         account: { type: "string", description: "Account address or slug to search (see list_accounts). Omit to search ALL configured accounts; non-primary ids come back prefixed '<slug>::'." },
         query: { type: "string", description: "Free-text query across indexed metadata." },
         folder: { type: "string", description: "Folder filter." },
