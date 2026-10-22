@@ -51,7 +51,7 @@ export async function handleBriefTool(name: string, args: Record<string, unknown
     if (sender) senderCounts.set(sender, (senderCounts.get(sender) ?? 0) + 1);
   }
   const flagged = emails
-    .map((email) => ({ email, risk: assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview }) }))
+    .map((email) => ({ email, risk: assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview, automated: email.isAutomated }) }))
     .filter((entry) => entry.risk.level === "high")
     .map(({ email, risk }) => ({ id: email.id, from: email.from[0]?.address ?? "", subject: email.subject, level: risk.level, reasons: risk.reasons }));
   const own = ctx.accountManager.all().map((entry) => entry.account.address);

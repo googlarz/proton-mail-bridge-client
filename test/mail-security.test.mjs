@@ -40,6 +40,7 @@ test("hidden markup, mismatched links, reply-to and failed authentication raise 
   assert.equal(assessMail({ from, html: '<a href="https://www.example.com/a">example.com</a>' }).level, "ok");
   assert.equal(assessMail({ from, replyTo: [{ address: "x@other.example" }] }).level, "caution");
   assert.equal(assessMail({ from, headers: { "authentication-results": "mx; dkim=fail; spf=pass" } }).level, "caution");
+  assert.equal(assessMail({ from, replyTo: [{ address: "x@esp.example" }], automated: true, text: "Hello\u200b\u200b\u200b\u200b\u200b\u200b" }).level, "ok", "newsletters legitimately use an ESP reply-to and padded preheaders");
   assert.equal(assessMail({ from: [{ name: "boss@company.com", address: "x@evil.example" }] }).level, "caution");
 });
 

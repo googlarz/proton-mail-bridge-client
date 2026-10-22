@@ -302,7 +302,7 @@ export async function decide(
   const reason = skipReason(email, state, ownAddresses, now, checks);
   if (reason) return { ...base, outcome: "skip", reason };
   // A reply to mail written to steer an AI would confirm that the address is read.
-  if (assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview }).level === "high") return { ...base, outcome: "skip", reason: "suspicious" };
+  if (assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview, automated: email.isAutomated }).level === "high") return { ...base, outcome: "skip", reason: "suspicious" };
 
   // Rules, in order.
   let action: AutoresponderAction = rule.mode === "draft" ? "draft" : "reply";

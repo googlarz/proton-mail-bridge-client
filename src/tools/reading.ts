@@ -143,7 +143,7 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
 
       const prefixedEmailId = prefixedIdFor(bundle, detail.id);
       output.id = prefixedEmailId;
-      const security = assessMail(detail);
+      const security = assessMail({ ...detail, automated: detail.isAutomated });
       if (security.level !== "ok") {
         output.risk = security;
         taint.mark(prefixedEmailId, security);
@@ -176,7 +176,7 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
             const detail = await bundle.imapService.getEmailById(rest);
             const output = formatEmailDetailOutput(detail, preferHtml, maxBodyLength);
             output.id = prefixedIdFor(bundle, detail.id);
-            const security = assessMail(detail);
+            const security = assessMail({ ...detail, automated: detail.isAutomated });
             if (security.level !== "ok") {
               output.risk = security;
               taint.mark(output.id as string, security);

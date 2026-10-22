@@ -18,6 +18,8 @@ export interface AssessInput {
   text?: string;
   html?: string | false;
   headers?: Record<string, unknown>;
+  /** Bulk or list mail: its Reply-To and padded preheaders are ordinary, so they are not remarked on. */
+  automated?: boolean;
 }
 
 // Phrases that address an assistant instead of the reader. English, Polish and German, the languages of this mailbox.
@@ -81,12 +83,12 @@ export function assessMail(input: AssessInput): SecurityAssessment {
     break;
   }
   const zeroWidth = (visible.match(ZERO_WIDTH) ?? []).length;
-  if (zeroWidth >= 5) caution.push("The text has invisible characters (zero-width), which can hide wording from the reader.");
+  if (zeroWidth >= 5 && input.automated !== true) caution.push("The text has invisible characters (zero-width), which can hide wording from the reader.");
 
   const fromAddress = input.from?.[0]?.address;
   const fromDomain = domainOf(fromAddress);
   const replyDomain = domainOf(input.replyTo?.[0]?.address);
-  if (fromDomain && replyDomain && baseDomain(fromDomain) !== baseDomain(replyDomain)) {
+  if (input.automated !== true && fromDomain && replyDomain && baseDomain(fromDomain) !== baseDomain(replyDomain)) {
     caution.push(`Replies go to ${replyDomain}, not to the sender's domain ${fromDomain}.`);
   }
   const shownName = input.from?.[0]?.name ?? "";

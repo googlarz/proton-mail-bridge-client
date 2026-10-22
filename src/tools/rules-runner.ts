@@ -232,7 +232,7 @@ export async function runRulesOnNewMail(bundle: AccountBundle, emails: EmailSumm
   if (rules.length === 0) return undefined;
   const handled = await bundle.rulesService.handledMap();
   // Mail written to steer an AI is left for a person: no rule acts on it by itself.
-  const safe = emails.filter((email) => assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview }).level !== "high");
+  const safe = emails.filter((email) => assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview, automated: email.isAutomated }).level !== "high");
   const plan = planChanges(rules, safe, Date.now(), { automatic: true, handled, ownAddresses: bundle.ownAddresses });
   if (plan.length === 0) return undefined;
   return executePlan(bundle, plan, { automatic: true, dryRun: false, limit: 200 });
