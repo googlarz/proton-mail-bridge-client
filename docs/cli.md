@@ -68,6 +68,7 @@ see `list-accounts`) is routed to that account, and `PROTONMAIL_ALLOWED_ACTIONS`
 
 ```bash
 proton-mail-bridge-client digest
+proton-mail-bridge-client brief --sync --mark-seen --notify   # what changed since the last brief, as a notification
 proton-mail-bridge-client threads "quarterly review"
 proton-mail-bridge-client get-threads --args '{"folder":"Archive","limit":20}'   # threads with a message in one folder
 proton-mail-bridge-client actionable
@@ -304,6 +305,7 @@ proton-mail-bridge-client sync-folders
 proton-mail-bridge-client get-labels
 proton-mail-bridge-client get-threads
 proton-mail-bridge-client get-inbox-digest
+proton-mail-bridge-client get-brief
 proton-mail-bridge-client get-follow-up-candidates
 ```
 

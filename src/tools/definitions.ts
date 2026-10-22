@@ -894,6 +894,21 @@ export const TOOLS = [
     },
   },
   {
+    name: "get_brief",
+    description: "A short briefing of what changed since the last brief: how many messages arrived (from people against automatic), what waits for your reply, replies you are waiting for that are overdue, and mail that looks written to steer an AI. Works from the local index (set syncBefore to refresh first). Read-only unless markSeen is true, which moves the 'since' mark so the next brief covers only what came after. The `text` field has the same in a few plain lines, ready for a notification.",
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of one account (see list_accounts). Default: all accounts." },
+        since: { type: "string", description: "Report mail from this time on (ISO date or time). Default: the last brief that was marked seen, or the last 24 hours." },
+        limit: { type: "integer", description: "At most this many threads per section (1-50, default 5).", minimum: 1, maximum: 50 },
+        syncBefore: { type: "boolean", description: "Refresh the INBOX in the local index first (default false)." },
+        markSeen: { type: "boolean", description: "Remember this moment as the last brief (default false)." },
+      },
+    },
+  },
+  {
     name: "get_autoresponder",
     description: "Show the automatic reply of one address: the rule, whether it is active now, what this server can do for it (send, draft; background sync running), counts and who wrote while it was on (replied, drafted, skipped and why), and the latest entries of its log.",
     annotations: { readOnlyHint: true },

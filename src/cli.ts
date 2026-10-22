@@ -150,6 +150,7 @@ function printHelp(): void {
       "  empty-folder <folder>  Permanently empty a folder (--confirmed to execute)",
       "  labels                 List normalized labels from the local index",
       "  threads [query]        List normalized threads from the local index",
+      "  brief                  What changed since the last brief (--since --limit --sync --mark-seen --notify)",
       "  digest                 Show inbox digest and top actionable threads",
       "  followups              Show follow-up candidates from the local index",
       "  emails                 List emails from a folder (--folder --limit --offset)",
@@ -287,6 +288,7 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   "empty-folder": { usage: "empty-folder <folder> [--confirmed]", description: "Permanently empty a folder (--confirmed to execute)", flags: ["folder", "confirmed"] },
   labels: { usage: "labels [--limit <n>]", description: "List normalized labels from the local index", flags: ["limit"] },
   threads: { usage: "threads [query] [--label <name>] [--limit <n>] [--sync]", description: "List normalized threads from the local index", flags: ["sync", "folder", "limit", "label"] },
+  brief: { usage: "brief [--account <a>] [--since <time>] [--limit <n>] [--sync] [--mark-seen] [--notify]", description: "What changed since the last brief: new mail, what waits for your reply, overdue replies, suspicious mail (--notify shows it as a system notification, --mark-seen moves the since mark)", flags: ["account", "since", "limit", "sync", "mark-seen", "notify"] },
   digest: { usage: "digest [--limit <n>] [--age-hours <n>] [--sync]", description: "Show inbox digest and top actionable threads", flags: ["sync", "limit", "age-hours"] },
   followups: { usage: "followups [--pending you|them|any] [--limit <n>] [--age-hours <n>] [--sync]", description: "Show follow-up candidates from the local index", flags: ["sync", "pending", "limit", "age-hours"] },
   emails: { usage: "emails [--folder <name>] [--limit <n>] [--offset <n>]", description: "List emails from a folder", flags: ["folder", "limit", "offset"] },
@@ -1781,6 +1783,27 @@ async function runContacts(parsed: ParsedCliArgs): Promise<void> {
   });
 }
 
+async function runBrief(parsed: ParsedCliArgs): Promise<void> {
+  const wantJson = isTruthyFlag(parsed.flags.json);
+  const args: Record<string, unknown> = { limit: getNumberFlag(parsed.flags, "limit", 5) };
+  const account = getStringFlag(parsed.flags, "account");
+  const since = getStringFlag(parsed.flags, "since");
+  if (account) args.account = account;
+  if (since) args.since = since;
+  if (isTruthyFlag(parsed.flags.sync)) args.syncBefore = true;
+  if (isTruthyFlag(parsed.flags["mark-seen"])) args.markSeen = true;
+  await withMcpClient(async (client) => {
+    const result = await client.callTool({ name: "get_brief", arguments: args });
+    printToolCallResult(result as Record<string, unknown>, wantJson);
+    // The same few lines as a system notification, so a scheduled run reaches you without opening anything.
+    if (isTruthyFlag(parsed.flags.notify) && !result.isError) {
+      const text = (result.content as Array<{ type: string; text?: string }>).find((part) => part.type === "text")?.text;
+      const lines = text ? (JSON.parse(text) as { text?: string[] }).text : undefined;
+      if (lines?.length) await sendSystemNotification("Proton Mail brief", lines.join("\n"));
+    }
+  });
+}
+
 async function runVolumeTrends(parsed: ParsedCliArgs): Promise<void> {
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
@@ -2196,6 +2219,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "set-rule", tool: "set_rule", positionals: [], help: "Create, change or accept a proposal as a rule (--proposalId, --id, --name, --enabled, --when, --actions, --confirmed)" },
   { command: "delete-rule", tool: "delete_rule", positionals: ["id"], help: "Delete a rule, or dismiss a proposal" },
   { command: "apply-rules", tool: "apply_rules", positionals: [], help: "Run the rules on mail already in the index; a preview unless --dryRun false (--ruleId, --limit, --confirmed)" },
+  { command: "get-brief", tool: "get_brief", positionals: [], help: "(tool form; see also `brief`)" },
   { command: "autoresponder", tool: "get_autoresponder", positionals: [], help: "Show the automatic reply of an address (--account)" },
   { command: "set-autoresponder", tool: "set_autoresponder", positionals: [], help: "Set up or switch off the automatic reply of an address (--enabled, --body, --subject, --startsAt, --endsAt, --outgoingNote, --mode, --timezone, --rules, --confirmed)" },
   { command: "list-templates", tool: "list_templates", positionals: [], help: "List saved email templates" },
@@ -2398,6 +2422,9 @@ export async function main(): Promise<void> {
       return;
     case "threads":
       await runThreads(parsed);
+      return;
+    case "brief":
+      await runBrief(parsed);
       return;
     case "digest":
       await runDigest(parsed);

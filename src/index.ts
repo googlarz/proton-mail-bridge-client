@@ -41,6 +41,7 @@ import { handleTemplateAndReminderTool } from "./tools/templates-and-reminders.j
 import { logger } from "./utils/logger.js";
 import { ToolResult, createTextResult } from "./tools/results.js";
 import { withIgnoredArgumentsNote, asObject } from "./tools/args.js";
+import { handleBriefTool } from "./tools/brief.js";
 import { TAINT_GATED_TOOLS } from "./utils/mail-security.js";
 import { buildEmailResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
@@ -334,6 +335,9 @@ export function createServer(
         case "respond_to_invite":
         case "forward_email":
           return await handleSendingTool(name, args, ctx);
+
+        case "get_brief":
+          return await handleBriefTool(name, args, ctx);
 
         case "get_emails":
         case "get_email_by_id":
