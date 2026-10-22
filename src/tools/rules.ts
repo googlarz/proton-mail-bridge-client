@@ -69,6 +69,10 @@ export async function handleRuleTool(name: string, args: Record<string, unknown>
       const existing = patch.id ? (await target.rulesService.allRules()).find((rule) => rule.id === patch.id) : undefined;
       const effectiveThen = (patch.actions ?? existing?.actions) as MailRule["actions"] | undefined;
       if (effectiveThen?.forwardTo?.length && patch.enabled !== false) {
+        // Forwarding to an address of the same account would feed the copy back into the rule.
+        const own = new Set(target.ownAddresses.map((address) => address.trim().toLowerCase()));
+        const loop = effectiveThen.forwardTo.find((address) => own.has(address.trim().toLowerCase()));
+        if (loop) throw new McpError(ErrorCode.InvalidParams, `${loop} is an address of this account, so the forwarded copy would come back and be forwarded again. Forward to another address.`);
         // It sends mail on its own: everything a send needs, and a confirmation like one.
         ensureSendAllowed(runtime);
         ensureOutboundRecipientsAllowed(runtime, target.config.smtp.username, effectiveThen.forwardTo);

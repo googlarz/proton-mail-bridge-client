@@ -199,3 +199,15 @@ test("a forwarding rule is gated like a send and needs a narrowing condition; sw
     assert.ok(!none.isError);
   });
 });
+
+test("a forwarding rule may not point at an address of the same account (the copy would loop)", async () => {
+  await withServer({}, async (client) => {
+    const own = JSON.parse(text(await client.callTool({ name: "list_accounts", arguments: {} }))).accounts?.[0]?.address;
+    assert.ok(own, "the test account has an address");
+    for (const to of [own, own.toUpperCase()]) {
+      const refused = await client.callTool({ name: "set_rule", arguments: { name: "loop", when: { from: ["pat@client.example"] }, actions: { forwardTo: [to] }, confirmed: true } });
+      assert.equal(refused.isError, true);
+      assert.match(text(refused), /would come back/);
+    }
+  });
+});

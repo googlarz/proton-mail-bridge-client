@@ -49,6 +49,7 @@ What this project protects, from whom, and where it stops. It is written for som
 - **A model that is told to leak what it reads.** Mail that reaches the model's context can be repeated to whoever runs the client. Choose the client with that in mind.
 - **A hostile Bridge, or a compromised Proton account.**
 - **The client's own handling of tool results** (what it stores or sends to its vendor). This server cannot see it.
+- **Read-only mode and files.** `read-only` stops every change to the mailbox, but `save_attachment(s)` still writes into the download folder you configured (never elsewhere), and `delete_rule` always works so a rule can be switched off. A test (`read-only-probe`) calls every tool in read-only mode and fails if another one reaches a writing method.
 - **Automatic replies and forwarding rules, once enabled.** They send mail without a confirmation step each time. See "Autoresponder" and "Mailbox rules" in the README for the limits that apply (off by default, confirmation to switch on, a daily cap, no lists, only new mail).
 
 ## If you want the smallest footprint
