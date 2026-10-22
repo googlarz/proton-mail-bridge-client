@@ -1001,6 +1001,20 @@ export const TOOLS = [
     },
   },
   {
+    name: "get_style_profile",
+    description: "How the user writes, worked out from their own sent mail on this machine: language, how they open and close, formality, typical length, emoji. Returns a few plain `hints` and the numbers behind them, overall and (with recipient) for that person or their company. Call it BEFORE drafting a reply or a new mail so the draft sounds like them. Cached for a week; refresh rebuilds it. Keeps patterns and counts only, no sentences or names. Changes nothing in the mailbox.",
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        recipient: { type: "string", description: "An address to get the hints for, when the user writes to them differently (language, formality)." },
+        refresh: { type: "boolean", description: "Rebuild from the latest sent mail instead of using the cached profile (default false)." },
+        limit: { type: "integer", description: "How many sent messages to read when rebuilding (10-150, default 60).", minimum: 10, maximum: 150 },
+      },
+    },
+  },
+  {
     name: "get_autoresponder",
     description: "Show the automatic reply of one address: the rule, whether it is active now, what this server can do for it (send, draft; background sync running), counts and who wrote while it was on (replied, drafted, skipped and why), and the latest entries of its log.",
     annotations: { readOnlyHint: true },

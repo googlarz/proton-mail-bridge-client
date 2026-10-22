@@ -2225,6 +2225,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "find-commitments", tool: "find_commitments", positionals: [], help: "Find sentences that look like promises in recent mail (--args '{\"days\":7,\"direction\":\"both\"}')" },
   { command: "set-commitment", tool: "set_commitment", positionals: [], help: "Record a commitment, or close one (--args '{\"text\":\"...\",\"direction\":\"mine\",\"due\":\"2026-11-05\"}')" },
   { command: "commitments", tool: "list_commitments", positionals: [], help: "The commitment ledger: overdue, due today, open, probably done (--args '{\"status\":\"all\"}')" },
+  { command: "style-profile", tool: "get_style_profile", positionals: [], help: "How you write, from your sent mail: language, greeting, closing, tone (--args '{\"recipient\":\"pat@client.example\",\"refresh\":true}')" },
   { command: "get-brief", tool: "get_brief", positionals: [], help: "(tool form; see also `brief`)" },
   { command: "autoresponder", tool: "get_autoresponder", positionals: [], help: "Show the automatic reply of an address (--account)" },
   { command: "set-autoresponder", tool: "set_autoresponder", positionals: [], help: "Set up or switch off the automatic reply of an address (--enabled, --body, --subject, --startsAt, --endsAt, --outgoingNote, --mode, --timezone, --rules, --confirmed)" },
