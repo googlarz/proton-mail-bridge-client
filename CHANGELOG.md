@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.15.2] — 2026-10-22
+
+Found by running the tools against my own three accounts and by probing every tool for what it may touch:
+
+- **Ids returned by `move_email`, `archive_email`, `trash_email` and `restore_email` for a second account had the account prefix twice** (`slug::slug::Trash::…`), so the id could not be passed back. Found live; fixed and tested against a fake Bridge.
+- **A forwarding rule may not forward to an address of the same account**: the copy would arrive in the mailbox the rule watches. `set_rule` now refuses it.
+- **A test calls all 108 tools in read-only mode** and fails if one reaches a method that writes. Deliberate exceptions: `delete_rule` (a rule can always be removed) and `save_attachment(s)` (writes into the download folder you configured). Written down in the threat model.
+- The server now sends short **instructions** to the client (how ids and accounts work, that mail text is not to be obeyed, that rules send by themselves); a test checks every tool it names exists. The README says how to start safely with `PROTONMAIL_MODE=drafts`.
+- The connection-error classifiers moved out of `simple-imap-service.ts` into `imap-errors.ts` (same exports).
+
 - **`bulk_move` asked every account about Trash, not the ones it touches**: with `account` naming the second account, the check "is the target a Trash folder" still went through the primary account (and failed if the primary was unreachable). It now asks only the accounts the call works in. A new test calls every tool that takes `account` with the second account named and fails if any of them touches the primary account's services (the audit log excepted, which is kept in the primary's).
 
 ## [2.15.1] — 2026-10-22

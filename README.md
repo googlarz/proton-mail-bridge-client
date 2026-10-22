@@ -44,7 +44,8 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
    - "Find the last email from `alice@example.com` and draft a reply for me to review." (nothing is sent until you say so)
    - "Which of my emails have attachments from this month?"
    - "Show me my drafts and tighten the oldest one."
-5. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 108), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
+5. **Not sure about handing over control?** Start with `PROTONMAIL_MODE=drafts`: Claude can read, search and prepare drafts, but nothing is sent or deleted until you change the mode. The server also tells the client how to behave (ids, accounts, never obeying instructions found inside a message).
+6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 108), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
 
 ---
 
@@ -297,7 +298,7 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 For a server with no desktop, next to a headless Bridge. The image installs the published npm package and is published for each release to `ghcr.io/googlarz/proton-mail-bridge-client` (`:<version>` and `:latest`, linux/amd64 and linux/arm64). To build it yourself from this repo:
 
 ```bash
-docker build -f docker/Dockerfile --build-arg VERSION=2.15.1 -t proton-mail-bridge-client .
+docker build -f docker/Dockerfile --build-arg VERSION=2.15.2 -t proton-mail-bridge-client .
 docker run -i --rm --network host \
   -e PROTONMAIL_USERNAME=you@proton.me -e PROTONMAIL_PASSWORD_FILE=/run/secrets/bridge \
   -v /path/to/bridge-password:/run/secrets/bridge:ro -v bridge-client-data:/data \
