@@ -336,7 +336,7 @@ get_autoresponder  account=work@example.com                      # state, counts
 
 ## Mail firewall (prompt-injection guard)
 
-Mail is untrusted text that a model reads. `get_email_by_id` and `get_emails_by_ids` add a `risk` note (`caution` or `high`, with the reasons) when a message looks written to steer an AI or to deceive you: instructions addressed to an assistant (English, Polish, German), text hidden by markup or zero-width characters, a link that reads one address and goes to another, a Reply-To on another domain, a sender name that shows a different address, a failed SPF/DKIM/DMARC check. Normal mail carries no note.
+Mail is untrusted text that a model reads. `get_email_by_id` and `get_emails_by_ids` add a `risk` note (`caution` or `high`, with the reasons) when a message looks written to steer an AI or to deceive you: instructions addressed to an assistant (English, Polish, German), text hidden by markup or zero-width characters, a link that reads one address and goes to another, a Reply-To on another domain, a sender name that shows a different address, a failed SPF/DKIM/DMARC check. Normal mail carries no note. The instruction patterns are also checked wherever else text reaches the model: attachment text, thread reads, lists with previews and reading a message as an MCP resource.
 
 After a **high** message has been read, the tools that reach outside (`send_email`, replies, `forward_email`, `send_draft`, `schedule_draft`, `delete_email`, `delete_thread`, `bulk_delete`, `empty_folder`, `unsubscribe_sender`, `respond_to_invite`, and switching on `set_rule` or `set_autoresponder`) ask for `confirmed: true` and quote the reason, even when `PROTONMAIL_CONFIRM_DESTRUCTIVE` is off. Previews (`dryRun`) and switching things off pass. Rules and the autoresponder never act by themselves on a high-risk message. This narrows what a persuaded model can do; it cannot read intent (see the [threat model](docs/threat-model.md)).
 
@@ -348,7 +348,7 @@ After a **high** message has been read, the tools that reach outside (`send_emai
 proton-mail-bridge-client brief --sync --mark-seen --notify
 ```
 
-`--notify` shows the few lines as a system notification (macOS and Linux with `notify-send`). `schedule` prints a launchd, systemd or cron definition for `digest`; use the same pattern with the command above.
+`--notify` shows the few lines as a system notification (macOS and Linux with `notify-send`). `schedule --job brief` prints the launchd, systemd, cron or Windows task definition that runs it every day (it installs nothing).
 
 ## Tidy in one approval (`plan_inbox`)
 

@@ -8,7 +8,7 @@ import { createTextResult } from "./results.js";
 import { syncDraftToRemote, clearRemoteDraft, pickReplyTargetFromThread, verifySentCopy } from "./actions.js";
 import { withAudit, sanitizeAuditValue } from "./audit.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { optionalString, requireString, optionalAttachmentList, optionalClearableString, parseBodyEdits } from "./args.js";
+import { optionalAddressList, optionalAttachmentList, optionalClearableString, optionalString, parseBodyEdits, requireAddressList, requireString } from "./args.js";
 import { parseEmails, ensureValidEmails, isValidEmail, normalizeBoolean, normalizeLimit, withAccountPrefix, projectFields, optionalBoolean } from "../utils/helpers.js";
 import { ensureMailboxWriteAllowed, resolveRemoteDraftSync, ensureRemoteDraftSyncAllowed, ensureDestructiveConfirmed, ensureSendAllowed, ensureOutboundRecipientsAllowed } from "../utils/runtime-policy.js";
 import type { ToolContext } from "./context.js";
@@ -23,9 +23,9 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
       // Local draft write — was only gated on the remote-sync side, so
       // PROTONMAIL_READ_ONLY never actually stopped a local draft being created.
       ensureMailboxWriteAllowed(config.runtime);
-      const to = parseEmails(optionalString(args, "to"));
-      const cc = parseEmails(optionalString(args, "cc"));
-      const bcc = parseEmails(optionalString(args, "bcc"));
+      const to = parseEmails(optionalAddressList(args, "to"));
+      const cc = parseEmails(optionalAddressList(args, "cc"));
+      const bcc = parseEmails(optionalAddressList(args, "bcc"));
       const subject = requireString(args, "subject");
       const body = requireString(args, "body");
       const replyTo = optionalString(args, "replyTo");
@@ -132,8 +132,8 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
       const isHtml = normalizeBoolean(args.isHtml, false);
       const replyAll = normalizeBoolean(args.replyAll, false);
       const attachments = optionalAttachmentList(args.attachments);
-      const extraCc = parseEmails(optionalString(args, "cc"));
-      const extraBcc = parseEmails(optionalString(args, "bcc"));
+      const extraCc = parseEmails(optionalAddressList(args, "cc"));
+      const extraBcc = parseEmails(optionalAddressList(args, "bcc"));
       const recipients = getReplyRecipients(detail, createReplyReadBundle.config.smtp.username, replyAll, allAccountAddresses());
       const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
       const to = uniqueAddresses(recipients.to);
@@ -240,9 +240,9 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
         requireString(args, "emailId"),
       );
       const detail = await createForwardReadBundle.imapService.getEmailById(createForwardEmailIdRest);
-      const to = parseEmails(requireString(args, "to"));
-      const cc = parseEmails(optionalString(args, "cc"));
-      const bcc = parseEmails(optionalString(args, "bcc"));
+      const to = parseEmails(requireAddressList(args, "to"));
+      const cc = parseEmails(optionalAddressList(args, "cc"));
+      const bcc = parseEmails(optionalAddressList(args, "bcc"));
       const callerAttachments = optionalAttachmentList(args.attachments) ?? [];
 
       ensureValidEmails(to, "to");
@@ -442,9 +442,9 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
       const { bundle: updateDraftBundle, rest: updateDraftIdRest } = resolveAccountForDraftId(
         requireString(args, "draftId"),
       );
-      const to = args.to === undefined ? undefined : parseEmails(optionalString(args, "to"));
-      const cc = args.cc === undefined ? undefined : parseEmails(optionalString(args, "cc"));
-      const bcc = args.bcc === undefined ? undefined : parseEmails(optionalString(args, "bcc"));
+      const to = args.to === undefined ? undefined : parseEmails(optionalAddressList(args, "to"));
+      const cc = args.cc === undefined ? undefined : parseEmails(optionalAddressList(args, "cc"));
+      const bcc = args.bcc === undefined ? undefined : parseEmails(optionalAddressList(args, "bcc"));
       // body/replyTo use optionalClearableString, not optionalString — see its
       // comment — so an explicit body:'' or replyTo:'' actually clears the
       // field instead of being silently treated as "field not provided".
@@ -674,8 +674,8 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
       const isHtml = normalizeBoolean(args.isHtml, false);
       const replyAll = normalizeBoolean(args.replyAll, false);
       const attachments = optionalAttachmentList(args.attachments);
-      const extraCc = parseEmails(optionalString(args, "cc"));
-      const extraBcc = parseEmails(optionalString(args, "bcc"));
+      const extraCc = parseEmails(optionalAddressList(args, "cc"));
+      const extraBcc = parseEmails(optionalAddressList(args, "bcc"));
       const recipients = getReplyRecipients(detail, threadReplyBundle.config.smtp.username, replyAll, allAccountAddresses());
       const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
       const to = uniqueAddresses(recipients.to);

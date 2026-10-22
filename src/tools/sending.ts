@@ -9,7 +9,7 @@ import { withAudit } from "./audit.js";
 import { type SendEmailInput } from "../types/index.js";
 import { createTextResult } from "./results.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { requireString, optionalString, optionalAttachmentList } from "./args.js";
+import { optionalAddressList, optionalAttachmentList, optionalString, requireAddressList, requireString } from "./args.js";
 import { normalizeBoolean, parseEmails, renderMarkdown, ensureValidEmails, isValidEmail, withAccountPrefix, normalizeLimit } from "../utils/helpers.js";
 import { ensureDestructiveConfirmed, ensureSendAllowed, ensureOutboundRecipientsAllowed, ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import type { ToolContext } from "./context.js";
@@ -29,9 +29,9 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
     case "send_email": {
       ensureDestructiveConfirmed(config.runtime, (normalizeBoolean(args.confirmed, false) || normalizeBoolean(args.dryRun, false)), `Send email to ${String(args.to ?? "?")} — "${String(args.subject ?? "?")}"`);
       ensureSendAllowed(config.runtime);
-      const to = parseEmails(requireString(args, "to"));
-      const cc = parseEmails(optionalString(args, "cc"));
-      const bcc = parseEmails(optionalString(args, "bcc"));
+      const to = parseEmails(requireAddressList(args, "to"));
+      const cc = parseEmails(optionalAddressList(args, "cc"));
+      const bcc = parseEmails(optionalAddressList(args, "bcc"));
       const subject = requireString(args, "subject");
       const markdownBodySend = optionalString(args, "markdownBody");
       const body = markdownBodySend ? markdownBodySend : requireString(args, "body");
@@ -303,8 +303,8 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
       const sendBundleForReply = sendBundleReply ?? readBundleReply;
       const sanitizeHtmlReply = normalizeBoolean(args.sanitizeHtml, true);
       const attachments = optionalAttachmentList(args.attachments);
-      const extraCc = parseEmails(optionalString(args, "cc"));
-      const extraBcc = parseEmails(optionalString(args, "bcc"));
+      const extraCc = parseEmails(optionalAddressList(args, "cc"));
+      const extraBcc = parseEmails(optionalAddressList(args, "bcc"));
       const recipients = getReplyRecipients(detail, readBundleReply.config.smtp.username, replyAll, allAccountAddresses());
       const cc = uniqueAddresses([...recipients.cc, ...extraCc]);
       const to = uniqueAddresses(recipients.to);
@@ -409,8 +409,8 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
       const sendBundleForRa = sendBundleRa ?? readBundleRa;
       const sanitizeHtmlRa = normalizeBoolean(args.sanitizeHtml, true);
       const attachmentsRa = optionalAttachmentList(args.attachments);
-      const extraCcRa = parseEmails(optionalString(args, "cc"));
-      const extraBccRa = parseEmails(optionalString(args, "bcc"));
+      const extraCcRa = parseEmails(optionalAddressList(args, "cc"));
+      const extraBccRa = parseEmails(optionalAddressList(args, "bcc"));
       const recipientsRa = getReplyRecipients(detailRa, readBundleRa.config.smtp.username, true, allAccountAddresses());
       const ccRa = uniqueAddresses([...recipientsRa.cc, ...extraCcRa]);
       const toRa = uniqueAddresses(recipientsRa.to);
@@ -593,9 +593,9 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
         requireString(args, "emailId"),
       );
       const detail = await readBundleFwd.imapService.getEmailById(emailIdFwdRest);
-      const to = parseEmails(requireString(args, "to"));
-      const cc = parseEmails(optionalString(args, "cc"));
-      const bcc = parseEmails(optionalString(args, "bcc"));
+      const to = parseEmails(requireAddressList(args, "to"));
+      const cc = parseEmails(optionalAddressList(args, "cc"));
+      const bcc = parseEmails(optionalAddressList(args, "bcc"));
       const markdownBodyFwd = optionalString(args, "markdownBody");
       const body = markdownBodyFwd ?? optionalString(args, "body");
       const isHtml = markdownBodyFwd ? false : normalizeBoolean(args.isHtml, false);

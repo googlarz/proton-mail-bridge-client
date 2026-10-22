@@ -269,7 +269,7 @@ const BULK_FILTER_FLAGS = ["from", "subject", "since", "before"];
 
 export const COMMAND_SPECS: Record<string, CommandSpec> = {
   completion: { usage: "completion <zsh|bash|fish>", description: "Print a shell completion script for the commands and their flags", flags: [] },
-  schedule: { usage: "schedule [--at HH:MM] [--system launchd|systemd|cron|schtasks] [--output <file>] [--password-file <file>]", description: "Print the scheduler definition that runs `digest` every day, with the commands to switch it on (installs nothing)", flags: ["at", "system", "output", "password-file"] },
+  schedule: { usage: "schedule [--job digest|brief] [--at HH:MM] [--system launchd|systemd|cron|schtasks] [--output <file>] [--password-file <file>]", description: "Print the scheduler definition that runs `digest` (or `brief`, as a notification) every day, with the commands to switch it on (installs nothing)", flags: ["job", "at", "system", "output", "password-file"] },
   help: { usage: "help [command]", description: "Show the command list, or the help for one command", flags: [] },
   version: { usage: "version [--check]", description: "Print the version and exit; --check also asks the npm registry whether a newer release exists", flags: ["check"] },
   "setup-claude-desktop": { usage: "setup-claude-desktop", description: "Run the Claude Desktop setup wizard (works from any install)", flags: [] },
@@ -2632,10 +2632,13 @@ function scheduleText(parsed: ParsedCliArgs): string {
     throw new CliUsageError(`--system must be one of: ${SCHEDULER_SYSTEMS.join(", ")} (got "${requested}").`);
   }
   const system = (requested as SchedulerSystem | undefined) ?? defaultSchedulerSystem(process.platform);
+  const job = getStringFlag(parsed.flags, "job") ?? "digest";
+  if (job !== "digest" && job !== "brief") throw new CliUsageError(`--job must be digest or brief (got "${job}").`);
   const home = process.env.HOME ?? process.env.USERPROFILE ?? "~";
   const output = getStringFlag(parsed.flags, "output") ?? `${home}/proton-mail-brief.txt`;
   const passwordFile = getStringFlag(parsed.flags, "password-file") ?? `${home}/.proton-mail-bridge-password`;
   const result = buildSchedule({
+    job,
     system,
     hour,
     minute,

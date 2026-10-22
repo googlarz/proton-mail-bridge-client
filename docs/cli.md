@@ -217,6 +217,7 @@ proton-mail-bridge-client sync --folder INBOX --full
 ```bash
 proton-mail-bridge-client schedule                       # 08:00, for your system (launchd, systemd or Windows tasks)
 proton-mail-bridge-client schedule --at 07:30 --system cron --output ~/brief.txt
+proton-mail-bridge-client schedule --job brief --at 08:00      # the brief as a notification, moving its since mark each day
 ```
 
 | Flag | Meaning |

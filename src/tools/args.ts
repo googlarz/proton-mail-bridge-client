@@ -76,6 +76,23 @@ export function optionalString(args: Record<string, unknown>, key: string): stri
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+// An address argument as the string parseEmails reads: a "a@x, b@y" string, or an array of addresses (which clients send
+// naturally and which used to be dropped, ending in a misleading "Invalid to email address(es)").
+export function optionalAddressList(args: Record<string, unknown>, key: string): string | undefined {
+  const value = args[key];
+  if (Array.isArray(value)) {
+    const joined = value.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean).join(",");
+    return joined || undefined;
+  }
+  return optionalString(args, key);
+}
+
+export function requireAddressList(args: Record<string, unknown>, key: string): string {
+  const value = optionalAddressList(args, key);
+  if (!value) throw new McpError(ErrorCode.InvalidParams, `${key} must be an address, or a list of addresses.`);
+  return value;
+}
+
 // Found live (external review): update_draft's body:'' and replyTo:'' both
 // returned success but left the old values in place — optionalString collapses
 // an explicitly-empty string to undefined the same as an omitted field

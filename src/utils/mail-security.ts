@@ -134,3 +134,63 @@ export const TAINT_GATED_TOOLS = new Set([
   "send_email", "reply_to_email", "reply_all_email", "forward_email", "send_draft", "schedule_draft", "respond_to_invite",
   "unsubscribe_sender", "delete_email", "delete_thread", "bulk_delete", "empty_folder", "set_rule", "set_autoresponder",
 ]);
+
+const ID_KEYS = ["id", "emailId", "primaryEmailId", "latestEmailId"] as const;
+const MAX_SCAN_DEPTH = 7;
+const MAX_SCAN_CHARS = 2_000_000;
+
+// Walks a tool result and marks every message-like node (an id and some text: a body, a preview, an attachment's text)
+// that reads like an instruction to an AI. The session is tainted by it and the node gets a `risk` note. Only the
+// instruction patterns are used here: a list of previews would be too noisy with the weaker signals. Returns whether
+// anything was marked.
+export function annotateHighRisk(value: unknown, taint: MailTaint, depth = 0): boolean {
+  if (depth > MAX_SCAN_DEPTH || value === null || typeof value !== "object") return false;
+  let changed = false;
+  if (Array.isArray(value)) {
+    for (const item of value) if (annotateHighRisk(item, taint, depth + 1)) changed = true;
+    return changed;
+  }
+  const node = value as Record<string, unknown>;
+  if (node.risk === undefined) {
+    const text = [node.text, node.preview, node.snippet, node.subject].filter((part): part is string => typeof part === "string").join("\n");
+    const id = ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
+    if (id && text) {
+      const assessment = assessMail({ subject: typeof node.subject === "string" ? node.subject : undefined, text });
+      if (assessment.level === "high") {
+        node.risk = assessment;
+        taint.mark(id, assessment);
+        changed = true;
+      }
+    }
+  }
+  for (const [key, child] of Object.entries(node)) if (key !== "risk" && annotateHighRisk(child, taint, depth + 1)) changed = true;
+  return changed;
+}
+
+/** A tool handler whose results are scanned for mail that tries to steer an AI, wherever that text came from. */
+export function withRiskScan<R, T extends { content: unknown[]; structuredContent?: unknown; isError?: boolean }>(
+  taint: MailTaint,
+  handler: (request: R) => Promise<T>,
+): (request: R) => Promise<T> {
+  return async (request) => {
+    const result = await handler(request);
+    if (result.isError) return result;
+    let changed = false;
+    const content = result.content.map((part) => {
+      const item = part as { type?: string; text?: string };
+      if (item.type !== "text" || typeof item.text !== "string" || item.text.length > MAX_SCAN_CHARS || !/^[\s]*[{[]/.test(item.text)) return part;
+      try {
+        const parsed = JSON.parse(item.text) as unknown;
+        if (!annotateHighRisk(parsed, taint)) return part;
+        changed = true;
+        return { ...item, text: JSON.stringify(parsed, null, item.text.includes("\n  ") ? 2 : undefined) };
+      } catch {
+        return part;
+      }
+    });
+    if (!changed) return result;
+    const structured = result.structuredContent;
+    if (structured && typeof structured === "object") annotateHighRisk(structured, taint);
+    return { ...result, content, ...(structured !== undefined ? { structuredContent: structured } : {}) };
+  };
+}

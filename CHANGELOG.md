@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **The mail firewall now covers every way text reaches the model**: attachment text, thread reads, lists with previews and reading a message as an MCP resource, not only `get_email_by_id`. Any result with a message-like part that reads like an instruction to an AI gets a `risk` note and arms the confirmation gate.
+- **`schedule --job brief`** prints the scheduler definition for the daily brief notification (launchd, systemd, cron, Windows task).
+- **Address arguments may be arrays**: `to`, `cc` and `bcc` accept `["a@x", "b@y"]` as well as a comma-separated string (an array used to be dropped, ending in "Invalid to email address(es)").
+- **Server instructions only name tools the client has** (`PROTONMAIL_TOOL_TIER=core` leaves some out) and no longer say ids of two accounts never go in one call (the bulk tools take them). From zotabee's check in #32.
+
 - **`search_indexed_emails` takes `queries`**: several wordings of one question, searched and fused (reciprocal rank), with `matchedBy` on each hit.
 - **Windows installer**: `claude install` no longer prints Node's `DEP0190` warning (npm is run as one command line instead of an argument array with a shell). Reported by zotabee in #32; not testable here, so unverified on Windows.
 

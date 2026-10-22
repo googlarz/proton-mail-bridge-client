@@ -119,3 +119,14 @@ test("schedule puts the PATH links into the definition, and falls back to the re
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test("the brief can be scheduled too: its own command, name and no digest", () => {
+  for (const system of SCHEDULER_SYSTEMS) {
+    const everything = JSON.stringify(buildSchedule({ ...base, system, job: "brief" }));
+    assert.match(everything, /brief/, system);
+    assert.match(everything, /--mark-seen/, `${system}: moves the since mark`);
+    assert.match(everything, /--notify/, `${system}: shows a notification`);
+    assert.ok(!/\bdigest\b/.test(everything), `${system}: nothing of the digest job`);
+  }
+  assert.match(buildSchedule({ ...base, system: "launchd", job: "brief" }).file.path, /com\.proton-mail-bridge-client\.brief\.plist$/);
+});

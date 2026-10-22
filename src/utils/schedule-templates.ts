@@ -1,4 +1,4 @@
-// Definitions for running `digest` every day from the operating system's own scheduler. This only builds text: the
+// Definitions for running `digest` (or `brief`) every day from the operating system's own scheduler. This only builds text: the
 // `schedule` command prints it, with the commands to switch it on, and installs nothing by itself.
 
 export type SchedulerSystem = "launchd" | "systemd" | "cron" | "schtasks";
@@ -7,6 +7,8 @@ export const SCHEDULER_SYSTEMS: SchedulerSystem[] = ["launchd", "systemd", "cron
 
 export interface ScheduleOptions {
   system: SchedulerSystem;
+  /** What runs: the digest written to a file (default), or the brief shown as a notification. */
+  job?: "digest" | "brief";
   hour: number;
   minute: number;
   /** Absolute path of the Node binary and of this CLI's script: a scheduler's PATH is minimal. */
@@ -45,7 +47,7 @@ export function defaultSchedulerSystem(platform: NodeJS.Platform): SchedulerSyst
   return "systemd";
 }
 
-const LABEL = "com.proton-mail-bridge-client.digest";
+const JOB_ARGS = { digest: ["digest"], brief: ["brief", "--sync", "--mark-seen", "--notify"] } as const;
 const pad = (value: number) => String(value).padStart(2, "0");
 const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // A path or value inside a double-quoted shell or cron word.
@@ -53,6 +55,9 @@ const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 
 export function buildSchedule(options: ScheduleOptions): ScheduleOutput {
   const { system, hour, minute, node, script, output, username, passwordFile } = options;
+  const job = options.job ?? "digest";
+  const jobArgs = JOB_ARGS[job];
+  const LABEL = `com.proton-mail-bridge-client.${job}`;
   const time = `${pad(hour)}:${pad(minute)}`;
 
   if (system === "launchd") {
@@ -66,7 +71,7 @@ export function buildSchedule(options: ScheduleOptions): ScheduleOutput {
   <array>
     <string>${xml(node)}</string>
     <string>${xml(script)}</string>
-    <string>digest</string>
+    ${jobArgs.map((word) => `<string>${word}</string>`).join("\n    ")}
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -85,7 +90,7 @@ export function buildSchedule(options: ScheduleOptions): ScheduleOutput {
 `;
     return {
       file: { path, content },
-      body: `A launchd job that writes the digest to ${output} every day at ${time}.`,
+      body: `A launchd job that writes the ${job} to ${output} every day at ${time}.`,
       enable: [`launchctl bootstrap gui/$(id -u) ${path}`],
       disable: [`launchctl bootout gui/$(id -u)/${LABEL}`, `rm ${path}`],
     };
@@ -94,18 +99,18 @@ export function buildSchedule(options: ScheduleOptions): ScheduleOutput {
   if (system === "systemd") {
     const dir = "~/.config/systemd/user";
     const service = `[Unit]
-Description=Proton Mail digest
+Description=Proton Mail ${job}
 
 [Service]
 Type=oneshot
 Environment=PROTONMAIL_USERNAME=${username}
 Environment=PROTONMAIL_PASSWORD_FILE=${passwordFile}
-ExecStart=${node} ${script} digest
+ExecStart=${node} ${script} ${jobArgs.join(" ")}
 StandardOutput=file:${output}
 StandardError=file:${output}
 `;
     const timer = `[Unit]
-Description=Proton Mail digest, daily
+Description=Proton Mail ${job}, daily
 
 [Timer]
 OnCalendar=*-*-* ${time}:00
@@ -115,30 +120,30 @@ Persistent=true
 WantedBy=timers.target
 `;
     return {
-      file: { path: `${dir}/proton-mail-digest.timer`, content: timer },
-      body: `A systemd user timer (proton-mail-digest.timer, shown below) that runs this service every day at ${time}.\nAlso create ${dir}/proton-mail-digest.service:\n\n${service}`,
-      enable: ["systemctl --user daemon-reload", "systemctl --user enable --now proton-mail-digest.timer"],
-      disable: ["systemctl --user disable --now proton-mail-digest.timer"],
+      file: { path: `${dir}/proton-mail-${job}.timer`, content: timer },
+      body: `A systemd user timer (proton-mail-${job}.timer, shown below) that runs this service every day at ${time}.\nAlso create ${dir}/proton-mail-${job}.service:\n\n${service}`,
+      enable: ["systemctl --user daemon-reload", "systemctl --user enable --now proton-mail-${job}.timer"],
+      disable: ["systemctl --user disable --now proton-mail-${job}.timer"],
     };
   }
 
   if (system === "cron") {
     const line =
       `${minute} ${hour} * * * PROTONMAIL_USERNAME=${shellQuote(username)} PROTONMAIL_PASSWORD_FILE=${shellQuote(passwordFile)} ` +
-      `${shellQuote(node)} ${shellQuote(script)} digest >> ${shellQuote(output)} 2>&1`;
+      `${shellQuote(node)} ${shellQuote(script)} ${jobArgs.join(" ")} >> ${shellQuote(output)} 2>&1`;
     return {
-      body: `A crontab line that appends the digest to ${output} every day at ${time}:\n\n${line}`,
+      body: `A crontab line that appends the ${job} to ${output} every day at ${time}:\n\n${line}`,
       enable: ["crontab -e   # add the line above"],
       disable: ["crontab -e   # remove the line"],
     };
   }
 
   // schtasks
-  const command = `cmd /c "set PROTONMAIL_USERNAME=${username}&& set PROTONMAIL_PASSWORD_FILE=${passwordFile}&& "${node}" "${script}" digest > "${output}" 2>&1"`;
+  const command = `cmd /c "set PROTONMAIL_USERNAME=${username}&& set PROTONMAIL_PASSWORD_FILE=${passwordFile}&& "${node}" "${script}" ${jobArgs.join(" ")} > "${output}" 2>&1"`;
   return {
-    body: `A Windows scheduled task that writes the digest to ${output} every day at ${time}.`,
-    enable: [`schtasks /Create /SC DAILY /ST ${time} /TN "Proton Mail digest" /TR '${command}'`],
-    disable: [`schtasks /Delete /TN "Proton Mail digest" /F`],
+    body: `A Windows scheduled task that writes the ${job} to ${output} every day at ${time}.`,
+    enable: [`schtasks /Create /SC DAILY /ST ${time} /TN "Proton Mail ${job}" /TR '${command}'`],
+    disable: [`schtasks /Delete /TN "Proton Mail ${job}" /F`],
   };
 }
 
