@@ -328,7 +328,6 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const matchSlug = matchBundle === primaryBundle ? undefined : matchBundle.account.slug;
       const explicitFolder = folderOwner ? folderOwner.paths[0] : undefined;
       const targetFolder = requireString(args, "targetFolder");
-      await ensureMoveTargetAllowed(config.runtime, accountManager.all().map((entry) => entry.imapService), targetFolder);
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
 
@@ -336,13 +335,15 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       // prefix names one; a plain id is the primary's) — group them so
       // each account's ids resolve/run against that account's own
       // imapService, then merge the per-group results back below. A
-      // match-only call (no emailIds) has no account identity to group
-      // by, so it stays scoped to the primary account, unchanged.
+      // match-only call (no emailIds) works in the account it names
+      // (`account`, or a prefixed folder), else the primary.
       const groups = emailIds
         ? groupEmailIdsByAccount(accountManager, emailIds)
         : new Map<string | undefined, { bundle: AccountBundle; restIds: string[] | undefined }>([
             [matchSlug, { bundle: matchBundle, restIds: undefined }],
           ]);
+      // Whether the target is a Trash folder is a question about the accounts this call touches, not about every account.
+      await ensureMoveTargetAllowed(config.runtime, [...groups.values()].map((group) => group.bundle.imapService), targetFolder);
 
       let totalUids = 0;
       const prepared: Array<{

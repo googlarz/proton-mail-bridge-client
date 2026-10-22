@@ -250,6 +250,11 @@ test("a bulk call that selects by match works in the account it is told to, by a
       await client.callTool({ name: tool, arguments: { match, folder: "Sent", dryRun: true, ...extra } });
       assert.deepEqual(seen.slice(0, 1), ["primary:Sent"], `${tool} without either stays in the primary account`);
     }
+    // The Trash check for a move's target asks the accounts the call touches, not every account.
+    primary.imapService.isTrashFolder = async () => { throw new Error("the primary account must not be asked"); };
+    work.imapService.isTrashFolder = async () => false;
+    const moved = await client.callTool({ name: "bulk_move", arguments: { match, folder: "Sent", account: work.account.address, targetFolder: "Archive", dryRun: true } });
+    assert.doesNotMatch(moved.content[0].text, /primary account must not be asked|Cannot tell whether/, moved.content[0].text);
     const clash = await client.callTool({ name: "bulk_update_flags", arguments: { match, folder: `${work.account.slug}::Sent`, account: primary.account.address, flagsToAdd: ["\\Seen"], dryRun: true } });
     assert.equal(clash.isError, true, "an account and a prefix that name different accounts are refused");
   }, ["delete", "move", "trash", "mark_read", "mark_unread", "star", "unstar", "archive"]);

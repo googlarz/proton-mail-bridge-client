@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`bulk_move` asked every account about Trash, not the ones it touches**: with `account` naming the second account, the check "is the target a Trash folder" still went through the primary account (and failed if the primary was unreachable). It now asks only the accounts the call works in. A new test calls every tool that takes `account` with the second account named and fails if any of them touches the primary account's services (the audit log excepted, which is kept in the primary's).
+
 ## [2.15.1] — 2026-10-22
 
 From zotabee's check of 2.15.0 (#32):
