@@ -95,7 +95,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
             },
           ]
         : [];
-      return createTextResult(withPrefixedIds(bundle, { ...result, targetEmailId }), false, sources);
+      return createTextResult(withPrefixedIds(bundle, result), false, sources);
     }
 
     case "archive_email":
@@ -119,7 +119,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
             },
           ]
         : [];
-      return createTextResult(withPrefixedIds(bundle, { ...result, targetEmailId }), false, sources);
+      return createTextResult(withPrefixedIds(bundle, result), false, sources);
     }
 
     case "trash_email":
@@ -143,7 +143,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
             },
           ]
         : [];
-      return createTextResult(withPrefixedIds(bundle, { ...result, targetEmailId }), false, sources);
+      return createTextResult(withPrefixedIds(bundle, result), false, sources);
     }
 
     case "restore_email":
@@ -172,7 +172,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
             },
           ]
         : [];
-      return createTextResult(withPrefixedIds(bundle, { ...result, targetEmailId }), false, sources);
+      return createTextResult(withPrefixedIds(bundle, result), false, sources);
     }
 
     case "delete_email": {
