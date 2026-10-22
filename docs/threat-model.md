@@ -24,6 +24,7 @@ What this project protects, from whom, and where it stops. It is written for som
 - Sending and permanent deletion ask for `confirmed: true` when `PROTONMAIL_CONFIRM_DESTRUCTIVE` is on, so a client that shows tool calls to the user has a place to stop. `dryRun` previews without that step and sends nothing.
 - `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF` limits recipients to your own addresses, which defeats "send this to someone else" while you read mail.
 - Tool calls that change something are recorded in `audit.log`, with credentials and message bodies redacted from the arguments.
+- After a message the server rates high-risk (instructions to an AI, hidden text) was read, sending and destructive tools ask for `confirmed: true` whatever the setting, and rules and the autoresponder skip it. The rating is pattern-based: a careful attacker can avoid the patterns.
 - **Limit:** these gates narrow what is possible; they cannot tell a harmful request from a wanted one. In `full` mode with confirmation off, a persuaded model can act.
 
 **2. A message tries to run code or phone home through its content.**

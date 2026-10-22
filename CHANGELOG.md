@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Mail firewall**: a `risk` note on messages that look written to steer an AI or to deceive; after a high-risk message was read, outgoing and destructive tools need `confirmed: true` with the reason quoted; rules and the autoresponder skip such mail. See the README.
+
 ## [2.15.2] — 2026-10-22
 
 Found by running the tools against my own three accounts and by probing every tool for what it may touch:

@@ -11,6 +11,7 @@ import { type ReplyReminderRecord } from "../services/reply-reminder-service.js"
 import { splitAccountPrefix, withAccountPrefix } from "../utils/helpers.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { optionalString } from "./args.js";
+import { MailTaint } from "../utils/mail-security.js";
 import type { AccountBundle, AccountManager } from "../services/account-manager.js";
 import type { ProtonMailConfig } from "../types/index.js";
 
@@ -220,7 +221,10 @@ export function createToolContext(config: ProtonMailConfig, accountManager: Acco
     };
   }
 
+  const taint = new MailTaint();
+
   return {
+    taint,
     config,
     accountManager,
     primaryBundle,

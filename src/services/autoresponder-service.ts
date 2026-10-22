@@ -6,6 +6,7 @@ import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js"
 import { withFileLock } from "../utils/file-lock.js";
 import { InvalidArgumentError } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
+import { assessMail } from "../utils/mail-security.js";
 
 // An automatic reply for one address, plus a note that address appends to what it sends. It sends mail without anyone
 // looking, so every default is the cautious one: off, only to a human sender who wrote to this address, once per
@@ -104,6 +105,7 @@ export type AutoresponderSkipReason =
   | "before-activation"
   | "outside-window"
   | "not-human"
+  | "suspicious"
   | "no-sender"
   | "own-address"
   | "no-reply-sender"
@@ -299,6 +301,8 @@ export async function decide(
   const base = { id: email.id, from: sender, subject: email.subject };
   const reason = skipReason(email, state, ownAddresses, now, checks);
   if (reason) return { ...base, outcome: "skip", reason };
+  // A reply to mail written to steer an AI would confirm that the address is read.
+  if (assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview }).level === "high") return { ...base, outcome: "skip", reason: "suspicious" };
 
   // Rules, in order.
   let action: AutoresponderAction = rule.mode === "draft" ? "draft" : "reply";

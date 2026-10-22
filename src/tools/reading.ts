@@ -5,6 +5,7 @@ import { type ActionableThreadSummary, type EmailAddress, type ThreadDetail } fr
 import { refreshIndexForSearch, maybeRefreshLocalIndex, getAnalyticsSampleFromIndex } from "./index-refresh.js";
 import { type AccountBundle } from "../services/account-manager.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { assessMail } from "../utils/mail-security.js";
 import { formatEmailDetailOutput, extractUnsubscribeInfo } from "./compose.js";
 import { describeAccountFailure, accountSlugForTag, sortByDateDesc, paginateMergedAccountResults, trimThreadsToBudget, paginationFields, tagAccountIds, THREAD_LIST_RESPONSE_BUDGET_CHARS, mergeCountedEntries, mergeContactStats, mergeVolumeTrends } from "./merge.js";
 import { emailSource, attachmentSource, threadSource } from "./resources.js";
@@ -19,7 +20,7 @@ import type { ToolResult } from "./results.js";
 const MAX_IMPORT_MESSAGE_BYTES = 50 * 1024 * 1024;
 
 export async function handleReadingTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-  const { config, accountManager, imapService, analyticsService, auditService, localIndexService, resolveAccountArg, resolveFolderTarget, selectedBundles, evaluateReminders, resolveAccountForEmailId, prefixedIdFor, slugForBundle } = ctx;
+  const { config, accountManager, imapService, analyticsService, auditService, localIndexService, resolveAccountArg, resolveFolderTarget, selectedBundles, evaluateReminders, resolveAccountForEmailId, prefixedIdFor, slugForBundle, taint } = ctx;
   switch (name) {
     case "get_emails": {
       const effectiveLimit = normalizeLimit(args.limit, 50);
@@ -140,6 +141,11 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
 
       const prefixedEmailId = prefixedIdFor(bundle, detail.id);
       output.id = prefixedEmailId;
+      const security = assessMail(detail);
+      if (security.level !== "ok") {
+        output.risk = security;
+        taint.mark(prefixedEmailId, security);
+      }
       return createTextResult(output, false, [emailSource({ ...detail, id: prefixedEmailId }), ...detail.attachments.map((attachment) => attachmentSource(prefixedEmailId, attachment))]);
     }
 
@@ -168,6 +174,11 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
             const detail = await bundle.imapService.getEmailById(rest);
             const output = formatEmailDetailOutput(detail, preferHtml, maxBodyLength);
             output.id = prefixedIdFor(bundle, detail.id);
+            const security = assessMail(detail);
+            if (security.level !== "ok") {
+              output.risk = security;
+              taint.mark(output.id as string, security);
+            }
             return { emailId, ok: true as const, email: output };
           } catch (error) {
             return { emailId, ok: false as const, error: error instanceof Error ? error.message : String(error) };

@@ -334,6 +334,12 @@ get_autoresponder  account=work@example.com                      # state, counts
 
 `outgoingNote` is appended, after the signature, to every mail sent from that address while the rule is active (a send with `appendSignature: false` opts out). On the command line: `set-autoresponder`, `autoresponder` and `preview-autoresponder`. The rule, the log and the memory of who was answered live in `autoresponder.json` in the account's data directory; every account (every address Bridge exposes) has its own.
 
+## Mail firewall (prompt-injection guard)
+
+Mail is untrusted text that a model reads. `get_email_by_id` and `get_emails_by_ids` add a `risk` note (`caution` or `high`, with the reasons) when a message looks written to steer an AI or to deceive you: instructions addressed to an assistant (English, Polish, German), text hidden by markup or zero-width characters, a link that reads one address and goes to another, a Reply-To on another domain, a sender name that shows a different address, a failed SPF/DKIM/DMARC check. Normal mail carries no note.
+
+After a **high** message has been read, the tools that reach outside (`send_email`, replies, `forward_email`, `send_draft`, `schedule_draft`, `delete_email`, `delete_thread`, `bulk_delete`, `empty_folder`, `unsubscribe_sender`, `respond_to_invite`, and switching on `set_rule` or `set_autoresponder`) ask for `confirmed: true` and quote the reason, even when `PROTONMAIL_CONFIRM_DESTRUCTIVE` is off. Previews (`dryRun`) and switching things off pass. Rules and the autoresponder never act by themselves on a high-risk message. This narrows what a persuaded model can do; it cannot read intent (see the [threat model](docs/threat-model.md)).
+
 ## Mailbox rules (suggestions, filters, cleanup, forwarding)
 
 Proton's own filters act on **new** mail, the free plan has one custom filter, and auto-delete of Trash and Spam is a paid feature with a fixed 30 days (see Proton's pages on [filters](https://proton.me/support/email-inbox-filters) and [auto-delete](https://proton.me/support/auto-delete-unwanted-messages)). These rules work alongside them: on mail that is already there, with a preview, and with a scan that suggests rules instead of waiting for you to write them. They run on this server, so they only act while it runs.

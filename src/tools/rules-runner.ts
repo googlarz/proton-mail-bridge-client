@@ -3,6 +3,7 @@ import type { MailRule, PlannedChange, RuleLogEntry } from "../services/rules-se
 import { planChanges } from "../services/rules-service.js";
 import type { EmailSummary, SendEmailInput } from "../types/index.js";
 import { parseEmailId } from "../utils/helpers.js";
+import { assessMail } from "../utils/mail-security.js";
 import { logger } from "../utils/logger.js";
 import { ensureEmailActionAllowed, ensureMailboxWriteAllowed, ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 import { buildForwardText, prefixedSubject } from "./compose.js";
@@ -230,7 +231,9 @@ export async function runRulesOnNewMail(bundle: AccountBundle, emails: EmailSumm
   const rules: MailRule[] = await bundle.rulesService.enabledRules();
   if (rules.length === 0) return undefined;
   const handled = await bundle.rulesService.handledMap();
-  const plan = planChanges(rules, emails, Date.now(), { automatic: true, handled, ownAddresses: bundle.ownAddresses });
+  // Mail written to steer an AI is left for a person: no rule acts on it by itself.
+  const safe = emails.filter((email) => assessMail({ from: email.from, replyTo: email.replyTo, subject: email.subject, text: email.preview }).level !== "high");
+  const plan = planChanges(rules, safe, Date.now(), { automatic: true, handled, ownAddresses: bundle.ownAddresses });
   if (plan.length === 0) return undefined;
   return executePlan(bundle, plan, { automatic: true, dryRun: false, limit: 200 });
 }
