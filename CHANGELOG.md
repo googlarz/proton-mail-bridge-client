@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.16.0] — 2026-10-23
+
+AI-era features: a firewall against mail that tries to steer a model, a reviewed batch for tidying, a brief, a commitments ledger, a style profile and search by several wordings. See each entry below.
+
 - **Found by running the new tools on a real mailbox** (28k-message INBOX; reading one full message from Bridge takes about 3 seconds there): `get_style_profile` now builds in the background when it takes longer than `waitSeconds` (default 25) and answers `building: true`, instead of timing out; the command line waits for the whole build. `find_commitments` reads 10 messages by default (it timed out at 30) and reads them a few at a time. Commitment dates now understand "16 October 2026", "5 listopada", "3. Dezember"; "well" is no longer taken for "we'll"; hard-wrapped lines are joined before sentences are split.
 
 - **The mail firewall now covers every way text reaches the model**: attachment text, thread reads, lists with previews and reading a message as an MCP resource, not only `get_email_by_id`. Any result with a message-like part that reads like an instruction to an AI gets a `risk` note and arms the confirmation gate.
