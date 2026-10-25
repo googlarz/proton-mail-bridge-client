@@ -83,7 +83,7 @@
     "unpdf": "1.9.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.15",
+    "@biomejs/biome": "2.6.2",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.19.1",
     "@types/sanitize-html": "^2.16.1",
