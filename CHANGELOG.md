@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.16.1] — 2026-10-26
+
+- **Dependencies**: `npm audit` reported 6 known vulnerabilities in the production dependencies (high: `body-parser`, `zod`; moderate: `fast-uri`, `ip-address`, `mailparser`, `nodemailer`). The lockfile now holds fixed versions (no `package.json` change); `npm audit --omit=dev` finds none. CI audits at `high`, which is why the Dependabot PRs for these failed.
+- **A test calls every tool with no action allowed** (`PROTONMAIL_ALLOWED_ACTIONS` empty, mailbox writable) and fails if one reaches a method that moves, archives, trashes, deletes or re-flags mail. It was prompted by an audit of an older version in a fork (petertoday/proton-mcp) that reported allowlist bypasses through the thread, bulk and flag routes; none is found in 2.16. The test was checked to have teeth: with the actions allowed it reports 11 tools reaching those methods. It uses sample arguments, so a route that needs unusual arguments is not covered.
+
 ## [2.16.0] — 2026-10-23
 
 AI-era features: a firewall against mail that tries to steer a model, a reviewed batch for tidying, a brief, a commitments ledger, a style profile and search by several wordings. See each entry below.
