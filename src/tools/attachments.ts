@@ -64,7 +64,7 @@ export async function handleAttachmentTool(name: string, args: Record<string, un
         const saving = await bundle.imapService.getAttachmentContent(emailId, requireString(args, "attachmentId"), { forSave: true });
         const buf = Buffer.from(saving.base64 ?? "", "base64");
         const target = /[\\/]$/.test(saveTo) ? saveTo + sanitizeFileName(saving.attachment?.filename, "attachment") : saveTo;
-        const savedPath = await writeAttachmentToDownloadDir(downloadDir, target, buf);
+        const savedPath = await writeAttachmentToDownloadDir(downloadDir, target, buf, config);
         return createTextResult({ saved: true, path: savedPath, bytes: buf.length, filename: saving.attachment?.filename });
       }
       const result = await bundle.imapService.getAttachmentContent(

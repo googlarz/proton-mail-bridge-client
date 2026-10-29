@@ -59,6 +59,7 @@ import { extractOfficeTextAsync, officeKind, OfficeTextError, type OfficeKind } 
 import { OCR_MAX_IMAGE_BYTES, OCR_MAX_PDF_PAGES, OcrError, ocrImageExtension, runOcr } from "../utils/ocr.js";
 import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./imap-errors.js";
 import { writeFileNoFollow } from "../utils/safe-write.js";
+import { isInsideServerState } from "../utils/server-state-paths.js";
 export { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError };
 
 const FETCH_SUMMARY_QUERY = {
@@ -4951,6 +4952,10 @@ export class SimpleIMAPService {
 
     if (!isPathInside(allowedRealPath, targetRealPath)) {
       throw new Error("outputPath path escapes the allowed directory.");
+    }
+    // The download directory may contain the server's own data directory ($HOME does): never save into that.
+    if (isInsideServerState(targetRealPath, this.config)) {
+      throw new Error("outputPath is inside the server's own data directory or configuration, which attachments are never saved to.");
     }
     return targetRealPath;
   }

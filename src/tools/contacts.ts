@@ -7,6 +7,7 @@ import type { ContactRecord } from "../services/contact-service.js";
 import type { EmailAddress, EmailSummary } from "../types/index.js";
 import { cleanContactText, lowerAscii, normalizeContactAddress } from "../utils/contact-text.js";
 import { InvalidArgumentError, isSelfAddress, normalizeBoolean, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
+import { assertApprovedContentUnchanged, contentDigest } from "../utils/approval.js";
 import { assessMail } from "../utils/mail-security.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { CONTACT_NAME_MAX, parseVcf } from "../utils/vcard.js";
@@ -177,7 +178,7 @@ async function findInAccount(bundle: AccountBundle, query: string, limit: number
 
 // Reads at most MAX_VCF_BYTES of a regular file. Opened without blocking, so a FIFO or a device named in `path`
 // cannot hang the server, and checked after opening, so the file that is read is the file that was checked.
-async function readVcfFile(rawPath: string): Promise<string> {
+export async function readVcfFile(rawPath: string): Promise<string> {
   const path = rawPath.startsWith("~/") ? join(homedir(), rawPath.slice(2)) : rawPath;
   if (!isAbsolute(path)) throw new InvalidArgumentError("path must be an absolute path to a .vcf file.");
   if (![".vcf", ".vcard"].includes(extname(path).toLowerCase())) throw new InvalidArgumentError("path must name a .vcf (vCard) file.");
@@ -272,7 +273,10 @@ export async function handleContactTool(name: string, args: Record<string, unkno
       const target = resolveAccountArg(args) ?? primaryBundle;
       const path = requireString(args, "path");
       const outcome = await withAudit(target.auditService, name, args, async () => {
-        const parsed = parseVcf(await readVcfFile(path));
+        const text = await readVcfFile(path);
+        // The person was told how many cards this file held when asked; a file rewritten since is not imported.
+        assertApprovedContentUnchanged(args, "vcard", contentDigest(text), name);
+        const parsed = parseVcf(text);
         // The account's own addresses are not a contact of it.
         const others = parsed.cards.map((card) => ({ ...card, emails: card.emails.filter((email) => !target.ownAddresses.some((address) => isSelfAddress(email, address))) }));
         const stored = await target.contactService.importCards(others.filter((card) => card.emails.length > 0));

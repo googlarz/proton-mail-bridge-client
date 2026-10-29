@@ -1,6 +1,7 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { AccountBundle } from "../services/account-manager.js";
 import type { AppliedItem, PlanAction, PlanItem } from "../services/triage-plan-service.js";
+import { assertApprovedContentUnchanged, planApprovalDigest } from "../utils/approval.js";
 import { labelMatchesFolder, normalizeLimit, optionalNumber, parseEmailId } from "../utils/helpers.js";
 import { ensureEmailActionAllowed, ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { withAudit } from "./audit.js";
@@ -105,6 +106,7 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
       const exclude = new Set(numbers(args.exclude, "exclude") ?? []);
       const chosen = plan.items.filter((item) => (only ? only.includes(item.n) : true) && !exclude.has(item.n));
       if (chosen.length === 0) throw new McpError(ErrorCode.InvalidParams, "No item selected.");
+      assertApprovedContentUnchanged(args, "plan", planApprovalDigest(chosen), name);
       const left = plan.items.filter((item) => !chosen.includes(item));
 
       // Claimed before anything is changed: a retry of this call (a client that timed out) is refused instead of running again.

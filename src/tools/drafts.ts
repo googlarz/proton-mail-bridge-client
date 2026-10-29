@@ -14,6 +14,7 @@ import { ensureMailboxWriteAllowed, resolveRemoteDraftSync, ensureRemoteDraftSyn
 import type { ToolContext } from "./context.js";
 import type { ToolResult } from "./results.js";
 import { sendOutcomeIsUnknown } from "../services/smtp-service.js";
+import { assertApprovedContentUnchanged, draftApprovalDigest } from "../utils/approval.js";
 
 // Drafts: create (new, reply, forward, thread reply), list, read, edit, sync to the Drafts folder, send and schedule.
 
@@ -615,6 +616,7 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
         requireString(args, "draftId"),
       );
       const draft = await deleteDraftBundle.draftStore.getDraft(deleteDraftIdRest);
+      assertApprovedContentUnchanged(args, "draft", draftApprovalDigest(draft), name);
       ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args?.confirmed, false), "Permanently delete draft: " + draft.id);
       const deleted = await withAudit(auditService, name, args, async () => {
         const remoteCleanup = resolveRemoteDraftSync(config.runtime, true).enabled
@@ -778,6 +780,8 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
         requireString(args, "draftId"),
       );
       const draft = await sendDraftBundle.draftStore.getDraft(sendDraftIdRest);
+      // What goes out below is this read; the person approved the draft as it was when asked.
+      assertApprovedContentUnchanged(args, "draft", draftApprovalDigest(draft), name);
       // Found live (external review): sendDraftBundle above is resolved from
       // the draftId's own account-slug prefix — i.e. where the draft is
       // STORED — which never changes just because update_draft later set a
@@ -1003,6 +1007,7 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
         requireString(args, "draftId"),
       );
       const draft = await scheduleDraftBundle.draftStore.getDraft(scheduleDraftIdRest);
+      assertApprovedContentUnchanged(args, "draft", draftApprovalDigest(draft), name);
       // Same fix as send_draft's identical sendBundleForDraft — see its
       // comment. The delivery queue fires via whichever account's own
       // deliveryQueueService it was enqueued into, so this must be the
