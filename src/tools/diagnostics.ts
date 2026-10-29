@@ -417,6 +417,9 @@ export async function handleDiagnosticTool(name: string, args: Record<string, un
       );
     }
 
+    case "verify_audit_log":
+      return createTextResult(await auditService.verify());
+
     case "sync_emails":
     {
       const target = resolveAccountArg(args) ?? primaryBundle;

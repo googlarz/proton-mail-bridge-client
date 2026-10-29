@@ -2094,6 +2094,15 @@ export const TOOLS = [
       },
     },
   },
+  {
+    name: "verify_audit_log",
+    description: "Check the audit log's hash chain: every entry carries a sequence number and the hash of the one before it, so an edited, deleted or reordered entry breaks the chain. Returns ok, how many entries were checked, the first broken seq with the reason (edited, deleted, reordered), and the head hash. Store the head hash somewhere else: removing the newest entries, or rewriting the log and recomputing every hash, can only be caught by comparing with a head hash kept outside this machine. Entries written before the chain existed are counted as legacyEntries and not checked.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
 ] as const;
 
 // Core tier: the 20 tools that cover ~80% of daily email use.

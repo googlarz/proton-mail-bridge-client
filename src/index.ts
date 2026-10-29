@@ -483,6 +483,7 @@ export function createServer(
         case "clear_index":
         case "get_logs":
         case "get_audit_logs":
+        case "verify_audit_log":
         case "sync_emails":
           return await handleDiagnosticTool(name, args, ctx);
 

@@ -650,4 +650,9 @@ export interface AuditEntry {
   input?: unknown;
   result?: unknown;
   error?: string;
+  // Hash chain, set by AuditService.record(); entries written before the chain existed have none of these.
+  seq?: number;
+  prevHash?: string;
+  hash?: string;
+  chainStart?: true;
 }

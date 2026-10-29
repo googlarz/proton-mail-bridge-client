@@ -2267,6 +2267,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "import-email", tool: "import_email", positionals: [], fileFieldBase64: "rawBase64", help: "Import a .eml message via IMAP APPEND (--file <path.eml>)" },
   { command: "clear-index", tool: "clear_index", positionals: [], help: "Delete the local SQLite mailbox index" },
   { command: "get-audit-logs", tool: "get_audit_logs", positionals: [], help: "Recent write-operation audit log entries" },
+  { command: "verify-audit-log", tool: "verify_audit_log", positionals: [], help: "Check the audit log hash chain and print its head hash" },
 ];
 
 async function runToolOnlyCommand(entry: ToolOnlyCommand, parsed: ParsedCliArgs): Promise<void> {
