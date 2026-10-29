@@ -6,6 +6,7 @@
 
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { normalizeBoolean } from "./helpers.js";
 import { isGatedAction } from "./mail-security.js";
 
 export type ApprovalMode = "off" | "elicit" | "require";
@@ -121,13 +122,13 @@ export async function buildApprovalMessage(name: string, args: Record<string, un
       await message("Message", args.emailId);
       break;
     case "delete_thread":
-      await message("Thread of", args.messageId); add("Permanently", args.permanent === true ? "yes" : "no");
+      await message("Thread of", args.messageId); add("Permanently", normalizeBoolean(args.permanent, false) ? "yes" : "no");
       break;
     case "bulk_delete":
     case "batch_email_action": {
       const ids = strings(args.emailIds);
       if (ids.length) await messages(ids); else add("Messages", "chosen by a filter");
-      if (name === "batch_email_action") add("Action", quoted(args.action, 40)); else add("Permanently", args.permanent === true ? "yes" : "no");
+      if (name === "batch_email_action") add("Action", quoted(args.action, 40)); else add("Permanently", normalizeBoolean(args.permanent, false) ? "yes" : "no");
       break;
     }
     case "apply_thread_action":

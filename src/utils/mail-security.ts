@@ -1,4 +1,5 @@
 import type { EmailAddress } from "../types/index.js";
+import { normalizeBoolean, optionalBoolean } from "./helpers.js";
 
 // Looks at one message for signs that it is written to manipulate a model or to deceive a reader, so the model can be
 // told and the tools that act on the outside world can ask for a confirmation after such a message was read. It judges
@@ -193,17 +194,18 @@ const DESTRUCTIVE_ACTIONS = new Set(["delete", "trash"]);
 /**
  * Whether this call is one the confirmation gate applies to after a high-risk message was read. A preview or a switch-off
  * passes, but only through an argument the tool really declares: an undeclared `dryRun` is ignored by the tool, and honouring
- * it here would let a call skip the gate and still act.
+ * it here would let a call skip the gate and still act. Each flag is read with the parser the handlers use (so "false",
+ * "no", 0 and " FALSE " mean what they mean there), and the action is trimmed the way requireString trims it.
  */
 export function isGatedAction(name: string, args: Record<string, unknown>, declared: ReadonlySet<string>): boolean {
-  if (name === "apply_rules") return args.dryRun === false;
+  if (name === "apply_rules") return normalizeBoolean(args.dryRun, true) === false;
   if (name === "batch_email_action" || name === "apply_thread_action") {
-    return typeof args.action === "string" && DESTRUCTIVE_ACTIONS.has(args.action) && !(declared.has("dryRun") && args.dryRun === true);
+    return typeof args.action === "string" && DESTRUCTIVE_ACTIONS.has(args.action.trim()) && !(declared.has("dryRun") && normalizeBoolean(args.dryRun, false));
   }
   if (!TAINT_GATED_TOOLS.has(name)) return false;
-  if (declared.has("dryRun") && args.dryRun === true) return false;
-  if (declared.has("enabled") && args.enabled === false) return false;
-  if (declared.has("active") && args.active === false) return false;
+  if (declared.has("dryRun") && normalizeBoolean(args.dryRun, false)) return false;
+  if (declared.has("enabled") && optionalBoolean(args.enabled) === false) return false;
+  if (declared.has("active") && optionalBoolean(args.active) === false) return false;
   return true;
 }
 
