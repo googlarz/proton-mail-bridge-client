@@ -52,9 +52,10 @@ import { EventsNotifier, eventsResourceText, handleEventsTool } from "./tools/ev
 import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
 import { handleDelegationTool } from "./tools/delegation.js";
-import { handleContactTool } from "./tools/contacts.js";
+import { handleContactTool, readVcfFile } from "./tools/contacts.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
-import { applyApprovalPolicy, clientCanElicit, type ApprovalLookups } from "./utils/approval.js";
+import { applyApprovalPolicy, clientCanElicit, contentDigest, type ApprovalLookups } from "./utils/approval.js";
+import { parseVcf } from "./utils/vcard.js";
 import { buildEmailResourceUri, buildEventsResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
 export { mailboxChangedSinceCheckpoint } from "./tools/index-refresh.js";
@@ -102,6 +103,10 @@ function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLoo
         from: addressValues(detail.from),
         replyTo: addressValues(detail.replyTo),
       };
+    },
+    vcard: async (path) => {
+      const text = await readVcfFile(path);
+      return { cards: parseVcf(text).cards.length, digest: contentDigest(text) };
     },
     draft: async (id) => {
       const { bundle, rest } = ctx.resolveAccountForDraftId(id);

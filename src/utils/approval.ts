@@ -7,6 +7,7 @@
 // bound to the answer: the handler refuses to act if it is no longer what the person was shown.
 
 import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { normalizeBoolean } from "./helpers.js";
@@ -92,11 +93,15 @@ export interface ApprovalLookups {
   account(args: Record<string, unknown>): string;
   subject(id: string): Promise<string | undefined>;
   target(name: string, args: Record<string, unknown>): Promise<SendTarget | undefined>;
+  /** How many cards the vCard file holds and a digest of its text. */
+  vcard(path: string): Promise<{ cards: number; digest: string } | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
   plan(planId: string, args: Record<string, unknown>): Promise<PlanItemForApproval[] | undefined>;
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+/** A digest of a file's text that the question counted (a vCard file to import). */
+export const contentDigest = sha256;
 
 /** A digest of the content of a draft that is sent, scheduled or deleted: the question and the handler compute it the same way. */
 export function draftApprovalDigest(draft: DigestableDraft): string {
@@ -115,7 +120,7 @@ export function planApprovalDigest(items: ReadonlyArray<Pick<PlanItemForApproval
 // What the person was shown, kept on the call's own argument object under a symbol: JSON from a client cannot carry a
 // symbol key, so the model can neither set nor forge it, and it is not an argument (not listed, not audited, not ignored-noted).
 // `digest` is undefined when the stored content could not be read for the question; nothing then matches it.
-type Bound = { kind: "draft" | "plan"; digest: string | undefined };
+type Bound = { kind: "draft" | "plan" | "vcard"; digest: string | undefined };
 const APPROVED = Symbol("approved content");
 type Marked = Record<string | symbol, unknown>;
 
@@ -239,6 +244,22 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     case "apply_rules":
       add("Rule", typeof args.ruleId === "string" ? quoted(args.ruleId, 80) : "all enabled rules"); add("Effect", "applies them to the mailbox now");
       break;
+    case "set_contact": {
+      const clearable = (label: string, value: unknown) => { if (value !== undefined) add(label, value === null || value === "" ? "cleared" : quoted(value, 80)); };
+      add("Address", quoted(args.address, 80)); clearable("Display name", args.displayName);
+      for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
+      if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, 80));
+      if (normalizeBoolean(args.unmerge, false)) add("Unmerge", "yes");
+      clearable("Notes", args.notes);
+      break;
+    }
+    case "import_contacts": {
+      const path = typeof args.path === "string" ? args.path : "";
+      const file = path ? await within(() => lookups.vcard(path)) : undefined;
+      bound = { kind: "vcard", digest: file?.digest };
+      add("File", quoted(basename(path), 80)); add("Cards", file ? String(file.cards) : "unknown (the file could not be read)");
+      break;
+    }
     case "approve_plan": {
       const planId = typeof args.planId === "string" ? args.planId : "";
       add("Plan", quoted(planId, 80));
