@@ -420,7 +420,9 @@ proton-mail-bridge-client clear-index
 
 `verify-audit-log` reads the audit log only. The server keeps the newest entry's hash in `audit.head`
 next to `audit.log`, so cut-off or emptied logs fail verification; someone who can write both files
-can still forge both. Keep the head hash it prints somewhere other than this machine to catch that.
+can still forge both (they sit in the same directory). Keep the head hash it prints somewhere other than this machine to
+catch that. If `audit.head` is damaged, the next recorded entry rewrites it from the log, so a failure seen now can
+disappear after the next append. An unreadable `audit.head` gives `ok: false` with reason `head-unreadable`.
 See the README, "Audit log".
 
 ### Mailbox events
@@ -447,7 +449,12 @@ proton-mail-bridge-client grant-revoke <id>                    # revoke at once
 proton-mail-bridge-client list-grants                          # the read-only tool form, what the assistant itself can see
 ```
 
-`grant-create` requires an interactive terminal and a typed confirmation. `--expires` takes `30m`, `12h`, `7d` or a
+`grant-create` and `grant-revoke` require an interactive terminal (stdin and stdout) and a typed confirmation phrase
+(the grant is shown first); from a script or a piped shell they refuse and change nothing. This stops a model that can
+only run shell commands. It does **not** stop a model that can write files (`grants.json` is not signed) or drive a
+pseudo-terminal, so grants are no protection against a model with file or shell access; a keychain-backed key is a
+possible future step, not built. A `forward_email` grant lets the model forward any message of the account to the granted
+recipients, i.e. the whole mailbox. `--expires` takes `30m`, `12h`, `7d` or a
 timestamp (at most 30 days); `--uses` is 1 to 50 (default 1); `--tools` is any of `send_email`,
 `reply_to_email`, `reply_all_email`, `forward_email`, `send_draft`, `schedule_draft`; every To, Cc and Bcc
 address of a send must match a recipient (an exact address or `@domain`). Use `--account` to choose the
