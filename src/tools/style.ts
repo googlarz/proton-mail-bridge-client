@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound } from "../utils/corrupt-store.js";
 import { normalizeBoolean, normalizeLimit } from "../utils/helpers.js";
-import { buildProfile, styleHints, type SentSample, type StyleProfile } from "../utils/style-profile.js";
+import { buildProfile, recipientKey, styleHints, type SentSample, type StyleProfile } from "../utils/style-profile.js";
 import { optionalString } from "./args.js";
 import { maybeRefreshLocalIndex } from "./index-refresh.js";
 import { createTextResult } from "./results.js";
@@ -91,6 +91,6 @@ export async function handleStyleTool(name: string, args: Record<string, unknown
     rebuilt,
     hints: hints.length ? hints : ["Not enough sent mail to tell yet."],
     overall: profile.overall,
-    ...(recipient ? { forRecipient: profile.byRecipient[recipient.toLowerCase()] ?? profile.byDomain[recipient.split("@")[1]?.toLowerCase() ?? ""] ?? null } : {}),
+    ...(recipient ? { forRecipient: profile.byRecipient[recipientKey(recipient)] ?? profile.byDomain[recipient.split("@")[1]?.toLowerCase() ?? ""] ?? null } : {}),
   });
 }

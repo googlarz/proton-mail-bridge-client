@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/index.js";
-import { buildProfile, styleHints, summarise } from "../dist/utils/style-profile.js";
+import { buildProfile, recipientKey, styleHints, summarise } from "../dist/utils/style-profile.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 import { createMessage, makeCertificate, startFakeBridge } from "./helpers/fake-bridge.mjs";
 
@@ -25,10 +25,23 @@ test("greeting, closing, language and tone are read from sent mail, without keep
   assert.ok(!JSON.stringify(summary).match(/Pat|Anna|Marek|Sam|Lee/), "no names in the profile");
 });
 
+test("only the opening and closing words are kept, never a name or a sentence", () => {
+  const samples = [
+    { to: ["a@x.example"], text: "Dobry wieczór Pani Kowalska,\n\nTekst.\n\nPozdrawiam\nDawid\n" },
+    { to: ["a@x.example"], text: "Hi Pat,\n\nThanks Pat for the update on the contract.\n" },
+    { to: ["a@x.example"], text: "Hi Pat,\n\nOk.\n\nCheers, Dawid\n" },
+  ];
+  const summary = summarise(samples);
+  assert.deepEqual(summary.greetings.map((g) => g.text).sort(), ["Dobry wieczór {name},", "Hi {name},"]);
+  assert.deepEqual(summary.closings.map((c) => c.text).sort(), ["Cheers", "Pozdrawiam"], "a sentence that starts with 'Thanks' is not a closing");
+  assert.ok(!JSON.stringify(summary).match(/Kowalska|Pat\b|Dawid/));
+});
+
 test("hints follow the recipient: a company's habits, a person's, or the overall ones", () => {
   const samples = [polish("Pat"), polish("Anna"), polish("Marek"), english("Sam"), english("Lee")];
   const profile = buildProfile(samples, new Date("2026-10-22T10:00:00Z"));
-  assert.ok(profile.byRecipient["pat@client.example"], "three mails to the same person");
+  assert.ok(profile.byRecipient[recipientKey("pat@client.example")], "three mails to the same person");
+  assert.ok(!JSON.stringify(profile).includes("pat@client.example"), "the profile does not list whom you write to");
   assert.ok(profile.byDomain["client.example"]);
   assert.ok(!profile.byDomain["gmail.com"], "a free mail provider is not a company");
   const forPat = styleHints(profile, "pat@client.example");

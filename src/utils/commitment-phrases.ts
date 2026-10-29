@@ -18,15 +18,23 @@ const PROMISE = [
   promise("ich schicke|ich sende|ich melde mich|ich werde|ich kümmere mich|wir schicken|wir senden|wir melden uns|ich gebe bescheid"),
 ];
 
+// Exact word forms: a stem with \p{L}* also matched "środowisko" (environment) as Wednesday.
 const WEEKDAYS: Array<[RegExp, number]> = [
-  [/(?<!\p{L})(sunday|niedziel\p{L}*|sonntag)(?!\p{L})/iu, 0],
-  [/(?<!\p{L})(monday|poniedziałk\p{L}*|montag)(?!\p{L})/iu, 1],
-  [/(?<!\p{L})(tuesday|wtorek|wtork\p{L}*|dienstag)(?!\p{L})/iu, 2],
-  [/(?<!\p{L})(wednesday|środ\p{L}*|mittwoch)(?!\p{L})/iu, 3],
-  [/(?<!\p{L})(thursday|czwartk\p{L}*|czwartek|donnerstag)(?!\p{L})/iu, 4],
-  [/(?<!\p{L})(friday|piątk\p{L}*|piątek|freitag)(?!\p{L})/iu, 5],
-  [/(?<!\p{L})(saturday|sobot\p{L}*|samstag)(?!\p{L})/iu, 6],
+  [/(?<!\p{L})(sunday|niedziela|niedzielę|niedzieli|niedzielą|sonntag)(?!\p{L})/iu, 0],
+  [/(?<!\p{L})(monday|poniedziałek|poniedziałku|poniedziałkiem|montag)(?!\p{L})/iu, 1],
+  [/(?<!\p{L})(tuesday|wtorek|wtorku|wtorkiem|dienstag)(?!\p{L})/iu, 2],
+  [/(?<!\p{L})(wednesday|środa|środę|środy|środzie|środą|mittwoch)(?!\p{L})/iu, 3],
+  [/(?<!\p{L})(thursday|czwartek|czwartku|czwartkiem|donnerstag)(?!\p{L})/iu, 4],
+  [/(?<!\p{L})(friday|piątek|piątku|piątkiem|freitag)(?!\p{L})/iu, 5],
+  [/(?<!\p{L})(saturday|sobota|sobotę|soboty|sobocie|sobotą|samstag)(?!\p{L})/iu, 6],
 ];
+
+// A date only counts when it exists: 31.02 and 2026-13-45 are not dates.
+function validDate(year: number, month: number, day: number): string | undefined {
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+  return candidate.getUTCFullYear() === year && candidate.getUTCMonth() === month - 1 && candidate.getUTCDate() === day ? iso(candidate) : undefined;
+}
+
 
 function iso(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -73,20 +81,27 @@ function namedMonthDate(sentence: string, day: Date): string | undefined {
 /** The date a sentence names, counted from `now` (a UTC day). Weekday names mean the next such day after today. */
 export function parseDue(sentence: string, now: Date): string | undefined {
   const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const full = sentence.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
-  if (full) return full[0];
+  const full = sentence.match(/(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/);
+  if (full) {
+    const exact = validDate(Number(full[1]), Number(full[2]), Number(full[3]));
+    if (exact) return exact;
+  }
   const named = namedMonthDate(sentence, day);
   if (named) return named;
-  const dotted = sentence.match(/\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/);
+  // 5.11. / 05.11.2026 / 5/11: not a version number or a decimal ("version 2.3", "1.5 hours"), so without a year it must
+  // follow a word that introduces a date ("by", "do", "bis").
+  const dotted = sentence.match(/(?<![\d.,])(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?![\d]|[./]\d)/);
   if (dotted) {
-    const dayOfMonth = Number(dotted[1]);
-    const month = Number(dotted[2]);
-    if (dayOfMonth >= 1 && dayOfMonth <= 31 && month >= 1 && month <= 12) {
+    const before = sentence.slice(0, dotted.index ?? 0);
+    const introduced = /(?<!\p{L})(by|until|before|on|due|do|na|przed|bis|am|vor|dnia)\s+$/iu.test(before);
+    if (dotted[3] || introduced) {
       let year = dotted[3] ? Number(dotted[3]) : day.getUTCFullYear();
       if (year < 100) year += 2000;
-      const candidate = new Date(Date.UTC(year, month - 1, dayOfMonth));
-      if (!dotted[3] && candidate < day) candidate.setUTCFullYear(year + 1);
-      return iso(candidate);
+      const exact = validDate(year, Number(dotted[2]), Number(dotted[1]));
+      if (exact) {
+        if (dotted[3] || exact >= iso(day)) return exact;
+        return validDate(year + 1, Number(dotted[2]), Number(dotted[1]));
+      }
     }
   }
   if (/(?<!\p{L})(today|dzisiaj|dziś|heute|eod|end of (?:the )?day)(?!\p{L})/iu.test(sentence)) return iso(day);

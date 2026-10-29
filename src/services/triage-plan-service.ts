@@ -22,6 +22,9 @@ export interface PlanItem {
   target?: string;
   reason: string;
   source: "client" | "scan";
+  /** Whether the message was already read / already carried the label when the plan was made: undo must not invent state. */
+  wasRead?: boolean;
+  hadLabel?: boolean;
 }
 
 export interface AppliedItem {
@@ -31,13 +34,15 @@ export interface AppliedItem {
   /** What undo needs: where the message is now and how to put it back. */
   undo?: { kind: "move"; emailId: string; backTo: string } | { kind: "unread"; emailId: string } | { kind: "unlabel"; emailId: string; label: string };
   undone?: boolean;
+  /** Applied, but no way back was recorded (the server gave no new id). */
+  notUndoable?: string;
 }
 
 export interface TriagePlan {
   id: string;
   createdAt: string;
   items: PlanItem[];
-  status: "open" | "applied" | "undone";
+  status: "open" | "applying" | "applied" | "undone";
   appliedAt?: string;
   applied?: AppliedItem[];
 }
@@ -62,7 +67,12 @@ export class TriagePlanService {
     return this.withLock(async () => {
       const state = await this.load();
       const plan: TriagePlan = { id: `plan-${randomUUID().slice(0, 8)}`, createdAt: now.toISOString(), items: items.map((item, index) => ({ ...item, n: index + 1 })), status: "open" };
-      state.plans = [...state.plans, plan].slice(-MAX_PLANS);
+      state.plans = [...state.plans, plan];
+      // Make room by dropping plans that carry no undo data first: an applied plan is the only way back.
+      while (state.plans.length > MAX_PLANS) {
+        const spare = state.plans.findIndex((candidate) => candidate.status !== "applied" && candidate.status !== "applying");
+        state.plans.splice(spare === -1 ? 0 : spare, 1);
+      }
       await this.save(state);
       return plan;
     });
@@ -78,6 +88,19 @@ export class TriagePlanService {
 
   async declinedSenders(): Promise<Set<string>> {
     return new Set((await this.load()).declined.map((entry) => entry.sender));
+  }
+
+  /** Open -> applying, in one locked step: a retry of the same approval (a client that timed out) must not run it twice. */
+  async beginApply(id: string): Promise<TriagePlan> {
+    return this.withLock(async () => {
+      const state = await this.load();
+      const plan = state.plans.find((candidate) => candidate.id === id);
+      if (!plan) throw new Error(`No plan ${id}.`);
+      if (plan.status !== "open") throw new Error(`Plan ${id} was already ${plan.status}.`);
+      plan.status = "applying";
+      await this.save(state);
+      return plan;
+    });
   }
 
   async markApplied(id: string, applied: AppliedItem[], declinedSenders: string[], now = new Date()): Promise<TriagePlan> {

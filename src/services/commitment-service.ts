@@ -62,7 +62,12 @@ export class CommitmentService {
         createdAt: now.toISOString(),
         status: "open",
       };
-      state.items = [...state.items, item].slice(-MAX_ITEMS);
+      state.items = [...state.items, item];
+      // At the cap the oldest closed entries go first; an open promise is the point of the ledger.
+      while (state.items.length > MAX_ITEMS) {
+        const closed = state.items.findIndex((candidate) => candidate.status !== "open");
+        state.items.splice(closed === -1 ? 0 : closed, 1);
+      }
       await this.save(state);
       return item;
     });

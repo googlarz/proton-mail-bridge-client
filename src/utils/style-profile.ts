@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 // How you write, worked out from your own sent mail: language, how you open and close, how long and how formal.
 // Everything is counted on this machine; the profile keeps short normalised patterns ("Hi {name},"), never whole
 // sentences or names, so it can be shown to a model as a hint for drafting.
@@ -31,14 +33,13 @@ export interface StyleProfile {
 }
 
 const GREETING = /^(hi|hello|hey|dear|good (?:morning|afternoon|evening)|cześć|dzień dobry|dobry wieczór|witam|szanown\p{L}*|hallo|guten (?:tag|morgen)|sehr geehrte\p{L}*|liebe\p{L}*|moin)(?![\p{L}])[^\n]{0,40}$/iu;
-const CLOSING = /^(best(?: regards| wishes)?|kind regards|warm regards|regards|thanks|thank you|cheers|sincerely|pozdrawiam|z poważaniem|serdecznie|pozdrowienia|dzięki|dziękuję|z pozdrowieniami|mit freundlichen grüßen|viele grüße|beste grüße|freundliche grüße|grüße|lg)(?![\p{L}])[^\n]{0,30}$/iu;
 const FORMAL_GREETING = /^(dear|szanown|sehr geehrte|dzień dobry|witam|guten tag|good (?:morning|afternoon|evening))/iu;
 const INFORMAL_GREETING = /^(hi|hey|hello|cześć|hallo|moin)(?![\p{L}])/iu;
 const FREEMAIL = new Set(["gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "proton.me", "protonmail.com", "pm.me", "wp.pl", "o2.pl", "onet.pl", "interia.pl", "gmx.de", "web.de", "gmx.net"]);
 
 const STOPWORDS: Record<string, string[]> = {
   en: ["the", "and", "is", "to", "of", "you", "for", "with", "that", "this", "have", "please"],
-  pl: ["i", "w", "nie", "się", "na", "że", "do", "jest", "dla", "proszę", "dziękuję", "to", "jak", "ale"],
+  pl: ["w", "nie", "się", "na", "że", "do", "jest", "dla", "proszę", "dziękuję", "jak", "ale", "też", "oraz", "który"],
   de: ["und", "der", "die", "das", "nicht", "ich", "ist", "mit", "bitte", "danke", "für", "wir"],
 };
 
@@ -59,13 +60,24 @@ function detectLanguage(text: string): string | undefined {
   return best;
 }
 
-const GREETING_HEAD = /^(dear|hi|hello|hey|cześć|hallo|moin|witam|liebe\p{L}*|szanown\p{L}*|sehr geehrte\p{L}*|dzień dobry|guten (?:tag|morgen)|good (?:morning|afternoon|evening))(?![\p{L}])(\s+[\p{Lu}][\p{L}'’-]*(?:\s+[\p{Lu}][\p{L}'’-]*)*)?\s*([,!:]?)/iu;
+const GREETING_HEAD = /^(dear|hi|hello|hey|cześć|hallo|moin|witam|liebe\p{L}*|szanown\p{L}*|sehr geehrte\p{L}*|dzień dobry|dobry wieczór|guten (?:tag|morgen|abend)|good (?:morning|afternoon|evening))(?![\p{L}])(\s+[\p{Lu}][\p{L}'’-]*(?:\s+[\p{Lu}][\p{L}'’-]*)*)?\s*([,!:]?)/iu;
 
 // "Hi Pat," -> "Hi {name},": the capitalised words after the greeting are a name, and a name is not kept.
-function normaliseGreeting(line: string): string {
+function normaliseGreeting(line: string): string | undefined {
   const match = GREETING_HEAD.exec(line);
-  if (!match) return line.slice(0, 30);
+  if (!match) return undefined;
   return `${match[1]}${match[2] ? " {name}" : ""}${match[3]}`;
+}
+
+const CLOSING_WORDS = /^(best(?: regards| wishes)?|kind regards|warm regards|regards|thanks|thank you|cheers|sincerely|pozdrawiam|z poważaniem|serdecznie|pozdrowienia|dzięki|dziękuję|z pozdrowieniami|mit freundlichen grüßen|viele grüße|beste grüße|freundliche grüße|grüße|lg)(?![\p{L}])/iu;
+
+// The closing word(s) of a line like "Best regards," or "Cheers, Dawid": only the word is kept, and only when the line is
+// nothing more than that (plus at most a name). "Thanks Pat for the update" is a sentence, not a closing.
+function closingHead(line: string): string | undefined {
+  const match = CLOSING_WORDS.exec(line.trim());
+  if (!match) return undefined;
+  const rest = line.trim().slice(match[0].length);
+  return /^[\s,.!]*(?:[\p{Lu}][\p{L}'’-]*)?[\s,.!]*$/u.test(rest) ? match[0] : undefined;
 }
 
 function top(counter: Map<string, number>, n: number): Counted[] {
@@ -89,13 +101,13 @@ export function summarise(samples: SentSample[]): StyleSummary {
     const first = lines.find((line) => line.length > 0);
     if (first && GREETING.test(first)) {
       const greeting = normaliseGreeting(first);
-      greetings.set(greeting, (greetings.get(greeting) ?? 0) + 1);
+      if (greeting) greetings.set(greeting, (greetings.get(greeting) ?? 0) + 1);
       if (FORMAL_GREETING.test(first)) formal += 1;
       else if (INFORMAL_GREETING.test(first)) informal += 1;
     }
     const tail = lines.filter((line) => line.length > 0).slice(-8);
-    const closing = tail.find((line) => CLOSING.test(line));
-    if (closing) closings.set(closing.replace(/[,.!]+$/, ""), (closings.get(closing.replace(/[,.!]+$/, "")) ?? 0) + 1);
+    const closing = tail.map(closingHead).find((head): head is string => head !== undefined);
+    if (closing) closings.set(closing, (closings.get(closing) ?? 0) + 1);
     lengths.push((body.match(/\p{L}+/gu) ?? []).length);
     if (/\p{Extended_Pictographic}/u.test(body)) emoji += 1;
     if (body.includes("!")) exclamations += 1;
@@ -114,6 +126,11 @@ export function summarise(samples: SentSample[]): StyleSummary {
   };
 }
 
+/** Recipients are kept under a short hash, not their address: the profile does not list whom you write to. */
+export function recipientKey(address: string): string {
+  return createHash("sha256").update(address.trim().toLowerCase()).digest("hex").slice(0, 16);
+}
+
 function domainOf(address: string): string {
   return address.split("@")[1]?.toLowerCase() ?? "";
 }
@@ -124,7 +141,8 @@ export function buildProfile(samples: SentSample[], now = new Date()): StyleProf
   for (const sample of samples) {
     for (const address of sample.to) {
       const lower = address.toLowerCase();
-      byRecipient.set(lower, [...(byRecipient.get(lower) ?? []), sample]);
+      const key = recipientKey(lower);
+      byRecipient.set(key, [...(byRecipient.get(key) ?? []), sample]);
       const domain = domainOf(lower);
       if (domain && !FREEMAIL.has(domain)) byDomain.set(domain, [...(byDomain.get(domain) ?? []), sample]);
     }
@@ -137,8 +155,8 @@ export function buildProfile(samples: SentSample[], now = new Date()): StyleProf
 /** A few plain lines a model can follow when drafting for `recipient`. */
 export function styleHints(profile: StyleProfile, recipient?: string): string[] {
   const address = recipient?.toLowerCase();
-  const summary = (address && profile.byRecipient[address]) || (address && profile.byDomain[domainOf(address)]) || profile.overall;
-  const scope = summary === profile.overall ? "in general" : address && profile.byRecipient[address] ? `to ${address}` : `to ${domainOf(address ?? "")}`;
+  const summary = (address && profile.byRecipient[recipientKey(address)]) || (address && profile.byDomain[domainOf(address)]) || profile.overall;
+  const scope = summary === profile.overall ? "in general" : address && profile.byRecipient[recipientKey(address)] ? `to ${address}` : `to ${domainOf(address ?? "")}`;
   const lines: string[] = [];
   const language = summary.languages[0] ? ({ en: "English", pl: "Polish", de: "German" }[summary.languages[0].text] ?? summary.languages[0].text) : undefined;
   if (language) lines.push(summary === profile.overall ? `You mostly write in ${language}.` : `You write ${scope} in ${language}.`);

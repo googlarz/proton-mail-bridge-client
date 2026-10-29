@@ -48,6 +48,12 @@ test("named months, hard-wrapped lines and the word 'well' behave", () => {
   assert.deepEqual(wrapped.map((c) => [c.sentence, c.due]), [["We'll check the dates and send the new plan by Friday.", "2026-10-23"]]);
 });
 
+test("things that look like dates but are not are left alone", () => {
+  for (const text of ["in 1.5 hours", "version 2.3 is out", "by 31.02", "2026-13-45", "środowisko", "I will send 1.5 pages"]) assert.equal(parseDue(text, WEDNESDAY), undefined, text);
+  assert.equal(parseDue("by 05.11.", WEDNESDAY), "2026-11-05");
+  assert.equal(parseDue("w środę", WEDNESDAY), "2026-10-28");
+});
+
 test("the ledger adds, does not duplicate, and closes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ledger-"));
   try {

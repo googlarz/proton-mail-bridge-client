@@ -71,13 +71,17 @@ export async function handleCommitmentTool(name: string, args: Record<string, un
       if (direction !== "mine") sources.push({ folder: "INBOX", direction: "theirs" });
       // Which messages to read: the newest of each source, up to `limit` in all, none already in the ledger.
       const toRead: Array<{ email: EmailSummary; direction: "mine" | "theirs" }> = [];
+      // The limit is shared out: reading Sent first against the whole limit would never reach the INBOX.
+      const perSource = Math.ceil(limit / sources.length);
       for (const source of sources) {
-        const found = await bundle.localIndexService.search({ folder: source.folder, dateFrom, limit: limit * 2 });
+        const found = await bundle.localIndexService.search({ folder: source.folder, dateFrom, limit: perSource * 2 });
+        let taken = 0;
         for (const email of found.emails) {
-          if (toRead.length >= limit) break;
+          if (taken >= perSource) break;
           if (source.direction === "theirs" && email.isAutomated === true) continue;
           if (email.messageId && known.has(email.messageId)) continue;
           toRead.push({ email, direction: source.direction });
+          taken += 1;
         }
       }
       const looked = toRead.length;

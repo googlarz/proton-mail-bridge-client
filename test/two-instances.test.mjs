@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AccountManager } from "../dist/services/account-manager.js";
 import { slugifyAccountAddress } from "../dist/utils/helpers.js";
-import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 import { createMessage, makeCertificate, startFakeBridge } from "./helpers/fake-bridge.mjs";
 
 // Some desktop clients start the same stdio server twice (anthropics/claude-ai-mcp#1156). Both processes share a data

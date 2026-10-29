@@ -75,3 +75,21 @@ test("get_brief counts new mail, flags suspicious mail and moves its since mark 
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test("a brief marked seen for one account does not move the mark of the others", async () => {
+  const { BriefStore } = await import("../dist/services/brief-service.js");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "brief-marks-"));
+  try {
+    const store = new BriefStore(dir);
+    await store.markSeen("2026-10-20T08:00:00Z");
+    await store.markSeen("2026-10-22T08:00:00Z", ["work"]);
+    const state = await store.read();
+    assert.equal(store.sinceFor(state, "work"), "2026-10-22T08:00:00Z");
+    assert.equal(store.sinceFor(state, "private"), "2026-10-20T08:00:00Z", "the other account still starts at the last full brief");
+    await store.markSeen("2026-10-25T08:00:00Z");
+    assert.equal(store.sinceFor(await store.read(), "work"), "2026-10-25T08:00:00Z", "a full brief resets every account");
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

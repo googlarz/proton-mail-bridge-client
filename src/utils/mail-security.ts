@@ -35,7 +35,60 @@ const INSTRUCTION_PATTERNS: Array<[RegExp, string]> = [
 ];
 
 const ZERO_WIDTH = /[​-‏⁠﻿]/g;
-const HIDDEN_STYLE = /<([a-z0-9]+)\b[^>]*style\s*=\s*"[^"]*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:px|pt|em)?\b|opacity\s*:\s*0(?:\.0+)?\b|color\s*:\s*(?:#fff(?:fff)?|white)\b[^"]*background[^"]*(?:#fff(?:fff)?|white))[^"]*"[^>]*>([\s\S]*?)<\/\1>/gi;
+// HTML is scanned tag by tag, with every step bounded, never with a pattern that can backtrack over the whole
+// document: one crafted message must not be able to stall the server (a pattern over unclosed <a tags took seconds).
+const MAX_HTML_SCANNED = 200_000;
+const MAX_TAG_LENGTH = 1_500;
+const MAX_BLOCK_LENGTH = 5_000;
+const MAX_HIDDEN_BLOCKS = 50;
+const MAX_ANCHORS = 300;
+const HIDING_STYLE = /display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:px|pt|em|rem|%)?(?![\d.])|opacity\s*:\s*0(?:\.0+)?(?![\d.])|(?:left|top|text-indent|margin-left)\s*:\s*-\d{3,}|max-height\s*:\s*0(?:px)?(?![\d.])/i;
+const WHITE_ON_WHITE = /(?:^|[;\s])color\s*:\s*(?:#fff(?:fff)?|white)\b[\s\S]{0,300}?background(?:-color)?\s*:\s*(?:#fff(?:fff)?|white)\b/i;
+const VOID_TAGS = new Set(["img", "br", "hr", "input", "meta", "link", "area", "base", "col", "embed", "source", "track", "wbr"]);
+
+function styleOf(attributes: string): string {
+  const match = /style\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(attributes);
+  return match?.[1] ?? match?.[2] ?? "";
+}
+
+/** The text inside elements a reader cannot see (hidden by style or the hidden attribute). */
+function hiddenTexts(html: string): string[] {
+  const lower = html.toLowerCase();
+  const found: string[] = [];
+  for (const tag of html.matchAll(new RegExp(`<([a-z][a-z0-9]*)(\\s[^<>]{0,${MAX_TAG_LENGTH}})?>`, "gi"))) {
+    if (found.length >= MAX_HIDDEN_BLOCKS) break;
+    const name = tag[1].toLowerCase();
+    const attributes = tag[2] ?? "";
+    if (VOID_TAGS.has(name) || !attributes) continue;
+    const style = styleOf(attributes);
+    const hides = HIDING_STYLE.test(style) || WHITE_ON_WHITE.test(style) || /(?:^|\s)hidden(?:\s|=|$)/i.test(attributes);
+    if (!hides) continue;
+    const start = (tag.index ?? 0) + tag[0].length;
+    const close = lower.indexOf(`</${name}`, start);
+    const end = close === -1 ? Math.min(html.length, start + MAX_BLOCK_LENGTH) : Math.min(close, start + MAX_BLOCK_LENGTH);
+    found.push(html.slice(start, end).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+  }
+  return found;
+}
+
+/** The first link whose visible text names another host than the one it goes to. */
+function mismatchedLink(html: string): { shown: string; real: string } | undefined {
+  const lower = html.toLowerCase();
+  let seen = 0;
+  for (const tag of html.matchAll(new RegExp(`<a\\s([^<>]{0,${MAX_TAG_LENGTH}})>`, "gi"))) {
+    if (++seen > MAX_ANCHORS) break;
+    const href = /href\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag[1]);
+    const target = href?.[1] ?? href?.[2];
+    if (!target) continue;
+    const start = (tag.index ?? 0) + tag[0].length;
+    const close = lower.indexOf("</a", start);
+    const text = html.slice(start, close === -1 ? start + 500 : Math.min(close, start + 500)).replace(/<[^>]*>/g, "").trim();
+    const shownHost = text.match(/^(?:https?:\/\/)?([\w.-]+\.[a-z]{2,})(?:[/\s]|$)/i)?.[1]?.toLowerCase();
+    const realHost = hostOf(target);
+    if (shownHost && realHost && baseDomain(shownHost) !== baseDomain(realHost)) return { shown: shownHost, real: realHost };
+  }
+  return undefined;
+}
 
 function domainOf(address: string | undefined): string {
   return (address?.split("@")[1] ?? "").trim().toLowerCase();
@@ -73,15 +126,18 @@ export function assessMail(input: AssessInput): SecurityAssessment {
   const instruction = matchesInstruction(visible);
   if (instruction) high.push(`The message ${instruction}.`);
 
-  const html = typeof input.html === "string" ? input.html : "";
-  for (const match of html.matchAll(HIDDEN_STYLE)) {
-    const hidden = (match[2] ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const html = typeof input.html === "string" ? input.html.slice(0, MAX_HTML_SCANNED) : "";
+  let hiddenSeen = false;
+  for (const hidden of hiddenTexts(html)) {
     if (hidden.length < 20) continue;
     const hiddenInstruction = matchesInstruction(hidden);
-    if (hiddenInstruction) high.push(`Hidden text in the message ${hiddenInstruction}.`);
-    else caution.push("The message has text the reader cannot see (hidden by its markup).");
-    break;
+    if (hiddenInstruction) {
+      high.push(`Hidden text in the message ${hiddenInstruction}.`);
+      break;
+    }
+    hiddenSeen = true;
   }
+  if (hiddenSeen && high.length === 0) caution.push("The message has text the reader cannot see (hidden by its markup).");
   const zeroWidth = (visible.match(ZERO_WIDTH) ?? []).length;
   if (zeroWidth >= 5 && input.automated !== true) caution.push("The text has invisible characters (zero-width), which can hide wording from the reader.");
 
@@ -101,15 +157,8 @@ export function assessMail(input: AssessInput): SecurityAssessment {
   const auth = headerText(input.headers, "authentication-results").toLowerCase();
   if (/\b(dkim|spf|dmarc)=fail\b/.test(auth)) caution.push("The sender failed an authentication check (SPF, DKIM or DMARC).");
 
-  for (const link of html.matchAll(/<a\b[^>]*href\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
-    const shown = link[2].replace(/<[^>]*>/g, "").trim();
-    const shownHost = shown.match(/^(?:https?:\/\/)?([\w.-]+\.[a-z]{2,})(?:[/\s]|$)/i)?.[1]?.toLowerCase();
-    const realHost = hostOf(link[1]);
-    if (shownHost && realHost && baseDomain(shownHost) !== baseDomain(realHost)) {
-      caution.push(`A link reads ${shownHost} but goes to ${realHost}.`);
-      break;
-    }
-  }
+  const link = mismatchedLink(html);
+  if (link) caution.push(`A link reads ${link.shown} but goes to ${link.real}.`);
 
   const reasons = [...high, ...caution];
   return { level: high.length ? "high" : caution.length ? "caution" : "ok", reasons };
@@ -132,8 +181,29 @@ export class MailTaint {
 // Tools that send mail or change what happens to it without a person looking at each case.
 export const TAINT_GATED_TOOLS = new Set([
   "send_email", "reply_to_email", "reply_all_email", "forward_email", "send_draft", "schedule_draft", "respond_to_invite",
-  "unsubscribe_sender", "delete_email", "delete_thread", "bulk_delete", "empty_folder", "set_rule", "set_autoresponder",
+  "unsubscribe_sender", "delete_email", "delete_thread", "bulk_delete", "empty_folder", "delete_folder", "set_rule", "set_autoresponder",
 ]);
+
+// Tools that only act for some arguments: apply_rules runs its rules when dryRun is false (it previews otherwise), and the
+// batch tools are gated for the actions that destroy.
+const DESTRUCTIVE_ACTIONS = new Set(["delete", "trash"]);
+
+/**
+ * Whether this call is one the confirmation gate applies to after a high-risk message was read. A preview or a switch-off
+ * passes, but only through an argument the tool really declares: an undeclared `dryRun` is ignored by the tool, and honouring
+ * it here would let a call skip the gate and still act.
+ */
+export function isGatedAction(name: string, args: Record<string, unknown>, declared: ReadonlySet<string>): boolean {
+  if (name === "apply_rules") return args.dryRun === false;
+  if (name === "batch_email_action" || name === "apply_thread_action") {
+    return typeof args.action === "string" && DESTRUCTIVE_ACTIONS.has(args.action) && !(declared.has("dryRun") && args.dryRun === true);
+  }
+  if (!TAINT_GATED_TOOLS.has(name)) return false;
+  if (declared.has("dryRun") && args.dryRun === true) return false;
+  if (declared.has("enabled") && args.enabled === false) return false;
+  if (declared.has("active") && args.active === false) return false;
+  return true;
+}
 
 const ID_KEYS = ["id", "emailId", "primaryEmailId", "latestEmailId"] as const;
 const MAX_SCAN_DEPTH = 7;
@@ -152,7 +222,7 @@ export function annotateHighRisk(value: unknown, taint: MailTaint, depth = 0): b
   }
   const node = value as Record<string, unknown>;
   if (node.risk === undefined) {
-    const text = [node.text, node.preview, node.snippet, node.subject].filter((part): part is string => typeof part === "string").join("\n");
+    const text = [node.text, node.preview, node.snippet, node.sentence, node.body, node.subject].filter((part): part is string => typeof part === "string").join("\n");
     const id = ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
     if (id && text) {
       const assessment = assessMail({ subject: typeof node.subject === "string" ? node.subject : undefined, text });

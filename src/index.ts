@@ -14,7 +14,7 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { isMainModule } from "./is-main.js";
-import { CORE_TOOL_NAMES, listedTools } from "./tools/definitions.js";
+import { CORE_TOOL_NAMES, TOOLS, listedTools } from "./tools/definitions.js";
 import { findMailPrompt, MAIL_PROMPTS } from "./utils/mail-prompts.js";
 import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./services/simple-imap-service.js";
 import type {
@@ -45,7 +45,7 @@ import { handleBriefTool } from "./tools/brief.js";
 import { handleTriageTool } from "./tools/triage.js";
 import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
-import { TAINT_GATED_TOOLS, assessMail, withRiskScan } from "./utils/mail-security.js";
+import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
 import { buildEmailResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
 export { mailboxChangedSinceCheckpoint } from "./tools/index-refresh.js";
@@ -61,6 +61,12 @@ export { withAudit } from "./tools/audit.js";
 
 // Shown to the model by clients that support server instructions: how to start, how ids and accounts work, what is safe.
 // It only names tools this server exposes (PROTONMAIL_TOOL_TIER=core leaves some out), so it is built from the list.
+// The arguments a tool declares in its schema: an argument it does not declare is ignored by it.
+function declaredArguments(name: string): ReadonlySet<string> {
+  const properties = (TOOLS.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  return new Set(Object.keys(properties ?? {}));
+}
+
 function buildServerInstructions(exposed: ReadonlySet<string>): string {
   const pick = (names: string[]) => names.filter((name) => exposed.has(name));
   const lines: string[] = [];
@@ -339,7 +345,7 @@ export function createServer(
       // After a high-risk message was read, tools that reach outside ask for an explicit confirmation, whatever the
       // confirmation setting says; a preview or a switch-off changes nothing and passes.
       const tainted = ctx.taint.current();
-      if (tainted && TAINT_GATED_TOOLS.has(name) && !normalizeBoolean(args.confirmed, false) && args.dryRun !== true && args.enabled !== false && args.active !== false) {
+      if (tainted && !normalizeBoolean(args.confirmed, false) && isGatedAction(name, args, declaredArguments(name))) {
         throw new McpError(
           ErrorCode.InvalidRequest,
           `Confirmation required: a message read in this session (${tainted.emailId}) looks like an attempt to steer an AI: ${tainted.reasons.join(" ")} Ask the user whether ${name} is really wanted, then call it again with confirmed: true.`,

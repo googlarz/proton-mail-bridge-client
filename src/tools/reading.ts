@@ -344,7 +344,8 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
         };
       };
 
-      const variants = args.queries === undefined ? [] : [...new Set(parseStringListArg(args, "queries"))];
+      // `query` given with `queries` is one more wording, not silently dropped.
+      const variants = args.queries === undefined ? [] : [...new Set([...parseStringListArg(args, "queries"), ...(searchIndexedInput.query ? [searchIndexedInput.query] : [])])];
       if (variants.length > 0) {
         // Several wordings of one question (synonyms, other languages): each is searched, and the results are fused by
         // reciprocal rank, so a message that several wordings find comes first. `matchedBy` says which found it.

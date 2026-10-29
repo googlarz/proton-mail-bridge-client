@@ -7,7 +7,10 @@ import { isFileNotFound } from "../utils/corrupt-store.js";
 // last taken (so "new since" means since you were last told); building it is done from the index by the tool.
 
 export interface BriefState {
+  /** When a brief covering every account was last marked seen. */
   lastAt?: string;
+  /** When a brief for one account was last marked seen: it must not move the mark of the others. */
+  byAccount?: Record<string, string>;
 }
 
 export class BriefStore {
@@ -20,16 +23,30 @@ export class BriefStore {
   async read(): Promise<BriefState> {
     try {
       const parsed = JSON.parse(await readFile(this.path, "utf8")) as BriefState;
-      return typeof parsed.lastAt === "string" && !Number.isNaN(Date.parse(parsed.lastAt)) ? { lastAt: parsed.lastAt } : {};
+      const valid = (value: unknown): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value));
+      return {
+        ...(valid(parsed.lastAt) ? { lastAt: parsed.lastAt } : {}),
+        ...(parsed.byAccount && typeof parsed.byAccount === "object" ? { byAccount: Object.fromEntries(Object.entries(parsed.byAccount).filter(([, at]) => valid(at))) } : {}),
+      };
     } catch (error) {
       if (isFileNotFound(error) || error instanceof SyntaxError) return {};
       throw error;
     }
   }
 
-  async markSeen(at: string): Promise<void> {
+  /** Marks a brief seen: for every account (no slugs), or only for the accounts it covered. */
+  async markSeen(at: string, slugs?: string[]): Promise<void> {
+    const state = await this.read();
+    const next: BriefState = slugs
+      ? { ...state, byAccount: { ...(state.byAccount ?? {}), ...Object.fromEntries(slugs.map((slug) => [slug, at])) } }
+      : { lastAt: at };
     await mkdir(dirname(this.path), { recursive: true });
-    await writeFileAtomic(this.path, JSON.stringify({ lastAt: at }, null, 2));
+    await writeFileAtomic(this.path, JSON.stringify(next, null, 2));
+  }
+
+  /** Where the next brief for an account starts. */
+  sinceFor(state: BriefState, slug: string): string | undefined {
+    return state.byAccount?.[slug] ?? state.lastAt;
   }
 }
 

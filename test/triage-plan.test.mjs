@@ -95,3 +95,37 @@ test("an action the runtime policy does not allow is reported and skipped on app
     assert.equal(folders.INBOX.messages.length, 4);
   });
 });
+
+test("a retried approval is refused, a malformed selection is rejected, and Trash is not a plan target", needsOpenssl, async () => {
+  await withServer({}, async ({ call, folders }) => {
+    const plan = await call("plan_inbox", {});
+    const [first, second] = await Promise.all([call("approve_plan", { planId: plan.planId }), call("approve_plan", { planId: plan.planId })]);
+    const outcomes = [first, second];
+    assert.equal(outcomes.filter((r) => r.applied === 3).length, 1, JSON.stringify(outcomes));
+    assert.equal(outcomes.filter((r) => /already (applying|applied)/.test(r.error ?? "")).length, 1, "the second is told it was already taken");
+    assert.equal(folders.Archive.messages.length, 3, "applied once");
+
+    const again = await call("plan_inbox", { scan: false, items: [{ emailId: "x", action: "move", target: "Trash" }] });
+    assert.match(again.error, /does not move mail to Trash/);
+  });
+  await withServer({}, async ({ call }) => {
+    const plan = await call("plan_inbox", {});
+    for (const bad of [{ exclude: 3 }, { items: "1,2" }, { exclude: ["a"] }]) {
+      assert.match((await call("approve_plan", { planId: plan.planId, ...bad })).error, /must be an array of item numbers/, JSON.stringify(bad));
+    }
+    assert.equal((await call("approve_plan", { planId: plan.planId, items: [1] })).applied, 1, "a good selection still works");
+  });
+});
+
+test("undo does not invent state: a message that was already read stays read", needsOpenssl, async () => {
+  await withServer({}, async ({ call, folders }) => {
+    const seen = folders.INBOX.messages.find((m) => m.subject === "Read newsletter");
+    const listed = await call("search_indexed_emails", { folder: "INBOX", query: "Read newsletter" });
+    const id = listed.emails[0].id;
+    const plan = await call("plan_inbox", { scan: false, items: [{ emailId: id, action: "mark_read", reason: "tidy" }] });
+    assert.equal((await call("approve_plan", { planId: plan.planId })).applied, 1);
+    const undone = await call("undo_plan", { planId: plan.planId });
+    assert.equal(undone.undone, 0, "there was nothing to put back");
+    assert.ok(seen.flags.has("\\Seen"), "still read on the server");
+  });
+});

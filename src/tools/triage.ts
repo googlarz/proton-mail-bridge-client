@@ -17,6 +17,7 @@ import type { ToolResult } from "./results.js";
 const ACTIONS: PlanAction[] = ["archive", "move", "mark_read", "label"];
 const MAX_ITEMS = 200;
 const OLD_READ_AUTOMATED_DAYS = 14;
+const TRASH_LIKE = /(^|[/\\])(trash|bin|spam|junk|deleted( items)?|wastebasket)$/i;
 
 function allowedNow(bundle: AccountBundle, action: PlanAction): boolean {
   try {
@@ -53,12 +54,13 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
         const target = typeof entry.target === "string" ? entry.target.trim() : undefined;
         if ((action === "move" || action === "label") && !target) throw new McpError(ErrorCode.InvalidParams, `An item with action ${action} needs a target.`);
         if (typeof entry.emailId !== "string") throw new McpError(ErrorCode.InvalidParams, "Each item needs an emailId.");
+        if (action === "move" && TRASH_LIKE.test(target as string)) throw new McpError(ErrorCode.InvalidParams, `A plan does not move mail to ${target}: use trash_email for that, one message at a time.`);
         const resolved = resolveAccountForEmailId(entry.emailId);
         if (resolved.bundle !== bundle) throw new McpError(ErrorCode.InvalidParams, `${entry.emailId} belongs to another account than ${bundle.account.address}; make one plan per account.`);
         if (used.has(resolved.rest)) continue;
         used.add(resolved.rest);
         const detail = await bundle.imapService.getEmailById(resolved.rest);
-        items.push({ emailId: detail.id, from: detail.from[0]?.address ?? "", subject: detail.subject, action, ...(target ? { target } : {}), reason: typeof entry.reason === "string" && entry.reason.trim() ? entry.reason.trim().slice(0, 300) : "proposed by the assistant", source: "client" });
+        items.push({ emailId: detail.id, from: detail.from[0]?.address ?? "", subject: detail.subject, action, ...(target ? { target } : {}), reason: typeof entry.reason === "string" && entry.reason.trim() ? entry.reason.trim().slice(0, 300) : "proposed by the assistant", source: "client", wasRead: detail.isRead, hadLabel: target ? detail.labels.includes(target) : undefined });
       }
 
       if (args.scan !== false) {
@@ -72,8 +74,8 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
           if (email.isAutomated !== true || used.has(email.id) || declined.has(sender)) continue;
           const ageDays = Math.floor((now - Date.parse(email.internalDate || email.date || "")) / 86_400_000);
           if (!Number.isFinite(ageDays)) continue;
-          if (!email.isRead && ageDays >= minAgeDays) items.push({ emailId: email.id, from: sender, subject: email.subject, action: "archive", reason: `automatic mail, unread for ${ageDays} days`, source: "scan" });
-          else if (email.isRead && ageDays >= OLD_READ_AUTOMATED_DAYS) items.push({ emailId: email.id, from: sender, subject: email.subject, action: "archive", reason: `automatic mail you already read, ${ageDays} days old`, source: "scan" });
+          if (!email.isRead && ageDays >= minAgeDays) items.push({ emailId: email.id, from: sender, subject: email.subject, action: "archive", reason: `automatic mail, unread for ${ageDays} days`, source: "scan", wasRead: email.isRead });
+          else if (email.isRead && ageDays >= OLD_READ_AUTOMATED_DAYS) items.push({ emailId: email.id, from: sender, subject: email.subject, action: "archive", reason: `automatic mail you already read, ${ageDays} days old`, source: "scan", wasRead: email.isRead });
         }
       }
       if (items.length === 0) return createTextResult({ account: bundle.account.address, plan: null, note: "Nothing to propose: no automatic mail waiting in the INBOX and no items given." });
@@ -93,13 +95,24 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
       const plan = await plans.get(planId);
       if (!plan) throw new McpError(ErrorCode.InvalidParams, `No plan ${planId}. plan_inbox makes one.`);
       if (plan.status !== "open") throw new McpError(ErrorCode.InvalidParams, `Plan ${planId} was already ${plan.status}.`);
-      const numbers = (value: unknown) => (Array.isArray(value) ? value.map(Number).filter(Number.isInteger) : undefined);
-      const only = numbers(args.items);
-      const exclude = new Set(numbers(args.exclude) ?? []);
+      const numbers = (value: unknown, key: string) => {
+        if (value === undefined) return undefined;
+        // A malformed selection must not widen into "everything".
+        if (!Array.isArray(value) || value.some((entry) => !Number.isInteger(Number(entry)))) throw new McpError(ErrorCode.InvalidParams, `${key} must be an array of item numbers.`);
+        return value.map(Number);
+      };
+      const only = numbers(args.items, "items");
+      const exclude = new Set(numbers(args.exclude, "exclude") ?? []);
       const chosen = plan.items.filter((item) => (only ? only.includes(item.n) : true) && !exclude.has(item.n));
       if (chosen.length === 0) throw new McpError(ErrorCode.InvalidParams, "No item selected.");
       const left = plan.items.filter((item) => !chosen.includes(item));
 
+      // Claimed before anything is changed: a retry of this call (a client that timed out) is refused instead of running again.
+      try {
+        await plans.beginApply(planId);
+      } catch (error) {
+        throw new McpError(ErrorCode.InvalidParams, error instanceof Error ? error.message : String(error));
+      }
       const applied: AppliedItem[] = await withAudit(bundle.auditService, name, args, async () => {
         const out: AppliedItem[] = [];
         for (const item of chosen) {
@@ -112,16 +125,16 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
             const original = parseEmailId(item.emailId).folder;
             if (item.action === "archive") {
               const result = await bundle.imapService.archiveEmail(item.emailId, uidValidity);
-              out.push({ n: item.n, ok: true, undo: result.targetEmailId ? { kind: "move", emailId: result.targetEmailId, backTo: original } : undefined });
+              out.push(result.targetEmailId ? { n: item.n, ok: true, undo: { kind: "move", emailId: result.targetEmailId, backTo: original } } : { n: item.n, ok: true, notUndoable: "no new id was returned" });
             } else if (item.action === "move") {
               const result = await bundle.imapService.moveEmail(item.emailId, item.target as string, uidValidity);
-              out.push({ n: item.n, ok: true, undo: result.targetEmailId ? { kind: "move", emailId: result.targetEmailId, backTo: original } : undefined });
+              out.push(result.targetEmailId ? { n: item.n, ok: true, undo: { kind: "move", emailId: result.targetEmailId, backTo: original } } : { n: item.n, ok: true, notUndoable: "no new id was returned" });
             } else if (item.action === "mark_read") {
               await bundle.imapService.markEmailRead(item.emailId, true, uidValidity);
-              out.push({ n: item.n, ok: true, undo: { kind: "unread", emailId: item.emailId } });
+              out.push({ n: item.n, ok: true, ...(item.wasRead === false ? { undo: { kind: "unread" as const, emailId: item.emailId } } : {}) });
             } else {
               await bundle.imapService.updateMessageLabels(item.emailId, [item.target as string], [], uidValidity);
-              out.push({ n: item.n, ok: true, undo: { kind: "unlabel", emailId: item.emailId, label: item.target as string } });
+              out.push({ n: item.n, ok: true, ...(item.hadLabel === false ? { undo: { kind: "unlabel" as const, emailId: item.emailId, label: item.target as string } } : {}) });
             }
           } catch (error) {
             out.push({ n: item.n, ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -135,6 +148,7 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
         planId,
         applied: applied.filter((item) => item.ok).length,
         failed: applied.filter((item) => !item.ok).map((item) => ({ n: item.n, error: item.error })),
+        ...(applied.some((item) => item.notUndoable) ? { notUndoable: applied.filter((item) => item.notUndoable).map((item) => item.n) } : {}),
         leftOut: left.map((item) => item.n),
         note: left.some((item) => item.source === "scan") ? "Senders of the scanned items you left out will not be proposed again." : undefined,
         undo: `undo_plan with planId ${planId} puts the applied changes back.`,

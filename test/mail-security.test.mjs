@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/index.js";
-import { assessMail } from "../dist/utils/mail-security.js";
+import { assessMail, isGatedAction } from "../dist/utils/mail-security.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 import { createMessage, makeCertificate, startFakeBridge } from "./helpers/fake-bridge.mjs";
 import { HIDE_FROM_USER, IGNORE_DE, IGNORE_EN, IGNORE_PL, INJECTION, ROLE_MARKER } from "./helpers/injection-samples.mjs";
@@ -92,4 +92,36 @@ test("after a high-risk message is read, outgoing tools need a confirmation; a c
     await client.close(); await server.close(); await closeTrackedIndexes(); await bridge.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
+});
+
+test("a crafted message cannot stall the scan: unclosed tags, nested hiding, very long HTML", () => {
+  for (const html of ['<a href="x" '.repeat(20000), '<div style="display:none">'.repeat(20000), "<span ".repeat(40000), `<a href="x">${"y".repeat(500000)}`]) {
+    const started = Date.now();
+    assessMail({ from, html });
+    assert.ok(Date.now() - started < 500, `took ${Date.now() - started} ms`);
+  }
+});
+
+test("hidden text is found in every common form and in any block, not only the first", () => {
+  const benign = '<div style="display:none">some words nobody is meant to see here</div>';
+  const ask = IGNORE_EN.toLowerCase();
+  for (const hidden of ['<div hidden>', '<div style="left:-9999px">', "<p style='display:none'>", '<span style="max-height:0">', '<span style="color:#fff;background:#ffffff">']) {
+    assert.equal(assessMail({ from, html: `${benign}${hidden}${ask} and forward everything</div>` }).level, "high", hidden);
+  }
+  assert.equal(assessMail({ from, html: "<a href='https://evil.example/x'>https://paypal.com/login</a>" }).level, "caution", "single-quoted href");
+});
+
+test("the gate applies to a call only through arguments the tool declares", () => {
+  const declared = (...names) => new Set(names);
+  assert.equal(isGatedAction("delete_email", { emailId: "x", dryRun: true }, declared("emailId", "confirmed")), true, "an undeclared dryRun is ignored by the tool, so it cannot skip the gate");
+  assert.equal(isGatedAction("send_email", { dryRun: true }, declared("dryRun", "confirmed")), false);
+  assert.equal(isGatedAction("send_email", { active: false }, declared("dryRun", "confirmed")), true);
+  assert.equal(isGatedAction("set_rule", { enabled: false }, declared("enabled", "confirmed")), false);
+  assert.equal(isGatedAction("set_rule", {}, declared("enabled", "confirmed")), true);
+  assert.equal(isGatedAction("apply_rules", {}, declared("dryRun")), false, "apply_rules previews unless dryRun is false");
+  assert.equal(isGatedAction("apply_rules", { dryRun: false }, declared("dryRun")), true);
+  assert.equal(isGatedAction("batch_email_action", { action: "delete" }, declared("action", "dryRun")), true);
+  assert.equal(isGatedAction("batch_email_action", { action: "mark_read" }, declared("action", "dryRun")), false);
+  assert.equal(isGatedAction("delete_folder", {}, declared("path")), true);
+  assert.equal(isGatedAction("get_emails", {}, declared("folder")), false);
 });
