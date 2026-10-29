@@ -30,25 +30,27 @@ test("padding in front of the instruction, and control characters inside it, do 
   assert.match(reasons(glued.body), /ignore its instructions/);
 });
 
-test("an instruction hidden in the unscanned middle of an oversized field fails closed", async () => {
+test("an instruction in the middle of an oversized field is read, not skipped", async () => {
   const text = "a".repeat(1_500_000) + INSTRUCTION + "b".repeat(1_500_000);
   const { taint, body } = await scan({ emailId: "e1", text });
   assert.equal(body.risk.level, "high");
-  assert.match(reasons(body), /oversized-unscanned/);
+  assert.match(reasons(body), /send mail to an address|ignore its instructions/);
   assert.equal(taint.current()?.emailId, "e1");
 });
 
-test("an oversized field in a node without an id also fails closed", async () => {
-  const { taint, body } = await scan({ note: { text: "c".repeat(3_000_000) } });
-  assert.match(reasons(body.note), /oversized-unscanned/);
-  assert.ok(taint.current());
+test("an oversized field in a node without an id is read too, and clean padding does not taint", async () => {
+  const hostile = await scan({ note: { text: "c".repeat(3_000_000) + INSTRUCTION } });
+  assert.equal(hostile.body.note.risk.level, "high");
+  assert.ok(hostile.taint.current());
+  const clean = await scan({ note: { text: "c".repeat(3_000_000) } });
+  assert.equal(clean.taint.current(), undefined);
 });
 
-test("many ordinary nodes past the budget are marked, an oversized result of short clean text is not", async () => {
-  const many = await scan({ items: Array.from({ length: 6000 }, (_, i) => ({ id: `m${i}`, preview: "z".repeat(500) })) });
-  assert.ok(many.body.items.some((item) => /oversized-unscanned/.test(reasons(item))));
+test("only when the scan budget is really used up are nodes marked unscanned, with the count", async () => {
+  const many = await scan({ items: Array.from({ length: 30 }, (_, i) => ({ id: `m${i}`, preview: "z".repeat(1_000_000) })) });
+  assert.ok(many.body.items.some((item) => /oversized-unscanned: about \d+ characters/.test(reasons(item))));
   assert.ok(many.taint.current());
-  const small = await scan({ items: Array.from({ length: 200 }, (_, i) => ({ id: `m${i}`, preview: "z".repeat(500) })) });
+  const small = await scan({ items: Array.from({ length: 6000 }, (_, i) => ({ id: `m${i}`, preview: "z".repeat(500) })) });
   assert.equal(small.taint.current(), undefined);
 });
 
