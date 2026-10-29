@@ -13,6 +13,7 @@ import { parseEmails, ensureValidEmails, isValidEmail, normalizeBoolean, normali
 import { ensureMailboxWriteAllowed, resolveRemoteDraftSync, ensureRemoteDraftSyncAllowed, ensureDestructiveConfirmed, ensureSendAllowed, ensureOutboundRecipientsAllowed } from "../utils/runtime-policy.js";
 import type { ToolContext } from "./context.js";
 import type { ToolResult } from "./results.js";
+import { sendOutcomeIsUnknown } from "../services/smtp-service.js";
 
 // Drafts: create (new, reply, forward, thread reply), list, read, edit, sync to the Drafts folder, send and schedule.
 
@@ -883,7 +884,11 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
         // Mirrors SnoozeService.wake()'s catch handler: revert the claim
         // so the draft is retryable instead of stuck in "sending"
         // forever because SMTP failed.
-        await sendDraftBundle.draftStore.revertSending(draft.id);
+        // NOT when the outcome is unknown (a timeout, or the connection dropped after the data was sent): the server may
+        // have accepted the message, and making the draft sendable again lets a retry deliver it twice. It then stays
+        // locked in "sending" until the user has checked the Sent folder, like a timed-out queued send.
+        const unknownOutcome = sendOutcomeIsUnknown(error);
+        if (!unknownOutcome) await sendDraftBundle.draftStore.revertSending(draft.id);
         await auditService
           .record({
             timestamp: new Date().toISOString(),
@@ -899,6 +904,14 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
               error: auditError,
             }),
           );
+        if (unknownOutcome) {
+          throw new Error(
+            // The connection error itself is left out: a tool error that looks like a connection failure is replaced by
+            // the generic "could not connect" advice, which would hide this. It is in the audit log.
+            "The send failed after the message may have reached the server. " +
+              "Check the Sent folder before sending again: the draft stays locked as \"sending\" so it cannot go out twice, and can be deleted once you know.",
+          );
+        }
         throw error;
       }
 

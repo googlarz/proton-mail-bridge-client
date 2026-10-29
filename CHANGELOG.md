@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **`send_draft` could deliver a draft twice after an ambiguous SMTP failure.** When the connection dropped or timed out after the message was handed over, the draft went back to "draft" and a retry sent it again. Now, as for a timed-out queued send, the draft stays locked as "sending" and the error says to check the Sent folder first; a definite rejection (a server response, a login or recipient error) still makes it sendable again. SMTP connection, greeting and socket timeouts are set, so a stalled server no longer holds a send open forever.
+- **A symlink planted at an attachment's target inside the download directory could send the write elsewhere.** A dangling link passed the containment check and the write followed it. Files are now written to a new exclusive temp file and renamed over the target, which replaces a link instead of following it. Found by an independent security review of the code against a fork's audit notes.
+
 ## [2.16.2] — 2026-10-29
 
 - **A forwarding rule could forward a message twice when two server processes ran on one data directory** (some desktop clients start a stdio server twice, anthropics/claude-ai-mcp#1156). Both read the "already handled" list before either wrote to it. A forward is now claimed (message, rule and the day's cap) in one locked step before it is sent, so the second process sends nothing. It is at most once: a forward that fails after the claim is not retried. Found by a test that starts two instances; it failed once in a full run under load. The automatic reply was already claimed under a lock.

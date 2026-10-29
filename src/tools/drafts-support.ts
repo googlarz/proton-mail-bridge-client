@@ -118,7 +118,7 @@ export function redactQueueRecordAttachments<T extends { payload: SendEmailInput
 export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: string, data: Buffer): Promise<string> {
   const { resolve: pathResolve, join: pathJoin, dirname, basename, sep } = await import("node:path");
   const { realpathSync, existsSync } = await import("node:fs");
-  const { writeFile: wf, mkdir: mkd, chmod: chm } = await import("node:fs/promises");
+  const { mkdir: mkd } = await import("node:fs/promises");
   const absDir = pathResolve(downloadDir);
   const absTarget = pathJoin(absDir, saveTo);
   // A hardcoded "/" never matched on win32 (path.resolve/join produce
@@ -157,8 +157,8 @@ export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: 
   if (!isPathInside(realDir, realTarget, sep)) {
     throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
   }
-  await wf(absTarget, data, { mode: 0o600 });
-  // writeFile's mode only applies to a newly created file; tighten an existing one too.
-  await chm(absTarget, 0o600);
+  // Not wf(absTarget): that would write through a symlink planted at the target (a dangling one passes the checks above).
+  const { writeFileNoFollow } = await import("../utils/safe-write.js");
+  await writeFileNoFollow(absTarget, data);
   return absTarget;
 }

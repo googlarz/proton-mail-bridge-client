@@ -56,6 +56,7 @@ import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { tlsOptionsFor } from "../utils/tls.js";
 import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES, extractPdfText, looksLikePdf, PdfTextError } from "../utils/pdf-text.js";
 import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./imap-errors.js";
+import { writeFileNoFollow } from "../utils/safe-write.js";
 export { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError };
 
 const FETCH_SUMMARY_QUERY = {
@@ -4729,7 +4730,7 @@ export class SimpleIMAPService {
       // 0o700/0o600: this writes the user's own private email content — restrict
       // it to the owner regardless of the destination directory's own permissions.
       await mkdir(dirname(outputFilePath), { recursive: true, mode: 0o700 });
-      await writeFile(outputFilePath, attachment.content, { mode: 0o600 });
+      await writeFileNoFollow(outputFilePath, attachment.content);
     }
 
     return {

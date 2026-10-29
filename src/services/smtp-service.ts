@@ -276,6 +276,10 @@ export class SMTPService {
           pass: this.config.smtp.password,
         },
         tls: tlsOptionsFor(this.config.smtp.host, this.config.runtime),
+        // Without these a stalled server holds a send open indefinitely.
+        connectionTimeout: 30_000,
+        greetingTimeout: 30_000,
+        socketTimeout: 120_000,
       });
     }
 
@@ -508,4 +512,17 @@ export class SMTPService {
           : undefined,
     };
   }
+}
+
+// Whether a failed send may still have been delivered. An error that came back from the server as a rejection (a
+// response code), or before the message was handed over (login, recipients, connecting), means it was not. A timeout,
+// a dropped connection or a reset after the data command means nobody knows: sending again could deliver twice.
+export function sendOutcomeIsUnknown(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const details = error as Error & { code?: string; command?: string; responseCode?: number };
+  if (typeof details.responseCode === "number" && details.responseCode >= 400) return false;
+  if (details.code === "EAUTH" || details.code === "EENVELOPE" || details.code === "EDNS") return false;
+  if (error.message.startsWith("Timed out after")) return true;
+  const afterData = typeof details.command === "string" && /^DATA/i.test(details.command);
+  return afterData || /closed unexpectedly|socket|ETIMEDOUT|ECONNRESET|EPIPE|timed? ?out|reset/i.test(`${details.code ?? ""} ${error.message}`);
 }
