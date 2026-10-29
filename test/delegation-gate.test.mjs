@@ -466,6 +466,21 @@ test("a forward grant covers only a message of the account it was made for, whic
   });
 });
 
+test("a reply grant covers only a message of the account it was made for, whichever address the reply goes out as", async () => {
+  await withServer({ approval: "require", answer: "decline", secondAccount: true }, async ({ call, sent, asked, grant, used }) => {
+    await grant({ tools: ["reply_to_email", "reply_all_email"], recipients: ["ann@example.com", "dan@example.com"], maxUses: 10 });
+    const theirs = `second-example-com::${DETAIL.id}`;
+
+    ok(await call("reply_to_email", { emailId: DETAIL.id, body: "x" }));
+    assert.deepEqual([sent.length, asked.length, await used()], [1, 0, [1]]);
+
+    // A message of the second account, replied to as the primary account: the grant does not reach into it.
+    refused(await call("reply_to_email", { emailId: theirs, from: ADDRESS, body: "x" }), /Not approved/);
+    refused(await call("reply_all_email", { emailId: theirs, from: ADDRESS, body: "x" }), /Not approved/);
+    assert.deepEqual([sent.length, asked.length, await used()], [1, 2, [1]]);
+  });
+});
+
 test("a scheduled send carries the content and recipients it was scheduled with: editing the draft afterwards changes nothing that is sent", async () => {
   await withServer({ approval: "require", answer: "decline" }, async ({ call, sent, asked, grant, used, bundle }) => {
     await grant({ tools: ["schedule_draft"], recipients: ["bob@example.com"], maxUses: 1 });

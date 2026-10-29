@@ -76,7 +76,7 @@ export class Delegation {
   /**
    * Called by a send handler right before it sends or queues: spends the use. Does nothing for a call no grant approved.
    * `bundle` is the account the mail goes out through, `recipients` every To, Cc and Bcc address it will really use, and
-   * `source` (a forward) the account the forwarded message is read from.
+   * `source` (a forward or reply) the account the original message is read from.
    */
   async claim(args: Record<string, unknown>, tool: string, bundle: AccountBundle, recipients: readonly string[], source?: AccountBundle): Promise<void> {
     if (!this.delegated.delete(args)) return;
@@ -134,8 +134,11 @@ export class Delegation {
         const detail = await read.imapService.getEmailById(rest);
         const replyAll = name === "reply_all_email" || normalizeBoolean(args.replyAll, false);
         const base = getReplyRecipients(detail, read.config.smtp.username, replyAll, this.deps.allAccountAddresses());
+        const sending = sendingAs(optionalString(args, "from"), read);
+        // A reply may quote the original: only a message of the grant's own account may be answered under it.
+        if (sending.account.slug !== read.account.slug) return undefined;
         return {
-          bundle: sendingAs(optionalString(args, "from"), read),
+          bundle: sending,
           recipients: [...uniqueAddresses(base.to), ...uniqueAddresses([...base.cc, ...list("cc")]), ...list("bcc")],
         };
       }

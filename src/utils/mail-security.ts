@@ -110,7 +110,8 @@ function hostOf(url: string): string {
 
 // Control and invisible characters that padding or splitting a word can use to slip past a pattern.
 const HIDDEN_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/g;
-const NEEDS_NORMALISING = /[^\t\n\r\x20-\x7e]|[ \t]{2}/;
+const NEEDS_NORMALISING = /[^\t\n\r\x20-\x7e]/;
+const SPACE_RUN = /[ \t]{2,}/g;
 const normalised = (text: string): string => text.normalize("NFKC").replace(/[ \t]{2,}/g, " ");
 
 // The text with the hidden characters taken out and with them turned into spaces, each in NFKC form: a word split by one
@@ -118,13 +119,16 @@ const normalised = (text: string): string => text.normalize("NFKC").replace(/[ \
 // letters, no-break spaces) read as plain ones, and runs of spaces count as one. Plain text with single spaces is matched as it is. Only the
 // instruction patterns run on these, and they are bounded, so the cost stays linear.
 function normalisedVariants(text: string): string[] {
-  if (!NEEDS_NORMALISING.test(text)) return [text];
+  // Plain printable ASCII has no hidden characters and nothing for NFKC to change: only a run of spaces can differ.
+  if (!NEEDS_NORMALISING.test(text)) return [text.includes("  ") || text.includes("\t") ? text.replace(SPACE_RUN, " ") : text];
   const variants = new Set([normalised(text), normalised(text.replace(HIDDEN_CHARS, "")), normalised(text.replace(HIDDEN_CHARS, " "))]);
   return [...variants];
 }
 
 function matchesInstruction(text: string): string | undefined {
-  for (const variant of normalisedVariants(text)) for (const [pattern, reason] of INSTRUCTION_PATTERNS) if (pattern.test(variant)) return reason;
+  for (const variant of normalisedVariants(text)) {
+    for (const [pattern, reason] of INSTRUCTION_PATTERNS) if (pattern.test(variant)) return reason;
+  }
   return undefined;
 }
 
@@ -242,11 +246,19 @@ const MAX_FLAT_NODES = 1_000_000;
 const MAX_SCAN_CHARS = 2_000_000;
 const MAX_PARSE_CHARS = 32_000_000;
 const SCAN_WINDOW = 100_000;
-// Fields the server fills itself (ids, dates, counts, hashes). Skipped only while short: a long value under such a key is text.
-const MACHINE_KEYS = new Set<string>([
-  ...ID_KEYS, "uid", "uids", "date", "receivedAt", "sentAt", "internalDate", "createdAt", "updatedAt", "expiresAt",
-  "flags", "count", "total", "size", "hash", "sha256", "checksum", "account", "mimeType",
-]);
+// Fields the server fills itself (ids, dates, counts, hashes). Skipped only while short and only if the value looks like what the
+// key promises: a header-derived string (a Message-ID, a Date header, a Content-Type with parameters, a name used as an id) is text.
+const DATE_KEYS = ["date", "receivedAt", "sentAt", "internalDate", "createdAt", "updatedAt", "expiresAt"];
+const TOKEN_KEYS = [...ID_KEYS, "uid", "uids", "flags", "count", "total", "size", "hash", "sha256", "checksum", "account"];
+const TOKEN_VALUE = /^[\w.:@<>+=~%/!$*\\-]+$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+const RFC_DATE = /^(?:[A-Za-z]{3}, )?\d{1,2} [A-Za-z]{3} \d{2,4} \d{2}:\d{2}(?::\d{2})?(?: (?:[+-]\d{4}|[A-Z]{1,5}))?$/;
+const MIME_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
+const MACHINE_VALUE: Record<string, (value: string) => boolean> = {
+  ...Object.fromEntries(TOKEN_KEYS.map((key) => [key, (value: string) => TOKEN_VALUE.test(value)])),
+  ...Object.fromEntries(DATE_KEYS.map((key) => [key, (value: string) => ISO_DATE.test(value) || RFC_DATE.test(value)])),
+  mimeType: (value) => MIME_TYPE.test(value),
+};
 const MACHINE_VALUE_MAX = 128;
 const UNIDENTIFIED = "unidentified-result";
 // Notes this module put on nodes, so a `risk` key that came with the data is never mistaken for one.
@@ -286,8 +298,11 @@ function scanText(text: string, ctx: ScanContext): string | undefined {
   return undefined;
 }
 
+// A key that is a field name is short and has no spaces; a longer one (or one with spaces) can carry text, so it is read as text.
+const isTextKey = (key: string): boolean => key.length > 24 || /\s/.test(key);
 const idOf = (node: Node): string | undefined => ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
-const isMachineField = (key: string | undefined, value: string): boolean => key !== undefined && MACHINE_KEYS.has(key) && value.length <= MACHINE_VALUE_MAX;
+const isMachineField = (key: string | undefined, value: string): boolean =>
+  key !== undefined && Object.hasOwn(MACHINE_VALUE, key) && value.length <= MACHINE_VALUE_MAX && MACHINE_VALUE[key](value);
 const isNote = (value: unknown): boolean => typeof value === "object" && value !== null && RISK_NOTES.has(value);
 
 function flag(target: Node | undefined, assessment: SecurityAssessment, taint: MailTaint, ctx: ScanContext, ownerId: string | undefined): void {
@@ -325,7 +340,11 @@ function visitChild(value: object, depth: number, holder: Node | undefined, ctx:
 function visitNode(node: Node, depth: number, ctx: ScanContext, taint: MailTaint, outerId: string | undefined): Visited {
   const id = idOf(node) ?? outerId;
   const fields: string[] = [];
-  for (const [key, value] of Object.entries(node)) if (typeof value === "string" && !isMachineField(key, value)) fields.push(value);
+  const entries = Object.entries(node);
+  for (const [key, value] of entries) {
+    if (isTextKey(key)) fields.push(key);
+    if (typeof value === "string" && !isMachineField(key, value)) fields.push(value);
+  }
   const text = fields.join(" ");
   let changed = false;
   let flagged = false;
@@ -336,7 +355,7 @@ function visitNode(node: Node, depth: number, ctx: ScanContext, taint: MailTaint
       changed = flagged = true;
     }
   }
-  for (const [key, child] of Object.entries(node)) {
+  for (const [key, child] of entries) {
     if (child === null || typeof child !== "object" || (key === "risk" && isNote(child))) continue;
     if (visitChild(child, depth + 1, node, ctx, taint, id).changed) changed = true;
   }
@@ -408,7 +427,11 @@ function scanDeep(root: object, target: Node | undefined, ctx: ScanContext, tain
       for (let i = value.length - 1; i >= 0; i--) stack.push([value[i], key]);
     } else if (value !== null && typeof value === "object") {
       const entries = Object.entries(value);
-      for (let i = entries.length - 1; i >= 0; i--) if (!(entries[i][0] === "risk" && isNote(entries[i][1]))) stack.push([entries[i][1], entries[i][0]]);
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i][0] === "risk" && isNote(entries[i][1])) continue;
+        stack.push([entries[i][1], entries[i][0]]);
+        if (isTextKey(entries[i][0])) stack.push([entries[i][0], undefined]);
+      }
     }
   }
   if (!hit && parts.length > 0) flush();
@@ -443,6 +466,44 @@ export function annotateHighRisk(value: unknown, taint: MailTaint): boolean {
   return annotateWith(value, taint, newContext(performance.now() + SCAN_DEADLINE_MS)).changed;
 }
 
+/** A text that is not walked as JSON: read as plain text, or (past the scan size) by its two ends, and said so. */
+function scanPlain(text: string, taint: MailTaint, deadline: number): SecurityAssessment | undefined {
+  if (text.length > MAX_SCAN_CHARS) {
+    // Not walked, so look at both ends and say so rather than let it pass.
+    const ends = text.length > 2 * SCAN_WINDOW ? `${text.slice(0, SCAN_WINDOW)}\n${text.slice(-SCAN_WINDOW)}` : text;
+    const assessment = assessMail({ text: ends });
+    const flagged: SecurityAssessment = assessment.level === "high"
+      ? assessment
+      : { level: "high", reasons: [`oversized-unscanned: ${Math.max(0, text.length - 2 * SCAN_WINDOW)} characters of this result could not be read as JSON and were not checked for instructions to an AI.`] };
+    taint.mark("oversized-unscanned", flagged);
+    return flagged;
+  }
+  const ctx = newContext(deadline);
+  const hit = scanText(text, ctx);
+  const note = hit ? instructionNote(hit) : ctx.unscanned > 0 ? unscannedNote(ctx) : undefined;
+  if (note) taint.mark(UNIDENTIFIED, note);
+  return note;
+}
+
+const riskPart = (risk: SecurityAssessment) => ({ type: "text", text: JSON.stringify({ risk }) });
+
+// The text of a resource part (a string, or a base64 blob read as UTF-8); a blob too big to decode here is reported unread.
+function resourceText(part: { resource?: { text?: unknown; blob?: unknown } }): string | undefined {
+  const { text, blob } = part.resource ?? {};
+  if (typeof text === "string") return text;
+  if (typeof blob !== "string") return undefined;
+  if (blob.length > MAX_SCAN_CHARS * 2) return "\u0000".repeat(MAX_SCAN_CHARS + 1);
+  return Buffer.from(blob, "base64").toString("utf8");
+}
+
+function alreadyRead(structured: object, readClean: Array<{ text: string; indent: number | undefined }>): boolean {
+  try {
+    return readClean.some(({ text, indent }) => JSON.stringify(structured, null, indent) === text);
+  } catch {
+    return false;
+  }
+}
+
 /** A tool handler whose results are scanned for mail that tries to steer an AI, wherever that text came from. */
 export function withRiskScan<R, T extends { content: unknown[]; structuredContent?: unknown; isError?: boolean }>(
   taint: MailTaint,
@@ -453,33 +514,41 @@ export function withRiskScan<R, T extends { content: unknown[]; structuredConten
     if (result.isError) return result;
     const deadline = performance.now() + SCAN_DEADLINE_MS;
     let changed = false;
+    // Text parts read as JSON and found clean: a structuredContent that writes out to the same text was read with them.
+    const readClean: Array<{ text: string; indent: number | undefined }> = [];
     const content = result.content.flatMap((part): unknown[] => {
-      const item = part as { type?: string; text?: string };
-      if (item.type !== "text" || typeof item.text !== "string" || !/^[\s]*[{[]/.test(item.text)) return [part];
-      try {
-        if (item.text.length > MAX_PARSE_CHARS) throw new RangeError("too large to parse");
-        const parsed = JSON.parse(item.text) as unknown;
-        const scanned = annotateWith(parsed, taint, newContext(deadline));
-        if (!scanned.changed) return [part];
+      const item = part as { type?: string; text?: string; resource?: { text?: unknown; blob?: unknown } };
+      if (item.type === "resource") {
+        const text = resourceText(item);
+        const note = text === undefined ? undefined : scanPlain(text, taint, deadline);
+        if (!note) return [part];
         changed = true;
-        const rewritten = { ...item, text: JSON.stringify(parsed, null, item.text.includes("\n  ") ? 2 : undefined) };
-        return scanned.orphan ? [rewritten, { type: "text", text: JSON.stringify({ risk: scanned.orphan }) }] : [rewritten];
-      } catch {
-        if (item.text.length <= MAX_SCAN_CHARS) return [part];
-        // Not walked, so look at both ends and say so rather than let it pass.
-        const ends = item.text.length > 2 * SCAN_WINDOW ? `${item.text.slice(0, SCAN_WINDOW)}\n${item.text.slice(-SCAN_WINDOW)}` : item.text;
-        const assessment = assessMail({ text: ends });
-        const flagged: SecurityAssessment = assessment.level === "high"
-          ? assessment
-          : { level: "high", reasons: [`oversized-unscanned: ${Math.max(0, item.text.length - 2 * SCAN_WINDOW)} characters of this result could not be read as JSON and were not checked for instructions to an AI.`] };
-        taint.mark("oversized-unscanned", flagged);
-        changed = true;
-        return [part, { type: "text", text: JSON.stringify({ risk: flagged }) }];
+        return [part, riskPart(note)];
       }
+      if (item.type !== "text" || typeof item.text !== "string") return [part];
+      if (/^[\s]*[{[]/.test(item.text) && item.text.length <= MAX_PARSE_CHARS) {
+        try {
+          const parsed = JSON.parse(item.text) as unknown;
+          const scanned = annotateWith(parsed, taint, newContext(deadline));
+          if (!scanned.changed) {
+            readClean.push({ text: item.text, indent: item.text.includes("\n  ") ? 2 : undefined });
+            return [part];
+          }
+          const rewritten = { ...item, text: JSON.stringify(parsed, null, item.text.includes("\n  ") ? 2 : undefined) };
+          changed = true;
+          return scanned.orphan ? [rewritten, riskPart(scanned.orphan)] : [rewritten];
+        } catch {
+          // Not JSON, or too deep to write back: read as plain text below (the session is already tainted if it matters).
+        }
+      }
+      const note = scanPlain(item.text, taint, deadline);
+      if (!note) return [part];
+      changed = true;
+      return [part, riskPart(note)];
     });
-    if (!changed) return result;
     const structured = result.structuredContent;
-    if (structured && typeof structured === "object") annotateWith(structured, taint, newContext(deadline));
+    if (structured && typeof structured === "object" && (changed || !alreadyRead(structured, readClean)) && annotateWith(structured, taint, newContext(deadline)).changed) changed = true;
+    if (!changed) return result;
     return { ...result, content, ...(structured !== undefined ? { structuredContent: structured } : {}) };
   };
 }

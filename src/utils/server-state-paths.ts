@@ -53,14 +53,17 @@ export function isInsideServerState(target: string, config: ServerStateConfig | 
   }
   for (const dataDir of new Set([config.dataDir, ...(config.accounts ?? []).map((account) => account.dataDir)].filter(Boolean))) {
     const real = canonical(dataDir);
-    if (isPathInside(join(real, ATTACHMENTS_FOLDER), target)) continue;
+    // The exemption holds only while the folder really is a folder inside the data dir (not a link back to it or out of it).
+    const realAttachments = canonical(join(real, ATTACHMENTS_FOLDER));
+    const exempt = realAttachments !== real && isPathInside(real, realAttachments);
+    if (exempt && isPathInside(realAttachments, target)) continue;
     if (!existsSync(dataDir)) {
       if (isPathInside(real, target)) return true;
       continue;
     }
     const attachments = join(dataDir, ATTACHMENTS_FOLDER);
     for (const ancestor of chain) {
-      if (sameFile(ancestor, attachments)) break;
+      if (exempt && sameFile(ancestor, attachments)) break;
       if (sameFile(ancestor, dataDir)) return true;
     }
   }
