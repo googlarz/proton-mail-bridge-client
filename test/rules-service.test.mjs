@@ -153,3 +153,18 @@ test("accepting a proposal makes a rule and clears it; dismissing remembers it; 
     assert.equal(await service.reserveForwards(5, NOW + DAY), 5, "a new day");
   });
 });
+
+test("a forward is claimed once per rule and message, even when two services ask at the same time", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rules-claim-"));
+  try {
+    const a = new RulesService({ dataDir: dir });
+    const b = new RulesService({ dataDir: dir });
+    const results = await Promise.all([a.claimForward("r1", "<m@x>"), b.claimForward("r1", "<m@x>"), a.claimForward("r1", "<m@x>"), b.claimForward("r1", "<m@x>")]);
+    assert.equal(results.filter((r) => r === "claimed").length, 1, JSON.stringify(results));
+    assert.equal(results.filter((r) => r === "duplicate").length, 3);
+    assert.equal(await a.claimForward("r2", "<m@x>"), "claimed", "another rule may forward the same message");
+    assert.equal(await a.forwardsToday(), 2, "each claim counts against the day");
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

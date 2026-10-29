@@ -152,7 +152,16 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
           skipped.add("forward");
           continue;
         }
-        if ((await bundle.rulesService.reserveForwards(1)) < 1) {
+        if (options.automatic && email.messageId) {
+          // Claimed before sending, under a lock: a second server process on this data directory (some clients start a
+          // stdio server twice) must not forward the same message again.
+          const claim = await bundle.rulesService.claimForward(forward.ruleId, email.messageId);
+          if (claim === "duplicate") continue;
+          if (claim === "limit") {
+            skipped.add("forward (daily limit)");
+            continue;
+          }
+        } else if ((await bundle.rulesService.reserveForwards(1)) < 1) {
           skipped.add("forward (daily limit)");
           continue;
         }

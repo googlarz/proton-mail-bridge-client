@@ -546,6 +546,26 @@ export class RulesService {
     });
   }
 
+  /**
+   * Claims one forward of one message by one rule, against the day's cap, in one locked step: the first instance to ask
+   * gets it, a second server process on the same data directory is told "duplicate" and sends nothing. At most once:
+   * a forward that then fails is not retried.
+   */
+  async claimForward(ruleId: string, messageId: string, now = Date.now()): Promise<"claimed" | "duplicate" | "limit"> {
+    return this.withLock(async () => {
+      const state = await this.loadUnlocked();
+      const list = state.handled[ruleId] ?? [];
+      if (list.includes(messageId)) return "duplicate";
+      const today = new Date(now).toISOString().slice(0, 10);
+      const used = state.forwarded.date === today ? state.forwarded.count : 0;
+      if (used >= FORWARD_DAILY_LIMIT) return "limit";
+      state.handled[ruleId] = [...list, messageId].slice(-HANDLED_LIMIT);
+      state.forwarded = { date: today, count: used + 1 };
+      await this.save(state);
+      return "claimed";
+    });
+  }
+
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
     await mkdir(dirname(this.storePath), { recursive: true, mode: 0o700 });
     return withFileLock(this.storePath, fn);
