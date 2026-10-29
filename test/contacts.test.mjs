@@ -352,8 +352,8 @@ test("import_contacts is confirmation-gated after a high-risk message, and a car
 
 test("cleanContactText removes invisible characters that can smuggle text or fill a name", () => {
   assert.equal(cleanContactText(`Ann${tagChars(IGNORE_EN)}`, 100), "Ann", "Unicode tag characters (an ASCII smuggling channel) are dropped");
-  assert.equal(cleanContactText("A\u{E0100}n️n­aㅤ⠀ᅟᅠﾠ B", 100), "Anna B");
-  assert.equal(cleanContactText("Ann​ Lee‮", 100), "Ann Lee");
+  assert.equal(cleanContactText("A\u{E0100}n\uFE0Fn\u00ADa\u3164\u2800\u115F\u1160\uFFA0 B", 100), "Anna B");
+  assert.equal(cleanContactText("Ann\u200B Lee\u202E", 100), "Ann Lee");
   assert.equal(cleanContactText("Zoë Nowak, Müller", 100), "Zoë Nowak, Müller", "ordinary accents and umlauts stay");
 });
 
@@ -365,12 +365,12 @@ test("a hidden instruction in a displayName is not stored", async () => {
 });
 
 test("addresses are lowercased as ASCII only: the Kelvin sign does not become k", async () => {
-  assert.equal(normalizeContactAddress("K@x.com"), "K@x.com", "kept as written, not folded into ASCII");
+  assert.equal(normalizeContactAddress("\u212A@x.com"), "\u212A@x.com", "kept as written, not folded into ASCII");
   assert.equal(normalizeContactAddress("K@X.COM"), "k@x.com");
   await withStore(async (store) => {
     await store.update("k@x.com", { addTags: ["vip"] });
     assert.deepEqual(await store.tagsFor("k@x.com"), ["vip"]);
-    assert.deepEqual(await store.tagsFor("K@x.com"), [], "the Kelvin-sign address does not receive the tags of k@x.com");
+    assert.deepEqual(await store.tagsFor("\u212A@x.com"), [], "the Kelvin-sign address does not receive the tags of k@x.com");
     assert.deepEqual(await store.tagsFor("K@X.com"), ["vip"], "plain ASCII case still folds");
   });
 });

@@ -15,6 +15,7 @@ import type { EmailSummary } from "../types/index.js";
 import { normalizeLimit } from "../utils/helpers.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { requireString } from "./args.js";
+import { withAudit } from "./audit.js";
 import { headerString } from "./compose.js";
 import { maybeRefreshLocalIndex } from "./index-refresh.js";
 import { createTextResult } from "./results.js";
@@ -53,7 +54,7 @@ async function sortMessages(bundle: AccountBundle, emails: EmailSummary[], state
     if (wantsContacts && from && !contacts.has(from)) {
       contacts.set(from, (await bundle.localIndexService.search({ from: bundle.account.address, to: from, limit: 1 })).emails.length > 0);
     }
-    const signals: MessageSignals = { from, replyTo: email.replyTo[0]?.address, subject: email.subject, automated: email.isAutomated, knownContact: contacts.get(from) };
+    const signals: MessageSignals = { from, subject: email.subject, automated: email.isAutomated, knownContact: contacts.get(from) };
     let verdict = classifyMessage(state.categories, state.learned, signals);
     if (verdict.senderBased) {
       try {
@@ -70,12 +71,13 @@ async function sortMessages(bundle: AccountBundle, emails: EmailSummary[], state
 }
 
 function counts(sorted: Sorted[]): Record<string, number> {
-  const out: Record<string, number> = {};
+  // A category name is the user's text: a Map, so "constructor" or "__proto__" is only a key.
+  const out = new Map<string, number>();
   for (const { verdict } of sorted) {
     const name = verdict.category ?? "(none)";
-    out[name] = (out[name] ?? 0) + 1;
+    out.set(name, (out.get(name) ?? 0) + 1);
   }
-  return out;
+  return Object.fromEntries(out);
 }
 
 function showCategory(category: CategoryDefinition, learned: LearnedWeight[]) {
@@ -98,6 +100,8 @@ export async function handleCategoryTool(name: string, args: Record<string, unkn
   switch (name) {
     case "define_category": {
       const bundle = resolveAccountArg(args) ?? primaryBundle;
+      // A local store, not the mailbox: gated like set_contact, so a read-only server changes nothing.
+      ensureMailboxWriteAllowed(bundle.config.runtime);
       const store = bundle.categoryService;
       const modes = [args.name !== undefined, args.starter === true, args.copyFrom !== undefined].filter(Boolean).length;
       if (modes !== 1) throw new McpError(ErrorCode.InvalidParams, "Give one of: name (define or change one category), starter: true (add the starter set) or copyFrom (copy another account's categories).");
@@ -108,7 +112,7 @@ export async function handleCategoryTool(name: string, args: Record<string, unkn
           if (!source || source === bundle) throw new McpError(ErrorCode.InvalidParams, "copyFrom must name another account than the one the categories go to.");
         }
         const drafts = source ? (await source.categoryService.list()).categories : STARTER_CATEGORIES;
-        const { added, skipped } = await store.addAll(drafts);
+        const { added, skipped } = await withAudit(bundle.auditService, name, args, () => store.addAll(drafts));
         const { categories } = await store.list();
         const clashes = categories.filter((category) => added.includes(category.name)).flatMap((category) => {
           const note = protonClash(category);
@@ -123,7 +127,7 @@ export async function handleCategoryTool(name: string, args: Record<string, unkn
           next: "categorize_inbox shows where the INBOX mail would go. Nothing in the mailbox has changed.",
         });
       }
-      const { category, created } = await store.define({
+      const { category, created } = await withAudit(bundle.auditService, name, args, () => store.define({
         name: args.name,
         description: args.description,
         senders: args.senders,
@@ -131,7 +135,7 @@ export async function handleCategoryTool(name: string, args: Record<string, unkn
         automated: args.automated,
         knownContact: args.knownContact,
         label: args.label,
-      });
+      }));
       const { learned } = await store.list();
       const signalless = !category.senders && !category.keywords && category.automated === undefined && !category.knownContact;
       return createTextResult({
@@ -245,6 +249,7 @@ export async function handleCategoryTool(name: string, args: Record<string, unkn
     }
 
     case "correct_category": {
+      ensureMailboxWriteAllowed(ctx.config.runtime);
       const emailId = requireString(args, "emailId");
       const wanted = requireString(args, "category");
       const named = resolveAccountArg(args);
@@ -264,7 +269,7 @@ export async function handleCategoryTool(name: string, args: Record<string, unkn
       const emails = await inboxMessages(bundle, normalizeLimit(args.limit, 30, 1, 100));
       const contacts = new Map<string, boolean>();
       const before = await sortMessages(bundle, emails, await store.list(), contacts);
-      const weights = await store.learn(sender, category.name);
+      const weights = await withAudit(bundle.auditService, name, args, () => store.learn(sender, category.name));
       const learnedState = await store.list();
       const after = await sortMessages(bundle, emails, learnedState, contacts);
       const was = new Map(before.map((entry) => [entry.email.id, entry.verdict.category]));
@@ -273,7 +278,6 @@ export async function handleCategoryTool(name: string, args: Record<string, unkn
         after.find((entry) => entry.email.id === detail.id)?.verdict ??
         classifyMessage(learnedState.categories, learnedState.learned, {
           from: sender,
-          replyTo: detail.replyTo[0]?.address,
           subject: detail.subject,
           automated: detail.isAutomated,
           authFailure: authFailureOf(headerString(detail.headers, "authentication-results")),

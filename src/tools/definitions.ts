@@ -1000,7 +1000,7 @@ export const TOOLS = [
   },
   {
     name: "categorize_inbox",
-    description: "Sort recent INBOX mail into the user's own categories (define_category) and say why for each message: matching sender or Reply-To, subject keywords, list/bulk headers, mail from someone you wrote to, earlier corrections. Deterministic, no AI judgement; who the sender is counts only when the message passed authentication. A dry run by default: nothing changes. With dryRun false it makes a plan that adds each category's label, shown with a planId; approve_plan applies it and undo_plan takes it back. Mail that already carries the label, categories without a label and labels that do not exist yet are left out and reported.",
+    description: "Sort recent INBOX mail into the user's own categories (define_category) and say why for each message: matching sender, subject keywords, list/bulk headers, mail from someone you wrote to, earlier corrections. Deterministic, no AI judgement; who the sender is counts only when the message passed authentication. A dry run by default: nothing changes. With dryRun false it makes a plan that adds each category's label, shown with a planId; approve_plan applies it and undo_plan takes it back. Mail that already carries the label, categories without a label and labels that do not exist yet are left out and reported.",
     annotations: { readOnlyHint: false },
     inputSchema: {
       type: "object",

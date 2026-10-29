@@ -3,7 +3,7 @@
 
 const CONTROL = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 // Zero-width, bidi, tag characters (U+E0000-E007F smuggle ASCII invisibly), variation selectors, soft hyphen and the blank fillers.
-const INVISIBLE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u2800\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF9-\uFFFB\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
+export const INVISIBLE = /[\u00AD\u061C\u115F\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\u2800\u3164\uFEFF\uFFA0\uFFF9-\uFFFB\u{E0000}-\u{E007F}]|[\u034F\u180B-\u180D\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]|\u17B4|\u17B5|\u1160/gu;
 const ADDRESS = /^[^\s@<>()",;:\\[\]]+@[^\s@<>()",;:\\[\]]+\.[^\s@<>()",;:\\[\]]+$/;
 
 /** Without control, bidi and zero-width characters, whitespace collapsed (newlines kept only when asked), at most `max` characters. */

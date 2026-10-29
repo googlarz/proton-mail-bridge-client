@@ -1,6 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../utils/atomic-write.js";
+import { INVISIBLE } from "../utils/contact-text.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { InvalidArgumentError } from "../utils/helpers.js";
@@ -10,7 +11,7 @@ import { assessMail } from "../utils/mail-security.js";
 // Inbox categories the user defines, per account. Proton's own categories are a fixed set sorted on Proton's servers,
 // and what they decided is not visible over IMAP; these are the user's: a name, a description in their own words and
 // the signals that put mail in it. Sorting follows rules a person can check (the sender, list headers, words in the
-// subject, Reply-To, whether you have written to the sender, what you corrected before), never a model, and every
+// subject, whether you have written to the sender, what you corrected before), never a model, and every
 // verdict comes with its reasons. Mail text is only ever compared, literally, with the user's own keywords: a subject
 // cannot change a category, a weight or the rules, and the reasons never quote it.
 
@@ -48,7 +49,6 @@ interface CategoryState {
 
 export interface MessageSignals {
   from: string;
-  replyTo?: string;
   subject: string;
   automated?: boolean;
   knownContact?: boolean;
@@ -74,7 +74,7 @@ const MAX_LEARNED = 2000;
 const MAX_SUBJECT_SCANNED = 1000;
 const MAX_KEYWORDS_COUNTED = 2;
 export const MIN_SCORE = 2;
-const SCORE = { learned: 10, senderAddress: 6, senderDomain: 5, replyTo: 3, keyword: 3, automated: 2, knownContact: 4 };
+const SCORE = { learned: 10, senderAddress: 6, senderDomain: 5, keyword: 3, automated: 2, knownContact: 4 };
 
 type Draft = Omit<CategoryDefinition, "createdAt" | "updatedAt">;
 
@@ -138,7 +138,6 @@ function matchSender(patterns: string[] | undefined, address: string): { pattern
 /** Which category a message belongs to and why. Pure: the same definitions, weights and message give the same verdict. */
 export function classifyMessage(categories: CategoryDefinition[], learned: LearnedWeight[], message: MessageSignals): CategoryVerdict {
   const from = message.from.trim().toLowerCase();
-  const replyTo = message.replyTo?.trim().toLowerCase();
   const trustSender = !message.authFailure;
   const weights = new Map(learned.filter((entry) => entry.sender === from).map((entry) => [entry.category, entry.weight]));
   const scored: Array<{ name: string; score: number; senderScore: number; reasons: string[] }> = [];
@@ -167,13 +166,6 @@ export function classifyMessage(categories: CategoryDefinition[], learned: Learn
         score += points;
         senderScore += points;
         reasons.push(`sender ${from} matches ${sender.pattern}`);
-      } else if (replyTo && replyTo !== from) {
-        const viaReplyTo = matchSender(category.senders, replyTo);
-        if (viaReplyTo) {
-          score += SCORE.replyTo;
-          senderScore += SCORE.replyTo;
-          reasons.push(`Reply-To ${replyTo} matches ${viaReplyTo.pattern}`);
-        }
       }
       if (category.knownContact && message.knownContact) {
         score += SCORE.knownContact;
@@ -235,6 +227,19 @@ function list(value: unknown, field: string, maxItems: number, maxLength: number
   return [...new Set(items)];
 }
 
+// Lookalikes of Latin letters in Cyrillic and Greek (lowercase; the text is lowercased first).
+const CONFUSABLES = new Map(
+  Object.entries({
+    "\u0430": "a", "\u0432": "b", "\u0435": "e", "\u043A": "k", "\u043C": "m", "\u043D": "h", "\u043E": "o", "\u0440": "p", "\u0441": "c", "\u0442": "t", "\u0443": "y", "\u0445": "x", "\u0456": "i", "\u0457": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u04BB": "h", "\u04CF": "l", "\u051B": "q", "\u051D": "w",
+    "\u03B1": "a", "\u03B2": "b", "\u03B3": "y", "\u03B5": "e", "\u03B9": "i", "\u03BA": "k", "\u03BD": "v", "\u03BF": "o", "\u03C1": "p", "\u03C4": "t", "\u03C5": "u", "\u03C7": "x",
+  }),
+);
+
+/** Text as the instruction filter should read it: compatibility forms folded, invisible characters dropped, lookalike letters read as Latin. A heuristic: it narrows the common disguises, it does not make the filter complete. */
+function foldForFilter(value: string): string {
+  return value.normalize("NFKC").replace(INVISIBLE, "").toLowerCase().replace(/[\u0370-\u03ff\u0400-\u052f]/g, (char) => CONFUSABLES.get(char) ?? char);
+}
+
 const SENDER_PATTERN = /^(\*?@|[^\s@*]+@)[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
 
 /**
@@ -268,7 +273,7 @@ export function validateCategory(raw: Record<string, unknown>, existing?: Catego
     if (label && (/^\/|\/$/.test(label) || label.split("/").includes(".."))) throw new InvalidArgumentError("label must be a label name such as Receipts.");
     draft.label = label || undefined;
   }
-  const words = [draft.name, draft.description ?? "", ...(draft.keywords ?? [])].join("\n");
+  const words = foldForFilter([draft.name, draft.description ?? "", draft.label ?? "", ...(draft.keywords ?? [])].join("\n"));
   const verdict = assessMail({ text: words });
   if (verdict.level === "high") {
     throw new InvalidArgumentError(`The category reads like an instruction to an AI (${verdict.reasons.join(" ")}). Describe what mail belongs in it, in plain words.`);
