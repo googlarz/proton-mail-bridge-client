@@ -86,7 +86,7 @@ test("hostile XML shapes scale no worse than mildly super-linear with their size
           extractOfficeText(docx, "docx");
         } catch {}
       },
-      3 * MB,
+      4 * MB,
     );
   }
 });
