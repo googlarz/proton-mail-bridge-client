@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { Worker } from "node:worker_threads";
 import { openZip, ZipError, type ZipArchive, type ZipLimits } from "./zip-reader.js";
 
 // Text from Word, Excel and PowerPoint files (DOCX, XLSX, PPTX) for get_attachment_text and attachment indexing.
@@ -10,6 +11,12 @@ export type OfficeKind = "docx" | "xlsx" | "pptx";
 
 export const OFFICE_MAX_INPUT_BYTES = 20 * 1024 * 1024;
 export const OFFICE_MAX_TEXT_CHARS = 500_000;
+export const OFFICE_EXTRACTION_TIMEOUT_MS = 10_000;
+// What Excel itself allows in one cell; a shared string or cell value is cut here so that one string referenced by
+// many cells cannot multiply into a huge row before the output cap applies.
+const CELL_MAX_CHARS = 32_767;
+// Attribute values are names and relationship ids and targets, never long.
+const ATTRIBUTE_MAX_CHARS = 4096;
 const ZIP_LIMITS: ZipLimits = { maxEntries: 5_000, maxEntryBytes: 32 * 1024 * 1024, maxTotalBytes: 64 * 1024 * 1024 };
 
 export interface OfficeTextResult {
@@ -20,7 +27,7 @@ export interface OfficeTextResult {
 
 export class OfficeTextError extends Error {
   constructor(
-    readonly reason: "invalid" | "too-large" | "unsupported" | "empty",
+    readonly reason: "invalid" | "too-large" | "unsupported" | "empty" | "timeout",
     message: string,
   ) {
     super(message);
@@ -44,10 +51,51 @@ export function officeKind(content: Buffer, contentType?: string, filename?: str
   return extension && isZip && (!contentType || GENERIC_TYPES.has(contentType)) ? extension : undefined;
 }
 
-export function extractOfficeText(content: Buffer, kind: OfficeKind, options: { maxChars?: number } = {}): OfficeTextResult {
+function assertInputSize(content: Buffer): void {
   if (content.length > OFFICE_MAX_INPUT_BYTES) {
     throw new OfficeTextError("too-large", `The file is larger than ${OFFICE_MAX_INPUT_BYTES / (1024 * 1024)} MB, the limit for document text extraction.`);
   }
+}
+
+/**
+ * The same extraction in a worker thread, so a heavy file cannot stall the server's event loop, with a hard time limit
+ * (the worker is terminated). The parse itself is extractOfficeText; the worker runs it inside office-text-worker.js.
+ */
+export async function extractOfficeTextAsync(
+  content: Buffer,
+  kind: OfficeKind,
+  options: { maxChars?: number; timeoutMs?: number } = {},
+): Promise<OfficeTextResult> {
+  assertInputSize(content);
+  const timeoutMs = options.timeoutMs ?? OFFICE_EXTRACTION_TIMEOUT_MS;
+  return new Promise<OfficeTextResult>((resolve, reject) => {
+    // The worker gets a copy: the caller keeps its buffer.
+    const worker = new Worker(new URL("./office-text-worker.js", import.meta.url), {
+      workerData: { content: new Uint8Array(content), kind, maxChars: options.maxChars },
+    });
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      action();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new OfficeTextError("timeout", "Reading the document took too long and was stopped."))),
+      timeoutMs,
+    );
+    timer.unref?.();
+    worker.once("message", (message: { ok: true; result: OfficeTextResult } | { ok: false; reason: OfficeTextError["reason"]; message: string }) =>
+      finish(() => (message.ok ? resolve(message.result) : reject(new OfficeTextError(message.reason, message.message)))),
+    );
+    worker.once("error", () => finish(() => reject(new OfficeTextError("invalid", "The document could not be read; the file looks damaged."))));
+    worker.once("exit", (code) => finish(() => reject(new OfficeTextError("invalid", `The document reader stopped unexpectedly (exit code ${code}).`))));
+  });
+}
+
+export function extractOfficeText(content: Buffer, kind: OfficeKind, options: { maxChars?: number } = {}): OfficeTextResult {
+  assertInputSize(content);
   const maxChars = options.maxChars ?? OFFICE_MAX_TEXT_CHARS;
   const sink = new TextSink(maxChars);
   try {
@@ -89,6 +137,11 @@ class TextSink {
     }
     this.parts.push(value);
     this.length += value.length;
+  }
+
+  /** How many more characters fit; what is decoded or collected from here on needs no more than this. */
+  get room(): number {
+    return this.max - this.length;
   }
 
   text(): string {
@@ -202,7 +255,7 @@ function parseAttributes(attrs: string): Map<string, string> {
     if (quote !== '"' && quote !== "'") break;
     const end = attrs.indexOf(quote, i + 1);
     if (end === -1) break;
-    if (name && !out.has(name)) out.set(name, decodeXmlText(attrs.slice(i + 1, end)));
+    if (name && !out.has(name)) out.set(name, decodeXmlText(attrs.slice(i + 1, end), ATTRIBUTE_MAX_CHARS));
     i = end + 1;
   }
   return out;
@@ -216,14 +269,42 @@ function relationshipId(attributes: Map<string, string>): string | undefined {
 
 const ENTITY = /&(?:#x([0-9a-fA-F]{1,6})|#([0-9]{1,7})|(amp|lt|gt|quot|apos));/g;
 const NAMED: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+// Control characters other than tab and newline, and the C1 range: never part of text a person wrote. Left in, they
+// would only pad the result (a run of &#1; is 4 bytes in the file and 6 in the JSON) or hide words from a reader.
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 
-export function decodeXmlText(raw: string): string {
-  if (!raw.includes("&")) return raw;
-  return raw.replace(ENTITY, (_, hex: string | undefined, dec: string | undefined, named: string | undefined) => {
-    if (named) return NAMED[named];
-    const code = hex ? Number.parseInt(hex, 16) : Number(dec);
-    return code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) || code === 0 ? "�" : String.fromCodePoint(code);
-  });
+/**
+ * Entities resolved, control characters dropped, and the result cut at `max` characters. The cut is made while
+ * decoding, not after: 30 MB of &amp; would otherwise be decoded in full only to be thrown away.
+ */
+export function decodeXmlText(raw: string, max = Number.POSITIVE_INFINITY): string {
+  const out: string[] = [];
+  let length = 0;
+  const push = (text: string) => {
+    for (let at = 0; at < text.length && length < max; ) {
+      // Chunked, so that a long run of control characters cannot use up the cap and hide what follows it.
+      const step = Math.max(4096, max - length);
+      const kept = text.slice(at, at + step).replace(CONTROL, "");
+      at += step;
+      const piece = kept.length > max - length ? kept.slice(0, max - length) : kept;
+      if (piece) out.push(piece);
+      length += piece.length;
+    }
+  };
+  let last = 0;
+  ENTITY.lastIndex = 0;
+  for (let match = ENTITY.exec(raw); match && length < max; match = ENTITY.exec(raw)) {
+    push(raw.slice(last, match.index));
+    last = ENTITY.lastIndex;
+    if (match[3]) {
+      push(NAMED[match[3]]);
+      continue;
+    }
+    const code = match[1] ? Number.parseInt(match[1], 16) : Number(match[2]);
+    push(code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) || code === 0 ? "�" : String.fromCodePoint(code));
+  }
+  push(raw.slice(last));
+  return out.join("");
 }
 
 /** Relationship id → part name, resolved against `base` and kept inside the archive. */
@@ -267,7 +348,7 @@ function docxText(zip: ZipArchive, sink: TextSink): void {
         else if (local === "tc") sink.add("\t");
       },
       text(raw) {
-        if (inText) sink.add(decodeXmlText(raw));
+        if (inText) sink.add(decodeXmlText(raw, sink.room + 1));
       },
     },
     () => sink.truncated,
@@ -298,6 +379,7 @@ function xlsxText(zip: ZipArchive, sink: TextSink): void {
       continue;
     }
     let cells: string[] = [];
+    let rowChars = 0;
     let type: string | undefined;
     let value = "";
     let inValue = false;
@@ -307,7 +389,7 @@ function xlsxText(zip: ZipArchive, sink: TextSink): void {
       data.toString("utf8"),
       {
         open(local, attrs) {
-          if (local === "row") cells = [];
+          if (local === "row") [cells, rowChars] = [[], 0];
           else if (local === "c") {
             type = parseAttributes(attrs).get("t");
             value = "";
@@ -321,13 +403,17 @@ function xlsxText(zip: ZipArchive, sink: TextSink): void {
           else if (local === "t") inInlineText = false;
           else if (local === "c") {
             const cell = cellValue(type, value, shared);
-            if (cell) cells.push(cell);
+            // Past the room left in the output nothing more of the row can be used: stop collecting it.
+            if (cell && rowChars <= sink.room) {
+              cells.push(cell);
+              rowChars += cell.length + 1;
+            }
           } else if (local === "row" && cells.length > 0) {
             sink.add(`${cells.join("\t")}\n`);
           }
         },
         text(raw) {
-          if (inValue || inInlineText) value += decodeXmlText(raw);
+          if ((inValue || inInlineText) && value.length < CELL_MAX_CHARS) value += decodeXmlText(raw, CELL_MAX_CHARS - value.length);
         },
       },
       () => sink.truncated,
@@ -370,7 +456,7 @@ function readSharedStrings(zip: ZipArchive): string[] {
       else if (local === "t") inText = false;
     },
     text(raw) {
-      if (inText) current += decodeXmlText(raw);
+      if (inText && current.length < CELL_MAX_CHARS) current += decodeXmlText(raw, CELL_MAX_CHARS - current.length);
     },
   });
   return strings;
@@ -410,7 +496,7 @@ function pptxText(zip: ZipArchive, sink: TextSink): void {
           else if (local === "p") sink.add("\n");
         },
         text(raw) {
-          if (inText) sink.add(decodeXmlText(raw));
+          if (inText) sink.add(decodeXmlText(raw, sink.room + 1));
         },
       },
       () => sink.truncated,

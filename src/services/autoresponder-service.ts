@@ -125,7 +125,8 @@ export type AutoresponderSkipReason =
   | "rule-skip"
   | "answered-already"
   | "no-text"
-  | "cannot-send-or-draft";
+  | "cannot-send-or-draft"
+  | "lookup-failed";
 
 // Skips that will not change on a later sync: the message is marked dealt with, so it is neither judged nor logged again.
 const PERMANENT_SKIPS = new Set<string>([
@@ -343,13 +344,29 @@ export async function decide(
   let ruleSubject = false;
   let ruleBody = false;
   const needsKnown = rule.rules?.some((candidate) => candidate.known) === true;
-  const known = needsKnown && deps.isKnownContact ? await deps.isKnownContact(sender).catch(() => false) : undefined;
+  // A lookup that throws is not an answer: a rule that depends on it cannot be judged, so it must not be skipped over.
+  let knownFailed = false;
+  let tagsFailed = false;
+  const known = needsKnown && deps.isKnownContact ? await deps.isKnownContact(sender).catch(() => {
+    knownFailed = true;
+    return false;
+  }) : undefined;
   const needsTags = rule.rules?.some((candidate) => candidate.from?.some((pattern) => pattern.trim().toLowerCase().startsWith("tag:"))) === true;
-  const tags = needsTags && deps.contactTags ? await deps.contactTags(sender).catch(() => []) : [];
+  const tags = needsTags && deps.contactTags ? await deps.contactTags(sender).catch(() => {
+    tagsFailed = true;
+    return [] as string[];
+  }) : [];
   for (const [index, candidate] of (rule.rules ?? []).entries()) {
-    if (candidate.from?.length && !candidate.from.some((pattern) => matchesAddress(pattern, sender, tags))) continue;
+    let unsure = false;
+    if (candidate.from?.length && !candidate.from.some((pattern) => matchesAddress(pattern, sender, tags))) {
+      if (tagsFailed && candidate.from.some((pattern) => pattern.trim().toLowerCase().startsWith("tag:"))) unsure = true;
+      else continue;
+    }
     if (candidate.subjectContains?.length && !candidate.subjectContains.some((text) => email.subject.toLowerCase().includes(text.toLowerCase()))) continue;
-    if (candidate.known && (known === undefined || (candidate.known === "yes") !== known)) continue;
+    if (candidate.known && knownFailed) unsure = true;
+    else if (candidate.known && (known === undefined || (candidate.known === "yes") !== known)) continue;
+    // Whatever this rule says (skip, say) cannot be told, and the default reply is not what its author meant.
+    if (unsure) return { ...base, outcome: "skip", reason: "lookup-failed", rule: candidate.name || `rule ${index + 1}` };
     action = candidate.action;
     ruleName = candidate.name || `rule ${index + 1}`;
     if (candidate.subject !== undefined) [subjectTemplate, ruleSubject] = [candidate.subject, true];
@@ -386,7 +403,7 @@ export async function decide(
     const profile = await deps.styleProfile().catch(() => undefined);
     if (profile) {
       const { greeting, closing } = greetingAndClosing(profile, sender, replyLanguage);
-      const open = greeting && !hasGreeting(body) ? `${greeting.replace("{name}", firstName(email.from[0]?.name, email.from[0]?.address ?? sender))}\n\n` : "";
+      const open = greeting && !hasGreeting(body) ? `${greeting.replace("{name}", () => firstName(email.from[0]?.name, email.from[0]?.address ?? sender))}\n\n` : "";
       const close = closing && !hasClosing(body) ? `\n\n${closing}` : "";
       if (open || close) [body, styled] = [`${open}${body}${close}`, true];
     }
