@@ -1890,7 +1890,11 @@ async function runNotify(parsed: ParsedCliArgs): Promise<void> {
 
   // Exit from the handler itself: the loop may be parked in a connect, an IDLE or a retry wait that would otherwise
   // outlast launchd's/systemd's stop timeout.
+  // `stopping` makes this the only place that prints "Stopped." and exits, and ignores a second signal.
+  let stopping = false;
   const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
     running = false;
     void Promise.race([imapService.disconnect().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 500))]).then(() => {
       process.stderr.write("[notify] Stopped.\n");
@@ -1962,7 +1966,7 @@ async function runNotify(parsed: ParsedCliArgs): Promise<void> {
   } catch {
     // ignore
   }
-  process.stderr.write("[notify] Stopped.\n");
+  if (!stopping) process.stderr.write("[notify] Stopped.\n");
 }
 
 async function runTestEmail(parsed: ParsedCliArgs): Promise<void> {
