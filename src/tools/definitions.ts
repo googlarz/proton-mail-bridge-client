@@ -1117,6 +1117,18 @@ export const TOOLS = [
     },
   },
   {
+    name: "export_sieve",
+    description: "Turn the enabled mailbox rules into a Sieve script to paste into Proton's own filters, which run on Proton's servers even while this server is off. Lists every rule or part that Proton's Sieve cannot express and why (rules on folders other than INBOX or on age, Trash and delete, forwarding, and so on). Changes nothing; the script has not been tried on Proton by this tool.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+        ruleId: { type: "string", description: "Export only this rule (even if it is switched off)." },
+      },
+    },
+  },
+  {
     name: "apply_rules",
     description: "Run the enabled rules (or one, ruleId) on mail that is already in the index. By default a PREVIEW (dryRun true): it lists what would be done to which message and changes nothing. With dryRun false it marks, labels, archives, moves, trashes, deletes and forwards through the same permissions as the other tools; deleting for good needs confirmed: true. It works from the local index, so run sync_emails first if it may be stale.",
     annotations: { destructiveHint: true },
