@@ -30,6 +30,12 @@ const REBUILD_AFTER_MS = 30_000;
 const MAX_TEXT_CHARS = 1_000;
 const RANK_CHUNK = 500;
 const MAGIC = "PMEMB01\n";
+// What an endpoint may hand back: a hostile or broken one must not make this process read gigabytes or store vectors of
+// any size for every message.
+export const MAX_DIMENSIONS = 8_192;
+export const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+// A build that sees the vector size change between batches starts over this many times, then stops until the next retry.
+const MAX_DIMENSION_RESTARTS = 2;
 
 export class EmbeddingError extends Error {
   constructor(message: string) {
@@ -151,6 +157,7 @@ function decode(buffer: Buffer): Store {
     typeof model !== "string" ||
     !Number.isInteger(dims) ||
     (dims as number) < 0 ||
+    (dims as number) > MAX_DIMENSIONS ||
     !Array.isArray(keys) ||
     !keys.every((key) => typeof key === "string") ||
     !Array.isArray(hashes) ||
@@ -165,7 +172,10 @@ function decode(buffer: Buffer): Store {
   const entries = new Map<string, Entry>();
   keys.forEach((key: string, index) => {
     const offset = buffer.byteOffset + dataStart + index * size;
-    entries.set(key, { hash: Number(hashes[index]), vector: new Float32Array(buffer.buffer.slice(offset, offset + size)) });
+    const vector = new Float32Array(buffer.buffer.slice(offset, offset + size));
+    // A NaN or infinite value would turn every similarity it touches into NaN and the ranking into noise.
+    if (!vector.every(Number.isFinite)) throw new CorruptSidecar("vectors hold values that are not finite");
+    entries.set(key, { hash: Number(hashes[index]), vector });
   });
   return { model, dims: dims as number, entries };
 }
@@ -235,7 +245,7 @@ export class EmbeddingService {
       const detail = (await response.text().catch(() => "")).slice(0, 200).trim();
       throw new EmbeddingError(`the embedding endpoint ${this.endpointLabel} answered HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
-    const body = (await response.json().catch(() => undefined)) as { embeddings?: unknown; data?: Array<{ index?: number; embedding?: unknown }> } | undefined;
+    const body = await this.readJson(response);
     const raw =
       this.config.api === "ollama"
         ? body?.embeddings
@@ -243,6 +253,9 @@ export class EmbeddingService {
           ? [...body.data].sort((left, right) => (left?.index ?? 0) - (right?.index ?? 0)).map((entry) => entry?.embedding)
           : undefined;
     const dims = Array.isArray(raw) && Array.isArray(raw[0]) ? raw[0].length : 0;
+    if (dims > MAX_DIMENSIONS) {
+      throw new EmbeddingError(`the embedding endpoint ${this.endpointLabel} returned ${dims}-dimensional vectors; more than ${MAX_DIMENSIONS} is not accepted`);
+    }
     if (
       !Array.isArray(raw) ||
       raw.length !== texts.length ||
@@ -252,6 +265,34 @@ export class EmbeddingService {
       throw new EmbeddingError(`the embedding endpoint ${this.endpointLabel} gave an answer that is not ${texts.length} vector(s) of numbers (is "${this.config.model}" an embedding model?)`);
     }
     return (raw as number[][]).map((vector) => normalize(Float32Array.from(vector)));
+  }
+
+  // The answer as JSON, read with a size cap; undefined when it is not JSON or the read failed (including the timeout).
+  private async readJson(response: Response): Promise<{ embeddings?: unknown; data?: Array<{ index?: number; embedding?: unknown }> } | undefined> {
+    const tooBig = () => new EmbeddingError(`the embedding endpoint ${this.endpointLabel} answered with more than ${MAX_RESPONSE_BYTES / 1024 / 1024} MB`);
+    if (Number(response.headers.get("content-length")) > MAX_RESPONSE_BYTES) {
+      await response.body?.cancel().catch(() => undefined);
+      throw tooBig();
+    }
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      const reader = response.body?.getReader();
+      while (reader) {
+        const part = await reader.read();
+        if (part.done) break;
+        size += part.value.byteLength;
+        if (size > MAX_RESPONSE_BYTES) {
+          await reader.cancel().catch(() => undefined);
+          throw tooBig();
+        }
+        chunks.push(part.value);
+      }
+      return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch (error) {
+      if (error instanceof EmbeddingError) throw error;
+      return undefined;
+    }
   }
 
   // Starts a background build unless one is running or the last one ended moments ago. Never waits.
@@ -398,12 +439,19 @@ export class EmbeddingService {
     }
     let queue = corpus.filter((item) => !store.entries.has(item.key));
     let unsaved = 0;
+    let restarts = 0;
     try {
       while (queue.length > 0) {
         const batch = queue.slice(0, BATCH_SIZE);
         const vectors = await this.embed(batch.map((item) => item.text), BUILD_TIMEOUT_MS);
         if (vectors[0].length !== store.dims) {
           if (store.entries.size > 0) {
+            // Not discarded again: the vectors kept so far are saved by the finally below.
+            if (++restarts > MAX_DIMENSION_RESTARTS) {
+              throw new EmbeddingError(
+                `the embedding endpoint ${this.endpointLabel} keeps changing the vector size (${store.dims} and ${vectors[0].length} dimensions); the semantic index build stopped after ${MAX_DIMENSION_RESTARTS} restarts`,
+              );
+            }
             this.log.info(`The embedding model now returns ${vectors[0].length} dimensions instead of ${store.dims}; rebuilding the semantic index`, "EmbeddingService");
           }
           store = { model: this.config.model, dims: vectors[0].length, entries: new Map() };
