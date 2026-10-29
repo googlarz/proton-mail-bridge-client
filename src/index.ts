@@ -434,6 +434,7 @@ export function createServer(
         case "get_rules":
         case "set_rule":
         case "delete_rule":
+        case "export_sieve":
         case "apply_rules":
           return await handleRuleTool(name, args, ctx);
 

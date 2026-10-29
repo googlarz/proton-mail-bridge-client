@@ -1,5 +1,6 @@
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { planChanges, type MailRule } from "../services/rules-service.js";
+import { exportSieve } from "../services/sieve-export.js";
 import type { EmailSummary } from "../types/index.js";
 import { ensureDestructiveConfirmed, ensureMailboxWriteAllowed, ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 import { normalizeBoolean, optionalBoolean, optionalInteger } from "../utils/helpers.js";
@@ -93,6 +94,24 @@ export async function handleRuleTool(name: string, args: Record<string, unknown>
       const outcome = await withAudit(target.auditService, name, args, async () => target.rulesService.remove(id));
       if (outcome.removed === "none") throw new McpError(ErrorCode.InvalidParams, `No rule or proposal with id ${id}.`);
       return createTextResult({ account: target.account.address, id, ...outcome, note: outcome.removed === "proposal" ? "It will not be proposed again." : undefined });
+    }
+
+    case "export_sieve": {
+      const ruleId = optionalString(args, "ruleId");
+      const all = await target.rulesService.allRules();
+      if (ruleId && !all.some((rule) => rule.id === ruleId)) throw new McpError(ErrorCode.InvalidParams, `No rule with id ${ruleId}.`);
+      // A named rule is exported even if it is switched off, the way apply_rules runs it.
+      const rules = ruleId ? all.filter((rule) => rule.id === ruleId).map((rule) => ({ ...rule, enabled: true })) : all;
+      const result = exportSieve(rules);
+      return createTextResult({
+        account: target.account.address,
+        ...result,
+        note: result.script
+          ? "Not tried on a Proton account: paste it into a new Sieve filter in Proton's filter settings and check it there. The folders and labels it names must already exist. Proton may also run filters on mail it puts in Spam, which the local rules never touch."
+          : all.length === 0
+            ? "There are no rules to export."
+            : "None of these rules can be expressed in Proton's Sieve; see unsupported.",
+      });
     }
 
     case "apply_rules": {

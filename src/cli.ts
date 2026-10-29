@@ -2218,6 +2218,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "rules", tool: "get_rules", positionals: [], help: "Show the mailbox rules, the proposals waiting and what the rules did (--account)" },
   { command: "set-rule", tool: "set_rule", positionals: [], help: "Create, change or accept a proposal as a rule (--proposalId, --id, --name, --enabled, --when, --actions, --confirmed)" },
   { command: "delete-rule", tool: "delete_rule", positionals: ["id"], help: "Delete a rule, or dismiss a proposal" },
+  { command: "export-sieve", tool: "export_sieve", positionals: [], help: "Turn the rules into a Sieve script for Proton's own filters, listing what cannot be expressed (--ruleId, --account)" },
   { command: "apply-rules", tool: "apply_rules", positionals: [], help: "Run the rules on mail already in the index; a preview unless --dryRun false (--ruleId, --limit, --confirmed)" },
   { command: "plan-inbox", tool: "plan_inbox", positionals: [], help: "Prepare a batch of mailbox changes to approve at once (--args '{\"scan\":true,\"limit\":30}')" },
   { command: "approve-plan", tool: "approve_plan", positionals: ["planId"], help: "Apply a plan from plan-inbox (--args '{\"exclude\":[3]}')" },
