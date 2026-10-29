@@ -45,6 +45,7 @@ import { handleBriefTool } from "./tools/brief.js";
 import { handleTriageTool } from "./tools/triage.js";
 import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
+import { handleContactTool } from "./tools/contacts.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
 import { buildEmailResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
@@ -368,6 +369,11 @@ export function createServer(
 
         case "get_style_profile":
           return await handleStyleTool(name, args, ctx);
+
+        case "find_contact":
+        case "set_contact":
+        case "import_contacts":
+          return await handleContactTool(name, args, ctx);
 
         case "find_commitments":
         case "set_commitment":

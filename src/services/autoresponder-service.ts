@@ -26,7 +26,7 @@ export type AutoresponderAction = "reply" | "draft" | "skip";
 
 export interface AutoresponderMatchRule {
   name?: string;
-  /** Addresses, or "*@example.com" / "@example.com" for a whole domain. Any of them matches. */
+  /** Addresses, "*@example.com" / "@example.com" for a whole domain, or "tag:vip" for people with that contact tag (set_contact). Any of them matches. */
   from?: string[];
   /** The subject contains any of these (case-insensitive). */
   subjectContains?: string[];
@@ -210,9 +210,10 @@ export function skipReason(
   return undefined;
 }
 
-function matchesAddress(pattern: string, address: string): boolean {
+function matchesAddress(pattern: string, address: string, tags: string[] = []): boolean {
   const p = pattern.trim().toLowerCase();
   if (!p) return false;
+  if (p.startsWith("tag:")) return tags.includes(p.slice(4).trim());
   if (p.startsWith("*@") || p.startsWith("@")) return address.endsWith(p.slice(p.indexOf("@")));
   return address === p;
 }
@@ -275,6 +276,8 @@ export interface AutoresponderDeps {
   canDraft?: boolean;
   isKnownContact?: (address: string) => Promise<boolean>;
   hasAnsweredSince?: (address: string, sinceIso: string) => Promise<boolean>;
+  /** The contact tags of an address, for "tag:vip" in a rule's from. */
+  contactTags?: (address: string) => Promise<string[]>;
 }
 
 export interface AutoresponderDecision {
@@ -311,8 +314,10 @@ export async function decide(
   let ruleName: string | undefined;
   const needsKnown = rule.rules?.some((candidate) => candidate.known) === true;
   const known = needsKnown && deps.isKnownContact ? await deps.isKnownContact(sender).catch(() => false) : undefined;
+  const needsTags = rule.rules?.some((candidate) => candidate.from?.some((pattern) => pattern.trim().toLowerCase().startsWith("tag:"))) === true;
+  const tags = needsTags && deps.contactTags ? await deps.contactTags(sender).catch(() => []) : [];
   for (const [index, candidate] of (rule.rules ?? []).entries()) {
-    if (candidate.from?.length && !candidate.from.some((pattern) => matchesAddress(pattern, sender))) continue;
+    if (candidate.from?.length && !candidate.from.some((pattern) => matchesAddress(pattern, sender, tags))) continue;
     if (candidate.subjectContains?.length && !candidate.subjectContains.some((text) => email.subject.toLowerCase().includes(text.toLowerCase()))) continue;
     if (candidate.known && (known === undefined || (candidate.known === "yes") !== known)) continue;
     action = candidate.action;
