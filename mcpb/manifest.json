@@ -39,7 +39,15 @@
         "PROTONMAIL_ACCOUNTS_JSON": "${user_config.accounts_json}",
         "PROTONMAIL_DATA_DIR": "${user_config.data_dir}",
         "PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR": "${user_config.download_dir}",
-        "PROTONMAIL_TOOL_TIER": "${user_config.tool_tier}"
+        "PROTONMAIL_TOOL_TIER": "${user_config.tool_tier}",
+        "PROTONMAIL_APPROVAL": "${user_config.approval}",
+        "PROTONMAIL_APPROVAL_TIMEOUT_SECONDS": "${user_config.approval_timeout_seconds}",
+        "PROTONMAIL_DELEGATION": "${user_config.delegation}",
+        "PROTONMAIL_OCR_COMMAND": "${user_config.ocr_command}",
+        "PROTONMAIL_INDEX_ATTACHMENTS": "${user_config.index_attachments}",
+        "PROTONMAIL_EMBEDDINGS_URL": "${user_config.embeddings_url}",
+        "PROTONMAIL_EMBEDDINGS_MODEL": "${user_config.embeddings_model}",
+        "PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE": "${user_config.embeddings_allow_remote}"
       }
     }
   },
@@ -140,6 +148,61 @@
       "title": "Tool tier",
       "description": "\"full\" exposes every tool; \"core\" exposes a smaller set to save context.",
       "default": "full",
+      "required": false
+    },
+    "approval": {
+      "type": "string",
+      "title": "Approval of risky actions",
+      "description": "One of: off, elicit (the app asks you before a send or delete goes out, if it can ask), require (the same, and refuse when the app cannot ask).",
+      "default": "off",
+      "required": false
+    },
+    "approval_timeout_seconds": {
+      "type": "number",
+      "title": "Approval time limit (seconds)",
+      "description": "How long to wait for your answer when approval is on; no answer counts as no.",
+      "default": 120,
+      "min": 1,
+      "max": 3600,
+      "required": false
+    },
+    "delegation": {
+      "type": "string",
+      "title": "Delegation grants",
+      "description": "One of: off, on. With on, a send that a grant covers goes out without asking again. Grants are made by you at a terminal with the grant-create command.",
+      "default": "off",
+      "required": false
+    },
+    "ocr_command": {
+      "type": "string",
+      "title": "OCR command",
+      "description": "Optional program (run as '<command> <image file> stdout', like tesseract) that reads text from images and scanned PDF pages. Leave empty for none.",
+      "required": false
+    },
+    "index_attachments": {
+      "type": "boolean",
+      "title": "Index attachment text",
+      "description": "Also put the text of PDF and Office attachments into the local search index.",
+      "default": false,
+      "required": false
+    },
+    "embeddings_url": {
+      "type": "string",
+      "title": "Semantic search endpoint",
+      "description": "Optional URL of an embeddings server (for example a local Ollama) that turns on search by meaning. Leave empty to keep it off.",
+      "required": false
+    },
+    "embeddings_model": {
+      "type": "string",
+      "title": "Embeddings model",
+      "description": "Model name to ask the embeddings server for. Leave empty for the default (nomic-embed-text).",
+      "required": false
+    },
+    "embeddings_allow_remote": {
+      "type": "boolean",
+      "title": "Allow a remote embeddings server",
+      "description": "Mail text is sent to the embeddings server. Leave off unless it runs on another machine you trust.",
+      "default": false,
       "required": false
     }
   },
