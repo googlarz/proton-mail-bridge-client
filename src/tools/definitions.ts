@@ -956,6 +956,65 @@ export const TOOLS = [
     },
   },
   {
+    name: "define_category",
+    description: "Define or change an inbox category of the user's own (separate from Proton's built-in categories, which cannot be read or changed here). A category has a name, a plain-language description (shown to the user, never used for sorting), and the signals that put mail in it: example senders, subject keywords, list/bulk mail or not, mail from people you have written to. With a label, applying the category adds that label. Giving the name of an existing category changes only the fields given (an empty list or label clears it). Or: starter: true adds a starter set (Receipts, Newsletters, Social, Updates, People) - only when the user asks for it; copyFrom copies another account's definitions. Names that clash with Proton's categories are reported. Changes nothing in the mailbox.",
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account; categories are per account." },
+        name: { type: "string", description: "Category name (at most 60 characters)." },
+        description: { type: "string", description: "What belongs in it, in the user's words (at most 300 characters)." },
+        senders: { type: "array", items: { type: "string" }, description: "Example senders: addresses, or @example.com for a domain and its subdomains (up to 50)." },
+        keywords: { type: "array", items: { type: "string" }, description: "The subject has a word starting with one of these, any case (up to 30), e.g. [\"invoice\",\"faktur\"]." },
+        automated: { type: "boolean", description: "true: only list or bulk mail (List-Unsubscribe, List-Id, Precedence); false: only mail from people." },
+        knownContact: { type: "boolean", description: "Count it when the user has written to the sender before." },
+        label: { type: "string", description: "Label to add when the category is applied, e.g. Receipts (an existing label; create_label makes one). Empty clears it." },
+        starter: { type: "boolean", description: "Add the starter set instead of one category. Only when the user asks for it." },
+        copyFrom: { type: "string", description: "Address or slug of another account whose category definitions to copy (corrections are not copied)." },
+      },
+    },
+  },
+  {
+    name: "list_categories",
+    description: "The user's own inbox categories for one account: each definition, how many senders corrections have taught it, clashes with Proton's category names, and the latest corrections.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account." },
+      },
+    },
+  },
+  {
+    name: "categorize_inbox",
+    description: "Sort recent INBOX mail into the user's own categories (define_category) and say why for each message: matching sender or Reply-To, subject keywords, list/bulk headers, mail from someone you wrote to, earlier corrections. Deterministic, no AI judgement; who the sender is counts only when the message passed authentication. A dry run by default: nothing changes. With dryRun false it makes a plan that adds each category's label, shown with a planId; approve_plan applies it and undo_plan takes it back. Mail that already carries the label, categories without a label and labels that do not exist yet are left out and reported.",
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account (see list_accounts). Defaults to the primary account; one plan covers one account." },
+        limit: { type: "integer", description: "The newest this many INBOX messages (1-100, default 30).", minimum: 1, maximum: 100 },
+        dryRun: { type: "boolean", description: "Only show the categories (default true). false: also make a plan of labels for approve_plan." },
+      },
+    },
+  },
+  {
+    name: "correct_category",
+    description: "Tell the categories where a message really belongs. The sender is learned: its weight towards that category goes up (and towards others down), stored on this computer, so the sender's next mail goes there too. Returns where this message goes now and which other recent INBOX messages would change category. Changes nothing in the mailbox.",
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string", description: "The message, as returned by categorize_inbox or the reading tools." },
+        category: { type: "string", description: "Name of the category it belongs in." },
+        account: { type: "string", description: "Address or slug of the account; by default the account of emailId." },
+        limit: { type: "integer", description: "How many of the newest INBOX messages to check for other changes (1-100, default 30).", minimum: 1, maximum: 100 },
+      },
+      required: ["emailId", "category"],
+    },
+  },
+  {
     name: "find_commitments",
     description: "Look through recent sent mail (promises you made) and received mail from people (promises made to you) for sentences that look like commitments (\"I'll send it by Friday\", \"wyślę do piątku\", \"ich schicke es bis Freitag\") and the date each names. Read-only; the sentences are only candidates. Confirm with the user, then record the real ones with set_commitment. Messages already in the ledger are not offered again.",
     annotations: { readOnlyHint: true },

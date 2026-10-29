@@ -13,6 +13,7 @@ import { BackgroundSyncService } from "./background-sync-service.js";
 import { AutoresponderService, type AutoresponderDeps } from "./autoresponder-service.js";
 import { RulesService } from "./rules-service.js";
 import { TriagePlanService } from "./triage-plan-service.js";
+import { CategoryService } from "./category-service.js";
 import { CommitmentService } from "./commitment-service.js";
 import { ContactService } from "./contact-service.js";
 import { runRulesOnNewMail } from "../tools/rules-runner.js";
@@ -43,6 +44,7 @@ export interface AccountBundle {
   autoresponderService: AutoresponderService;
   rulesService: RulesService;
   triagePlanService: TriagePlanService;
+  categoryService: CategoryService;
   commitmentService: CommitmentService;
   contactService: ContactService;
   /** What the autoresponder may do on this account right now (send, draft) and the lookups it needs. */
@@ -80,6 +82,7 @@ function buildAccountBundle(
   const autoresponderService = new AutoresponderService(config, log);
   const rulesService = new RulesService(config, log);
   const triagePlanService = new TriagePlanService(config);
+  const categoryService = new CategoryService(config);
   const commitmentService = new CommitmentService(config);
   const contactService = new ContactService(config, log);
 
@@ -170,6 +173,7 @@ function buildAccountBundle(
     autoresponderService,
     rulesService,
     triagePlanService,
+    categoryService,
     commitmentService,
     contactService,
     autoresponderDeps,
