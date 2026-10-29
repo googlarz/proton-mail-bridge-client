@@ -26,6 +26,8 @@ export interface ReplyReminderRecord {
   remindAt: string;
   note?: string;
   canceled?: boolean;
+  /** When the "due" event was recorded: it is recorded once. */
+  dueNotifiedAt?: string;
 }
 
 interface ReminderFile {
@@ -81,6 +83,23 @@ export class ReplyReminderService {
       store.items[record.id] = record;
       await this.save(store);
       return record;
+    });
+  }
+
+  /** Marks these reminders as announced and returns the ones that were not yet, in one locked step (two server processes announce a reminder once). */
+  async takeDue(ids: string[], now = new Date()): Promise<ReplyReminderRecord[]> {
+    if (ids.length === 0) return [];
+    return this.withLock(async () => {
+      const store = await this.loadUnlocked();
+      const taken: ReplyReminderRecord[] = [];
+      for (const id of ids) {
+        const record = ownRecord(store.items, id);
+        if (!record || record.canceled || record.dueNotifiedAt) continue;
+        record.dueNotifiedAt = now.toISOString();
+        taken.push(record);
+      }
+      if (taken.length > 0) await this.save(store);
+      return taken;
     });
   }
 

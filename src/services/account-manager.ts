@@ -1,4 +1,4 @@
-import type { AccountConfig, ProtonMailConfig } from "../types/index.js";
+import type { AccountConfig, EmailSummary, ProtonMailConfig } from "../types/index.js";
 import { logger as defaultLogger, type Logger } from "../utils/logger.js";
 import { SimpleIMAPService } from "./simple-imap-service.js";
 import { SMTPService } from "./smtp-service.js";
@@ -14,6 +14,7 @@ import { AutoresponderService, type AutoresponderDeps } from "./autoresponder-se
 import { RulesService } from "./rules-service.js";
 import { TriagePlanService } from "./triage-plan-service.js";
 import { CommitmentService } from "./commitment-service.js";
+import { EventLogService } from "./event-log-service.js";
 import { runRulesOnNewMail } from "../tools/rules-runner.js";
 import { ensureMailboxWriteAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 
@@ -43,9 +44,44 @@ export interface AccountBundle {
   rulesService: RulesService;
   triagePlanService: TriagePlanService;
   commitmentService: CommitmentService;
+  /** What happened on this account while nobody asked (get_events). */
+  eventLog: EventLogService;
   /** What the autoresponder may do on this account right now (send, draft) and the lookups it needs. */
   autoresponderDeps(): AutoresponderDeps;
   ownAddresses: string[];
+}
+
+const NEW_MAIL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const NEW_MAIL_MAX_EVENTS = 25;
+
+// The unread inbox mail a sync brought in, as events. A sync also returns old mail (the first sync, a full one), so
+// only recent mail from someone else counts, at most NEW_MAIL_MAX_EVENTS per sync (the newest), and a message is
+// announced once (its key). What is left out is said in one event.
+function announceNewMail(eventLog: EventLogService, emails: EmailSummary[], ownAddresses: string[]): void {
+  const own = new Set(ownAddresses.map((address) => address.toLowerCase()));
+  const cutoff = Date.now() - NEW_MAIL_MAX_AGE_MS;
+  const dateOf = (email: EmailSummary) => Date.parse(email.internalDate ?? email.date ?? "");
+  const fresh = emails
+    .filter((email) => !email.isRead && email.folder.toUpperCase() === "INBOX" && !own.has((email.from[0]?.address ?? "").toLowerCase()) && !(dateOf(email) < cutoff))
+    .sort((left, right) => (dateOf(left) || 0) - (dateOf(right) || 0));
+  const skipped = fresh.slice(0, Math.max(0, fresh.length - NEW_MAIL_MAX_EVENTS));
+  if (skipped.length > 0) eventLog.emit({ type: "mail.new_overflow", detail: `${skipped.length} more new messages not listed`, key: `mail.new_overflow:${skipped.at(-1)?.id}` });
+  for (const email of fresh.slice(skipped.length)) {
+    eventLog.emit({ type: "mail.new", emailId: email.id, from: email.from[0]?.address, subject: email.subject, key: `mail.new:${email.id}` });
+  }
+}
+
+// Reminders whose date has passed and that nobody has answered: each is announced once (marked under the store's lock).
+async function announceDueReminders(bundle: AccountBundle, allAddresses: string[]): Promise<void> {
+  const now = Date.now();
+  const due = (await bundle.replyReminderService.list()).filter((record) => !record.dueNotifiedAt && new Date(record.remindAt).getTime() <= now);
+  const open: string[] = [];
+  for (const record of due) {
+    if ((await bundle.localIndexService.getRepliesSince(record.messageId, record.createdAt, allAddresses, record.to)).length === 0) open.push(record.id);
+  }
+  for (const record of await bundle.replyReminderService.takeDue(open)) {
+    bundle.eventLog.emit({ type: "reply_reminder.due", refId: record.id, emailId: record.emailId, subject: record.subject });
+  }
 }
 
 function buildAccountBundle(
@@ -79,6 +115,9 @@ function buildAccountBundle(
   const rulesService = new RulesService(config, log);
   const triagePlanService = new TriagePlanService(config);
   const commitmentService = new CommitmentService(config);
+  const eventLog = new EventLogService(config, log);
+  deliveryQueueService.setEventSink((event) => eventLog.emit(event));
+  snoozeService.setEventSink((event) => eventLog.emit(event));
 
   // The note this address adds to what it sends while its automatic reply is active.
   smtpService.setOutgoingNoteProvider(() => autoresponderService.outgoingNoteNow());
@@ -140,11 +179,17 @@ function buildAccountBundle(
         (await localIndexService.search({ from: account.address, to: address, dateFrom: sinceIso, limit: 1 })).emails.length > 0,
     };
   };
+  backgroundSyncService.addNewMailHandler(async (emails) => announceNewMail(eventLog, emails, ownAddresses));
   // Replies and drafts are made after a sync has indexed new mail.
   backgroundSyncService.addNewMailHandler(async (emails) => {
     const deps = autoresponderDeps();
     if (!deps.canSend && !deps.canDraft) return;
     const outcome = await autoresponderService.process(emails, ownAddresses, deps);
+    const byId = new Map(emails.map((email) => [email.id, email]));
+    const about = (id: string) => ({ emailId: id, from: byId.get(id)?.from[0]?.address, subject: byId.get(id)?.subject });
+    for (const id of outcome.replied) eventLog.emit({ type: "autoresponder.replied", ...about(id) });
+    for (const id of outcome.drafted) eventLog.emit({ type: "autoresponder.drafted", ...about(id) });
+    for (const failure of outcome.failed) eventLog.emit({ type: "autoresponder.failed", ...about(failure.id), detail: failure.error });
     if (outcome.replied.length > 0 || outcome.drafted.length > 0) {
       log.info("Autoresponder acted", "AutoresponderService", { account: account.slug, replies: outcome.replied.length, drafts: outcome.drafted.length });
     }
@@ -167,6 +212,7 @@ function buildAccountBundle(
     rulesService,
     triagePlanService,
     commitmentService,
+    eventLog,
     autoresponderDeps,
     ownAddresses,
   };
@@ -204,8 +250,11 @@ export class AccountManager {
     }
     // A scheduled send's source draft may live in a different account's store than the
     // queue that sends it (see DeliveryQueueRecord.sourceDraftStoreSlug).
+    const allAddresses = config.accounts.map((entry) => entry.address);
     for (const bundle of this.bySlug.values()) {
       bundle.deliveryQueueService.setDraftStoreResolver((slug) => this.bySlug.get(slug)?.draftStore);
+      // Checked after each sync, like the new mail; a failure here never fails the sync.
+      bundle.backgroundSyncService.addNewMailHandler(() => announceDueReminders(bundle, allAddresses));
     }
   }
 

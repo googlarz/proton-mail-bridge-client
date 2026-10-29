@@ -16,6 +16,11 @@ export function buildDraftResourceUri(draftId: string): string {
   return `${RESOURCE_SCHEME}://draft/${encodeURIComponent(draftId)}`;
 }
 
+/** The one resource a client can subscribe to: what happened on the accounts (get_events as a resource). */
+export function buildEventsResourceUri(): string {
+  return `${RESOURCE_SCHEME}://events`;
+}
+
 export function buildAttachmentResourceUri(emailId: string, attachmentId: string): string {
   return `${RESOURCE_SCHEME}://attachment/${encodeURIComponent(emailId)}/${encodeURIComponent(attachmentId)}`;
 }
@@ -181,7 +186,8 @@ export type ParsedResourceUri =
   | { kind: "email"; emailId: string }
   | { kind: "thread"; threadId: string }
   | { kind: "draft"; draftId: string }
-  | { kind: "attachment"; emailId: string; attachmentId: string };
+  | { kind: "attachment"; emailId: string; attachmentId: string }
+  | { kind: "events" };
 
 export function parseResourceUri(uri: string): ParsedResourceUri {
   const parsed = new URL(uri);
@@ -210,6 +216,11 @@ export function parseResourceUri(uri: string): ParsedResourceUri {
         break;
       }
       return { kind: "draft", draftId: segments[0] };
+    case "events":
+      if (segments.length !== 0) {
+        break;
+      }
+      return { kind: "events" };
     case "attachment":
       if (segments.length !== 2) {
         break;

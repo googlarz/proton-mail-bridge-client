@@ -11,6 +11,7 @@ import { logger, type Logger } from "../utils/logger.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { isLikelyConnectionError, SimpleIMAPService } from "./simple-imap-service.js";
 import { ownRecord } from "../utils/own-record.js";
+import type { EventSink } from "./event-log-service.js";
 
 // Same persistence pattern as DeliveryQueueService/DraftStoreService: atomic
 // temp+rename writes, corrupted-file backup, orphaned .tmp cleanup, in-process
@@ -70,6 +71,13 @@ export class SnoozeService {
     private readonly log: Logger = logger,
   ) {
     this.storePath = join(this.config.dataDir, "snoozed.json");
+  }
+
+  private emitEvent: EventSink = () => {};
+
+  /** Where a wake or a give-up is reported (the account's event log). */
+  setEventSink(sink: EventSink): void {
+    this.emitEvent = sink;
   }
 
   start(): void {
@@ -323,8 +331,9 @@ export class SnoozeService {
     let failed = 0;
     for (const item of due) {
       try {
-        await this.wake(item.id, "woken");
+        const record = await this.wake(item.id, "woken");
         woken += 1;
+        if (record.status === "woken") this.emitEvent({ type: "snooze.woke", refId: item.id, emailId: record.currentEmailId, key: `snooze.woke:${item.id}` });
       } catch (error) {
         this.log.warn("Snooze wake failed", "SnoozeService", { id: item.id, error });
         await this.withLock(async () => {
@@ -340,6 +349,7 @@ export class SnoozeService {
               // succeed. Without this, checkDue would retry the same doomed wake every 15s forever.
               if (record.failureCount >= MAX_WAKE_FAILURES) {
                 record.status = "failed";
+                this.emitEvent({ type: "snooze.failed", refId: item.id, emailId: record.currentEmailId, detail: record.failureReason, key: `snooze.failed:${item.id}` });
               }
             }
             await this.save(store);
