@@ -2,10 +2,10 @@ import { parentPort, workerData } from "node:worker_threads";
 import { extractPdfTextDirect, PdfTextError } from "./pdf-text.js";
 
 // Runs one PDF parse for extractPdfText and reports the outcome as a plain message.
-const { content, maxPages, timeoutMs } = workerData as { content: Uint8Array; maxPages: number; timeoutMs: number };
+const { content, maxPages, timeoutMs, ocrPages } = workerData as { content: Uint8Array; maxPages: number; timeoutMs: number; ocrPages: number };
 
 try {
-  const result = await extractPdfTextDirect(Buffer.from(content), { maxPages, timeoutMs });
+  const result = await extractPdfTextDirect(Buffer.from(content), { maxPages, timeoutMs, ocrPages });
   parentPort?.postMessage({ ok: true, result });
 } catch (error) {
   const known = error instanceof PdfTextError;

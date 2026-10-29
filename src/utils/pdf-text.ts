@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
-import { getDocumentProxy } from "unpdf";
+import { extractImages, getDocumentProxy } from "unpdf";
+import { encodePng } from "./png.js";
 
 // PDF text extraction for get_attachment_text. unpdf ships a serverless build of
 // pdf.js: pure JavaScript, no native module. The parse runs in a worker_thread of
@@ -11,9 +12,14 @@ export const DEFAULT_PDF_MAX_MB = 10;
 export const DEFAULT_PDF_MAX_PAGES = 50;
 export const PDF_EXTRACTION_TIMEOUT_MS = 30_000;
 
+// A page image larger than this is not decoded for OCR.
+const MAX_OCR_IMAGE_PIXELS = 20_000_000;
+
 export interface PdfTextOptions {
   maxPages?: number;
   timeoutMs?: number;
+  /** For OCR: up to this many pages without text hand back their largest image as a PNG. 0 or unset: none. */
+  ocrPages?: number;
 }
 
 export interface PdfTextResult {
@@ -23,6 +29,21 @@ export interface PdfTextResult {
   /** Pages past maxPages that were not read. 0 when the whole document was read. */
   omittedPages: number;
   truncated: boolean;
+  /** Only with ocrPages: the text of each read page, and the images of pages that had none. */
+  pageTexts?: string[];
+  pageImages?: Array<{ page: number; png: Uint8Array }>;
+}
+
+/** The page-by-page text with its markers, and a note when pages past maxPages were left out. */
+export function formatPdfPages(pageTexts: string[], totalPages: number, maxPages: number): string {
+  const pages = pageTexts.map((pageText, index) => `--- Page ${index + 1} of ${totalPages} ---\n${pageText.trim()}`);
+  const omittedPages = totalPages - pageTexts.length;
+  if (omittedPages > 0) {
+    pages.push(
+      `--- Truncated: read ${pageTexts.length} of ${totalPages} pages; ${omittedPages} page${omittedPages === 1 ? "" : "s"} not included (limit PROTONMAIL_PDF_MAX_PAGES=${maxPages}) ---`,
+    );
+  }
+  return pages.join("\n\n");
 }
 
 /** A PDF that cannot be read as text, with a message meant for the user, not a stack trace. */
@@ -48,7 +69,7 @@ export async function extractPdfText(content: Buffer, options: PdfTextOptions = 
   return new Promise<PdfTextResult>((resolve, reject) => {
     // The worker gets a copy: the caller keeps its buffer.
     const worker = new Worker(new URL("./pdf-text-worker.js", import.meta.url), {
-      workerData: { content: new Uint8Array(content), maxPages: options.maxPages ?? DEFAULT_PDF_MAX_PAGES, timeoutMs },
+      workerData: { content: new Uint8Array(content), maxPages: options.maxPages ?? DEFAULT_PDF_MAX_PAGES, timeoutMs, ocrPages: options.ocrPages ?? 0 },
     });
     let settled = false;
     const finish = (action: () => void) => {
@@ -75,6 +96,7 @@ export async function extractPdfText(content: Buffer, options: PdfTextOptions = 
 export async function extractPdfTextDirect(content: Buffer | Uint8Array, options: PdfTextOptions = {}): Promise<PdfTextResult> {
   const maxPages = options.maxPages ?? DEFAULT_PDF_MAX_PAGES;
   const timeoutMs = options.timeoutMs ?? PDF_EXTRACTION_TIMEOUT_MS;
+  const ocrPages = options.ocrPages ?? 0;
   let timer: NodeJS.Timeout | undefined;
   let timedOut = false;
   let destroy: (() => Promise<void>) | undefined;
@@ -90,6 +112,7 @@ export async function extractPdfTextDirect(content: Buffer | Uint8Array, options
         isOffscreenCanvasSupported: false,
         enableXfa: false,
         verbosity: 0,
+        ...(ocrPages > 0 ? { maxImageSize: MAX_OCR_IMAGE_PIXELS } : {}),
       });
     } catch (error) {
       throw toPdfTextError(error);
@@ -98,7 +121,8 @@ export async function extractPdfTextDirect(content: Buffer | Uint8Array, options
     try {
       const totalPages = pdf.numPages;
       const extractedPages = Math.min(totalPages, maxPages);
-      const pages: string[] = [];
+      const pageTexts: string[] = [];
+      const pageImages: Array<{ page: number; png: Uint8Array }> = [];
       let anyText = false;
       for (let pageNumber = 1; pageNumber <= extractedPages; pageNumber += 1) {
         if (timedOut) break;
@@ -107,21 +131,27 @@ export async function extractPdfTextDirect(content: Buffer | Uint8Array, options
         const pageText = textContentToString(content.items);
         page.cleanup();
         if (pageText.trim()) anyText = true;
-        pages.push(`--- Page ${pageNumber} of ${totalPages} ---\n${pageText.trim()}`);
+        else if (pageImages.length < ocrPages) {
+          const png = await largestPageImage(pdf, pageNumber);
+          if (png) pageImages.push({ page: pageNumber, png });
+        }
+        pageTexts.push(pageText);
       }
-      if (!anyText) {
+      if (!anyText && pageImages.length === 0) {
         throw new PdfTextError(
           "no-text-layer",
           "The PDF has no text layer (it is probably a scan or contains only images), so there is no text to extract.",
         );
       }
       const omittedPages = totalPages - extractedPages;
-      if (omittedPages > 0) {
-        pages.push(
-          `--- Truncated: read ${extractedPages} of ${totalPages} pages; ${omittedPages} page${omittedPages === 1 ? "" : "s"} not included (limit PROTONMAIL_PDF_MAX_PAGES=${maxPages}) ---`,
-        );
-      }
-      return { text: pages.join("\n\n"), totalPages, extractedPages, omittedPages, truncated: omittedPages > 0 };
+      return {
+        text: formatPdfPages(pageTexts, totalPages, maxPages),
+        totalPages,
+        extractedPages,
+        omittedPages,
+        truncated: omittedPages > 0,
+        ...(ocrPages > 0 ? { pageTexts, pageImages } : {}),
+      };
     } catch (error) {
       throw toPdfTextError(error);
     } finally {
@@ -145,6 +175,21 @@ export async function extractPdfTextDirect(content: Buffer | Uint8Array, options
     // The losing promise must not surface as an unhandled rejection.
     work.catch(() => {});
   }
+}
+
+// A scanned page is normally one image covering the page; the largest one is what OCR should read.
+async function largestPageImage(pdf: Awaited<ReturnType<typeof getDocumentProxy>>, pageNumber: number): Promise<Uint8Array | undefined> {
+  let images: Awaited<ReturnType<typeof extractImages>>;
+  try {
+    images = await extractImages(pdf, pageNumber);
+  } catch {
+    return undefined;
+  }
+  const largest = images
+    .filter((image) => image.width * image.height <= MAX_OCR_IMAGE_PIXELS)
+    .sort((a, b) => b.width * b.height - a.width * a.height)[0];
+  if (!largest) return undefined;
+  return new Uint8Array(encodePng(largest.width, largest.height, largest.channels, largest.data));
 }
 
 type TextItem = { str?: string; hasEOL?: boolean };

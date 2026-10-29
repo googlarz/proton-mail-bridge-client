@@ -54,7 +54,9 @@ import {
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { tlsOptionsFor } from "../utils/tls.js";
-import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES, extractPdfText, looksLikePdf, PdfTextError } from "../utils/pdf-text.js";
+import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES, extractPdfText, formatPdfPages, looksLikePdf, PdfTextError } from "../utils/pdf-text.js";
+import { extractOfficeText, officeKind, OfficeTextError, type OfficeKind } from "../utils/office-text.js";
+import { OCR_MAX_IMAGE_BYTES, OCR_MAX_PDF_PAGES, OcrError, ocrImageExtension, runOcr } from "../utils/ocr.js";
 import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./imap-errors.js";
 import { writeFileNoFollow } from "../utils/safe-write.js";
 export { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError };
@@ -134,6 +136,13 @@ const FETCH_INDEX_DETAIL_QUERY = {
 } as const;
 
 const MAX_ATTACHMENT_TEXT_BYTES = 512_000;
+
+// Document text stored in the index per attachment and per message (PROTONMAIL_INDEX_ATTACHMENTS), and the tighter
+// PDF bounds used while syncing, so one large document cannot hold a sync up for long.
+const INDEX_DOCUMENT_TEXT_MAX_CHARS = 8_000;
+const INDEX_MESSAGE_DOCUMENT_TEXT_MAX_CHARS = 32_000;
+const INDEX_PDF_MAX_PAGES = 20;
+const INDEX_PDF_TIMEOUT_MS = 10_000;
 
 function attachmentSummary(attachment: AttachmentContentResult["attachment"]): AttachmentContentResult["attachment"] {
   return {
@@ -1991,16 +2000,31 @@ export class SimpleIMAPService {
   // limit (PROTONMAIL_PDF_MAX_MB) and page limit (PROTONMAIL_PDF_MAX_PAGES) and
   // go through unpdf, which is pure JavaScript (no native binding, no install
   // script). Only this tool extracts PDF text; getAttachmentContent's text field
-  // stays text/* only.
+  // stays text/* only. DOCX, XLSX and PPTX are read in-process (office-text.ts).
+  // With PROTONMAIL_OCR_COMMAND set, images and PDF pages without text go through
+  // that program; without it, both fail as before.
   async getAttachmentText(emailId: string, attachmentId: string): Promise<{
     emailId: string;
     attachment: AttachmentContentResult["attachment"];
     text?: string;
-    pdf?: { totalPages: number; extractedPages: number; omittedPages: number; truncated: boolean };
+    pdf?: { totalPages: number; extractedPages: number; omittedPages: number; truncated: boolean; ocrPages?: number; ocrError?: string };
+    document?: { format: OfficeKind; truncated: boolean };
+    ocr?: { truncated: boolean };
   }> {
     const attachment = await this.getParsedAttachment(emailId, attachmentId);
-    if (attachment.content && attachment.content.length > 0 && looksLikePdf(attachment.content, mimeHeaderString(attachment.contentType).toLowerCase() || undefined, attachment.filename)) {
+    const hasContent = Boolean(attachment.content && attachment.content.length > 0);
+    const contentType = mimeHeaderString(attachment.contentType).toLowerCase() || undefined;
+    if (hasContent && looksLikePdf(attachment.content, contentType, attachment.filename)) {
       return { emailId, attachment: attachmentSummary(attachment), ...(await this.extractPdfAttachmentText(attachment, attachmentId)) };
+    }
+    const office = hasContent ? officeKind(attachment.content, contentType, attachment.filename) : undefined;
+    if (office) {
+      return { emailId, attachment: attachmentSummary(attachment), ...this.extractOfficeAttachmentText(attachment, office, attachmentId) };
+    }
+    const ocrCommand = this.config.runtime?.ocrCommand;
+    const imageExtension = ocrImageExtension(contentType);
+    if (ocrCommand && imageExtension && hasContent) {
+      return { emailId, attachment: attachmentSummary(attachment), ...(await this.ocrImageAttachment(attachment, imageExtension, ocrCommand, attachmentId)) };
     }
     const text = this.extractAttachmentText(attachment);
     if (text === undefined) {
@@ -2023,7 +2047,10 @@ export class SimpleIMAPService {
   private async extractPdfAttachmentText(
     attachment: { content: Buffer },
     attachmentId: string,
-  ): Promise<{ text: string; pdf: { totalPages: number; extractedPages: number; omittedPages: number; truncated: boolean } }> {
+  ): Promise<{
+    text: string;
+    pdf: { totalPages: number; extractedPages: number; omittedPages: number; truncated: boolean; ocrPages?: number; ocrError?: string };
+  }> {
     const maxMb = this.config.runtime?.pdfMaxMb ?? DEFAULT_PDF_MAX_MB;
     if (attachment.content.length > maxMb * 1024 * 1024) {
       const sizeMb = (attachment.content.length / (1024 * 1024)).toFixed(1);
@@ -2031,25 +2058,118 @@ export class SimpleIMAPService {
         `Cannot extract text from attachment ${attachmentId}: the PDF is ${sizeMb} MB, above the ${maxMb} MB limit for PDF text extraction (PROTONMAIL_PDF_MAX_MB). Use save_attachment instead.`,
       );
     }
+    const maxPages = this.config.runtime?.pdfMaxPages ?? DEFAULT_PDF_MAX_PAGES;
+    const ocrCommand = this.config.runtime?.ocrCommand;
     try {
-      const result = await extractPdfText(attachment.content, {
-        maxPages: this.config.runtime?.pdfMaxPages ?? DEFAULT_PDF_MAX_PAGES,
-      });
-      return {
-        text: result.text,
-        pdf: {
-          totalPages: result.totalPages,
-          extractedPages: result.extractedPages,
-          omittedPages: result.omittedPages,
-          truncated: result.truncated,
-        },
+      const result = await extractPdfText(attachment.content, { maxPages, ocrPages: ocrCommand ? OCR_MAX_PDF_PAGES : 0 });
+      const pdf = {
+        totalPages: result.totalPages,
+        extractedPages: result.extractedPages,
+        omittedPages: result.omittedPages,
+        truncated: result.truncated,
       };
+      if (!ocrCommand || !result.pageTexts || !result.pageImages?.length) return { text: result.text, pdf };
+
+      const pageTexts = [...result.pageTexts];
+      const hasTextLayer = pageTexts.some((pageText) => pageText.trim());
+      try {
+        for (const { page, png } of result.pageImages) {
+          pageTexts[page - 1] = (await runOcr(ocrCommand, png, ".png")).text;
+        }
+      } catch (error) {
+        if (!(error instanceof OcrError)) throw error;
+        // Pages with a text layer are still worth returning; a scan-only PDF has nothing without OCR.
+        if (hasTextLayer) return { text: result.text, pdf: { ...pdf, ocrError: error.message } };
+        throw new Error(`Cannot extract text from attachment ${attachmentId}: the PDF has no text layer and OCR failed. ${error.message} Use get_attachment_content or save_attachment instead.`);
+      }
+      if (!pageTexts.some((pageText) => pageText.trim())) {
+        throw new Error(`Cannot extract text from attachment ${attachmentId}: the PDF has no text layer and OCR found no text in it. Use get_attachment_content or save_attachment instead.`);
+      }
+      return { text: formatPdfPages(pageTexts, result.totalPages, maxPages), pdf: { ...pdf, ocrPages: result.pageImages.length } };
     } catch (error) {
       if (error instanceof PdfTextError) {
         throw new Error(`Cannot extract text from attachment ${attachmentId}: ${error.message} Use get_attachment_content or save_attachment instead.`);
       }
       throw error;
     }
+  }
+
+  private extractOfficeAttachmentText(
+    attachment: { content: Buffer },
+    kind: OfficeKind,
+    attachmentId: string,
+  ): { text: string; document: { format: OfficeKind; truncated: boolean } } {
+    try {
+      const result = extractOfficeText(attachment.content, kind);
+      const text = result.truncated ? `${result.text}\n\n--- Truncated: the document's text is longer than this ---` : result.text;
+      return { text, document: { format: result.format, truncated: result.truncated } };
+    } catch (error) {
+      if (error instanceof OfficeTextError) {
+        throw new Error(`Cannot extract text from attachment ${attachmentId}: ${error.message} Use get_attachment_content or save_attachment instead.`);
+      }
+      throw error;
+    }
+  }
+
+  private async ocrImageAttachment(
+    attachment: { content: Buffer },
+    extension: string,
+    command: string,
+    attachmentId: string,
+  ): Promise<{ text: string; ocr: { truncated: boolean } }> {
+    if (attachment.content.length > OCR_MAX_IMAGE_BYTES) {
+      throw new Error(`Cannot extract text from attachment ${attachmentId}: the image is larger than ${OCR_MAX_IMAGE_BYTES / (1024 * 1024)} MB, the limit for OCR. Use get_attachment_content or save_attachment instead.`);
+    }
+    let result: { text: string; truncated: boolean };
+    try {
+      result = await runOcr(command, attachment.content, extension);
+    } catch (error) {
+      if (error instanceof OcrError) {
+        throw new Error(`Cannot extract text from attachment ${attachmentId}: ${error.message} Use get_attachment_content or save_attachment instead.`);
+      }
+      throw error;
+    }
+    if (!result.text) {
+      throw new Error(`Cannot extract text from attachment ${attachmentId}: OCR found no text in the image. Use get_attachment_content to look at it instead.`);
+    }
+    return { text: result.text, ocr: { truncated: result.truncated } };
+  }
+
+  // Bounded text of the PDF and Office attachments of one message, for the index (PROTONMAIL_INDEX_ATTACHMENTS).
+  // No OCR here: it is too slow to run on every synced message. A document that cannot be read is not indexed.
+  private async extractDocumentSearchText(parsed: ParsedMail): Promise<string | undefined> {
+    const maxPdfBytes = (this.config.runtime?.pdfMaxMb ?? DEFAULT_PDF_MAX_MB) * 1024 * 1024;
+    const parts: string[] = [];
+    let total = 0;
+    for (const attachment of parsed.attachments ?? []) {
+      const room = Math.min(INDEX_DOCUMENT_TEXT_MAX_CHARS, INDEX_MESSAGE_DOCUMENT_TEXT_MAX_CHARS - total);
+      if (room <= 0) break;
+      const content = attachment.content;
+      if (!content || content.length === 0) continue;
+      const contentType = mimeHeaderString(attachment.contentType).toLowerCase() || undefined;
+      const filename = attachmentHeaderStrings(attachment).filename;
+      let text: string | undefined;
+      try {
+        const kind = officeKind(content, contentType, filename);
+        if (kind) {
+          text = extractOfficeText(content, kind, { maxChars: room }).text;
+        } else if (looksLikePdf(content, contentType, filename) && content.length <= maxPdfBytes) {
+          const pdf = await extractPdfText(content, { maxPages: INDEX_PDF_MAX_PAGES, timeoutMs: INDEX_PDF_TIMEOUT_MS });
+          text = pdf.text
+            .split("\n")
+            .filter((line) => !/^--- (?:Page \d+ of \d+|Truncated: .*) ---$/.test(line))
+            .join("\n");
+        }
+      } catch {
+        continue;
+      }
+      const bounded = text ? previewText(text, room) : undefined;
+      if (bounded) {
+        parts.push(bounded);
+        total += bounded.length;
+      }
+    }
+    return parts.length > 0 ? parts.join("\n\n") : undefined;
   }
 
   async saveAttachment(
@@ -3631,12 +3751,19 @@ export class SimpleIMAPService {
       const needsFullDetail = plan.strategy !== "incremental_window";
       const fetchQuery = needsFullDetail ? FETCH_INDEX_DETAIL_QUERY : FETCH_INDEX_QUERY;
 
+      const indexDocuments = input.includeAttachmentText && this.config.runtime?.indexAttachments === true;
       const emails: EmailSummary[] = [];
       for await (const message of client.fetch(`${plan.startUid}:${plan.endUid}`, fetchQuery, { uid: true })) {
         const summary = this.toSummary(folder, message, uidValidity);
-        const enriched = message.source
-          ? this.enrichSummaryFromParsed(summary, await this.parseSource(message.source), input.includeAttachmentText)
-          : summary;
+        let enriched = summary;
+        if (message.source) {
+          const parsed = await this.parseSource(message.source);
+          enriched = this.enrichSummaryFromParsed(summary, parsed, input.includeAttachmentText);
+          const documentText = indexDocuments ? await this.extractDocumentSearchText(parsed) : undefined;
+          if (documentText) {
+            enriched = { ...enriched, attachmentText: enriched.attachmentText ? `${enriched.attachmentText}\n\n${documentText}` : documentText };
+          }
+        }
         emails.push(enriched);
         this.messageCache.set(enriched.id, enriched);
         this.capMessageCache();

@@ -582,6 +582,10 @@ export interface ProtonRuntimeConfig {
   pdfMaxMb?: number;
   /** Pages read from a PDF before the text is cut off (PROTONMAIL_PDF_MAX_PAGES, default 50). */
   pdfMaxPages?: number;
+  /** OCR program for images and image-only PDF pages in get_attachment_text (PROTONMAIL_OCR_COMMAND, e.g. tesseract). Unset: no OCR. */
+  ocrCommand?: string;
+  /** Also index the text of PDF, DOCX, XLSX and PPTX attachments for search_indexed_emails (PROTONMAIL_INDEX_ATTACHMENTS, default false). */
+  indexAttachments?: boolean;
   opDelayMs: number;
   // Undo-send window: 0 disables (send immediately, current default behavior).
   // When >0, send_email queues instead of sending immediately, cancelable via
