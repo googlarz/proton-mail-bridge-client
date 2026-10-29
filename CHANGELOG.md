@@ -43,6 +43,8 @@ Eleven new tools (127 in all).
 
 - **Sieve export**: a later rule's move is guarded by an earlier rule's condition, also when the earlier rule's move cannot be exported; a sender pattern with an empty domain (`@`) is not exported.
 - **Autoresponder**: a failing contact lookup, or a failed "already answered" lookup, fails closed; the draft greeting and the reply subject no longer interpret `$` sequences in a name.
+- **Windows, saving over a file that another program holds open** (reported in #32, confirmed fixed on a real Windows 11 install): `save_attachment` and the other file writes retry the final rename on `EPERM`, `EBUSY` and `EACCES` for about 2 seconds (10 ms growing to about 730 ms between tries, Windows only), so a short-lived handle from an antivirus or a search indexer no longer fails the save. If the file stays locked the save fails with an error that names the destination file (not the temporary one), says it may be open in another program, and keeps the original error as its cause; the old file stays and no `.tmp` is left.
+- **Mailbox events**: one batch of events gives one notification to a subscriber (a poll could see an append before the notifier's own listener ran and send a second one).
 - **Atomic writes**: when the final rename fails (for example a directory sits where the file should be), the temporary `.tmp` file is removed instead of being left behind on every attempt.
 - **Tests**: the timing tests compare the time for 1x and 4x the input instead of a wall-clock limit, and re-measure a ratio over the limit before failing, so a slow or busy machine does not fail them.
 - **Categories**: a category named `constructor` or `__proto__` is only a key in the counts.
