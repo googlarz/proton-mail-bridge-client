@@ -14,6 +14,7 @@ import { AutoresponderService, type AutoresponderDeps } from "./autoresponder-se
 import { RulesService } from "./rules-service.js";
 import { TriagePlanService } from "./triage-plan-service.js";
 import { CommitmentService } from "./commitment-service.js";
+import { ContactService } from "./contact-service.js";
 import { runRulesOnNewMail } from "../tools/rules-runner.js";
 import { ensureMailboxWriteAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 
@@ -43,6 +44,7 @@ export interface AccountBundle {
   rulesService: RulesService;
   triagePlanService: TriagePlanService;
   commitmentService: CommitmentService;
+  contactService: ContactService;
   /** What the autoresponder may do on this account right now (send, draft) and the lookups it needs. */
   autoresponderDeps(): AutoresponderDeps;
   ownAddresses: string[];
@@ -79,6 +81,7 @@ function buildAccountBundle(
   const rulesService = new RulesService(config, log);
   const triagePlanService = new TriagePlanService(config);
   const commitmentService = new CommitmentService(config);
+  const contactService = new ContactService(config, log);
 
   // The note this address adds to what it sends while its automatic reply is active.
   smtpService.setOutgoingNoteProvider(() => autoresponderService.outgoingNoteNow());
@@ -138,6 +141,7 @@ function buildAccountBundle(
       isKnownContact: async (address) => (await localIndexService.search({ from: account.address, to: address, limit: 1 })).emails.length > 0,
       hasAnsweredSince: async (address, sinceIso) =>
         (await localIndexService.search({ from: account.address, to: address, dateFrom: sinceIso, limit: 1 })).emails.length > 0,
+      contactTags: (address) => contactService.tagsFor(address),
     };
   };
   // Replies and drafts are made after a sync has indexed new mail.
@@ -167,6 +171,7 @@ function buildAccountBundle(
     rulesService,
     triagePlanService,
     commitmentService,
+    contactService,
     autoresponderDeps,
     ownAddresses,
   };
