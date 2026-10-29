@@ -12,6 +12,7 @@ import { splitAccountPrefix, withAccountPrefix } from "../utils/helpers.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { optionalString } from "./args.js";
 import { MailTaint } from "../utils/mail-security.js";
+import { Delegation } from "./delegation.js";
 import type { AccountBundle, AccountManager } from "../services/account-manager.js";
 import type { ProtonMailConfig } from "../types/index.js";
 
@@ -222,9 +223,11 @@ export function createToolContext(config: ProtonMailConfig, accountManager: Acco
   }
 
   const taint = new MailTaint();
+  const delegation = new Delegation({ config, accountManager, taint, resolveAccountForEmailId, allAccountAddresses });
 
   return {
     taint,
+    delegation,
     config,
     accountManager,
     primaryBundle,

@@ -11,9 +11,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { buildConfigFromEnv, createServer, withAudit } from "./index.js";
 import { isMainModule } from "./is-main.js";
 import { isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError, SimpleIMAPService } from "./services/simple-imap-service.js";
-import type { EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
+import type { AccountConfig, EmailSummary, ProtonMailConfig, SearchEmailsInput } from "./types/index.js";
+import { GrantService, grantStatus, type Grant } from "./services/grant-service.js";
+import { GRANTABLE_TOOLS, MAX_GRANT_DAYS, MAX_GRANT_USES } from "./utils/delegation.js";
 import { ensureDestructiveConfirmed, ensureEmailActionAllowed, ensureMailboxWriteAllowed, sanitizeRuntimeConfig } from "./utils/runtime-policy.js";
-import { isValidEmail, parseEmails } from "./utils/helpers.js";
+import { InvalidArgumentError, isValidEmail, parseEmails } from "./utils/helpers.js";
 import { checkForUpdate } from "./utils/update-check.js";
 import { healthProblems } from "./utils/health.js";
 import { bridgeVersionNote } from "./utils/bridge-version.js";
@@ -197,6 +199,9 @@ function printHelp(): void {
       "  draft-send <id>        Send a saved draft",
       "  draft-delete <id>      Delete a saved draft",
       "  draft-thread-reply <id> Create a reply draft for a thread",
+      "  grant-create           Give the assistant a narrow, expiring permission to send (--tools --recipients --expires --uses --note)",
+      "  grant-list             List the delegation grants in force (--all, --account)",
+      "  grant-revoke <id>      Revoke a delegation grant",
       "  tools                  List every MCP tool exposed by the server",
       "  tool <name>            Call any MCP tool with JSON arguments",
       "",
@@ -335,6 +340,9 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   "draft-send": { usage: "draft-send <id> [--args '{...}']", description: "Send a saved draft (dryRun etc. via --args)", flags: ["id", "args", "args-file"] },
   "draft-delete": { usage: "draft-delete <id>", description: "Delete a saved draft", flags: ["id"] },
   "draft-thread-reply": { usage: "draft-thread-reply <threadId> (--body <text> | stdin) [--reply-all]", description: "Create a reply draft for a thread", flags: ["id", ...BODY_FLAGS, "reply-all", "all", ...DRAFT_COPY_FLAGS] },
+  "grant-create": { usage: "grant-create --tools <a,b> --recipients <addr|@domain,...> --expires <30m|12h|7d|ISO> [--uses <n>] [--note <text>] [--account <slug|address>]", description: `Give the assistant a narrow, expiring permission to send (tools: ${GRANTABLE_TOOLS.join(", ")}; every To/Cc/Bcc must match; at most ${MAX_GRANT_USES} uses and ${MAX_GRANT_DAYS} days). Honoured only by a server started with PROTONMAIL_DELEGATION=on`, flags: ["tools", "recipients", "expires", "uses", "note", "account"] },
+  "grant-list": { usage: "grant-list [--all] [--account <slug|address>]", description: "List the delegation grants in force (--all also shows used up, expired and revoked ones)", flags: ["all", "account"] },
+  "grant-revoke": { usage: "grant-revoke <id> [--account <slug|address>]", description: "Revoke a delegation grant at once", flags: ["account"] },
   tools: { usage: "tools", description: "List every MCP tool exposed by the server", flags: [] },
   tool: { usage: "tool <name> [--args '{...}' | --args-file <path>]", description: "Call any MCP tool with JSON arguments", flags: ["args", "args-file"] },
 };
@@ -2122,6 +2130,104 @@ async function runDraftDelete(parsed: ParsedCliArgs): Promise<void> {
   });
 }
 
+// Delegation grants are made and revoked here and nowhere else: they are read and written straight from the account's data
+// directory, never through an MCP tool, so a model cannot grant itself anything.
+function grantStores(parsed: ParsedCliArgs, options: { single: boolean }): Array<{ account: AccountConfig; grants: GrantService }> {
+  const { accounts } = buildConfigFromEnv();
+  const wanted = getStringFlag(parsed.flags, "account");
+  const chosen = wanted ? accounts.filter((account) => account.address.toLowerCase() === wanted.toLowerCase() || account.slug === wanted) : accounts;
+  if (chosen.length === 0) throw new CliUsageError(`Unknown account "${wanted}". Configured: ${accounts.map((account) => account.slug).join(", ")}`);
+  if (options.single && !wanted && chosen.length > 1) throw new CliUsageError(`Several accounts are configured; name one with --account (${accounts.map((account) => account.slug).join(", ")}).`);
+  return chosen.map((account) => ({ account, grants: new GrantService({ dataDir: account.dataDir, smtp: account.smtp }, account.address) }));
+}
+
+const GRANT_SPAN_MS = { m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+
+// "30m", "12h", "7d" from now, or a timestamp (a bare date is midnight UTC).
+export function parseGrantExpiry(value: string, now = new Date()): Date {
+  const span = /^(\d{1,4})([mhd])$/.exec(value.trim());
+  const date = span
+    ? new Date(now.getTime() + Number(span[1]) * GRANT_SPAN_MS[span[2] as keyof typeof GRANT_SPAN_MS])
+    : /^\d{4}-\d{2}-\d{2}/.test(value.trim())
+      ? new Date(value.trim())
+      : new Date(Number.NaN);
+  if (Number.isNaN(date.getTime())) throw new CliUsageError(`--expires must be like 30m, 12h, 7d or a timestamp such as 2026-11-05T18:00:00Z, got "${value}".`);
+  return date;
+}
+
+const grantLine = (grant: Grant, now: Date): string =>
+  [
+    grant.id,
+    grant.account,
+    grant.tools.join(","),
+    grant.recipients.join(","),
+    `${grant.maxUses - grant.usedCount}/${grant.maxUses} uses left`,
+    `expires ${grant.expiresAt}`,
+    ...(grantStatus(grant, now) === "active" ? [] : [grantStatus(grant, now)]),
+    JSON.stringify(grant.note),
+  ].join(" | ");
+
+async function runGrantCreate(parsed: ParsedCliArgs): Promise<void> {
+  const [{ account, grants }] = grantStores(parsed, { single: true });
+  const split = (key: string) => (getStringFlag(parsed.flags, key) ?? "").split(/[,\s]+/).filter(Boolean);
+  const tools = split("tools");
+  const recipients = split("recipients");
+  const expires = getStringFlag(parsed.flags, "expires");
+  if (tools.length === 0) throw new CliUsageError(`--tools is required: ${GRANTABLE_TOOLS.join(", ")} (comma-separated).`);
+  if (recipients.length === 0) throw new CliUsageError("--recipients is required: exact addresses and/or @domain entries (comma-separated).");
+  if (!expires) throw new CliUsageError(`--expires is required (30m, 12h, 7d or a timestamp; at most ${MAX_GRANT_DAYS} days).`);
+  const maxUses = parseIntegerFlag(parsed.flags, "uses", 1, `a whole number from 1 to ${MAX_GRANT_USES}`) ?? 1;
+  let grant: Grant;
+  try {
+    grant = await grants.createGrant({ note: getTextFlag(parsed.flags, "note"), tools, recipients, maxUses, expiresAt: parseGrantExpiry(expires) });
+  } catch (error) {
+    if (error instanceof InvalidArgumentError) throw new CliUsageError(error.message);
+    throw error;
+  }
+  if (isTruthyFlag(parsed.flags.json)) {
+    process.stdout.write(json(grant));
+    return;
+  }
+  process.stdout.write(
+    [
+      `Grant ${grant.id} created for ${account.address}.`,
+      `  tools:      ${grant.tools.join(", ")}`,
+      `  recipients: ${grant.recipients.join(", ")} (every To, Cc and Bcc must match)`,
+      `  uses:       ${grant.maxUses}`,
+      `  expires:    ${grant.expiresAt}`,
+      `  note:       ${JSON.stringify(grant.note)}`,
+      "Only a server started with PROTONMAIL_DELEGATION=on honours it. Revoke it with: grant-revoke " + grant.id,
+      "",
+    ].join("\n"),
+  );
+}
+
+async function runGrantList(parsed: ParsedCliArgs): Promise<void> {
+  const now = new Date();
+  const all = isTruthyFlag(parsed.flags.all);
+  const found = (await Promise.all(grantStores(parsed, { single: false }).map(({ grants }) => grants.list()))).flat();
+  const shown = found
+    .filter((grant) => all || grantStatus(grant, now) === "active")
+    .sort((left, right) => Date.parse(left.expiresAt) - Date.parse(right.expiresAt));
+  if (isTruthyFlag(parsed.flags.json)) {
+    process.stdout.write(json(shown.map((grant) => ({ ...grant, status: grantStatus(grant, now) }))));
+    return;
+  }
+  process.stdout.write(shown.length === 0 ? `No ${all ? "" : "active "}grants.\n` : `${shown.map((grant) => grantLine(grant, now)).join("\n")}\n`);
+}
+
+async function runGrantRevoke(parsed: ParsedCliArgs): Promise<void> {
+  const id = parsed.positionals[0];
+  if (!id) throw new CliUsageError("grant-revoke requires a grant id (see grant-list).");
+  for (const { account, grants } of grantStores(parsed, { single: false })) {
+    const result = await grants.revokeGrant(id);
+    if (!result.found) continue;
+    process.stdout.write(isTruthyFlag(parsed.flags.json) ? json({ id, account: account.address, revoked: true, alreadyRevoked: result.alreadyRevoked }) : `${result.alreadyRevoked ? "Already revoked" : "Revoked"}: ${id} (${account.address})\n`);
+    return;
+  }
+  throw new Error(`No grant ${JSON.stringify(id.slice(0, 40))} found.`);
+}
+
 async function runTools(parsed: ParsedCliArgs): Promise<void> {
   const wantJson = isTruthyFlag(parsed.flags.json);
   await withMcpClient(async (client) => {
@@ -2237,6 +2343,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "get-brief", tool: "get_brief", positionals: [], help: "(tool form; see also `brief`)" },
   { command: "autoresponder", tool: "get_autoresponder", positionals: [], help: "Show the automatic reply of an address (--account)" },
   { command: "set-autoresponder", tool: "set_autoresponder", positionals: [], help: "Set up or switch off the automatic reply of an address (--enabled, --body, --subject, --startsAt, --endsAt, --outgoingNote, --mode, --timezone, --rules, --confirmed)" },
+  { command: "list-grants", tool: "list_grants", positionals: [], help: "(tool form; see also `grant-list`)" },
   { command: "events", tool: "get_events", positionals: [], help: "What happened while nobody asked: new mail, snoozes, reminders, sends, rules, plans (--args '{\"sinceCursor\":\"<nextCursor>\",\"types\":[\"mail\"],\"limit\":50}')" },
   { command: "list-templates", tool: "list_templates", positionals: [], help: "List saved email templates" },
   { command: "get-template", tool: "get_template", positionals: ["id"], help: "Get a saved template by id" },
@@ -2584,6 +2691,15 @@ export async function main(): Promise<void> {
       return;
     case "draft-thread-reply":
       await runDraftThreadReply(parsed);
+      return;
+    case "grant-create":
+      await runGrantCreate(parsed);
+      return;
+    case "grant-list":
+      await runGrantList(parsed);
+      return;
+    case "grant-revoke":
+      await runGrantRevoke(parsed);
       return;
     case "tools":
       await runTools(parsed);

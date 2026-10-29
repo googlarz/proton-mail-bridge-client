@@ -840,6 +840,9 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
         }, false, [draftSource(draft)]);
       }
 
+      // A delegation grant's use is spent here, with the recipients of the draft as it is NOW (the ones that go out).
+      await ctx.delegation.claim(args, name, sendBundleForDraft, [...draft.to, ...draft.cc, ...draft.bcc]);
+
       // Atomic claim: the status/pending-scheduled checks above are read
       // then acted on non-atomically, so two concurrent send_draft calls
       // (or a scheduled send firing at the same instant) could both pass
@@ -1061,6 +1064,7 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
       // see send_draft's identical fix.
       ensureOutboundRecipientsAllowed(config.runtime, sendBundleForScheduleDraft.config.smtp.username, [...draft.to, ...draft.cc, ...draft.bcc]);
 
+      await ctx.delegation.claim(args, name, sendBundleForScheduleDraft, [...draft.to, ...draft.cc, ...draft.bcc]);
       const queued = await withAudit(auditService, name, args, async () =>
         sendBundleForScheduleDraft.deliveryQueueService.enqueue(
           {
