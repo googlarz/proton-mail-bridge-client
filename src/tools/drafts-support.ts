@@ -2,6 +2,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { isPathInside } from "../utils/helpers.js";
+import { isInsideServerState, type ServerStateConfig } from "../utils/server-state-paths.js";
 import { type DraftRecord, type SendEmailInput } from "../types/index.js";
 // list_drafts has no filter and returns every draft unconditionally — unlike get_draft/create_draft,
 // which each touch exactly one draft the caller already knows the content of. DraftRecord.attachments
@@ -115,8 +116,10 @@ export function redactQueueRecordAttachments<T extends { payload: SendEmailInput
 // every save when the allowed dir is or sits under a symlink (macOS /var/folders is
 // really /private/var/folders). Attachments are private mail content, so directories
 // created here are owner-only (0700) and the file is 0600, existing files included.
-export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: string, data: Buffer): Promise<string> {
-  const { resolve: pathResolve, join: pathJoin, dirname, basename, sep } = await import("node:path");
+// A download directory that contains the server's own data directory ($HOME) is no licence to write there:
+// with `serverState` given, such a destination is refused too (by real path, before anything is created).
+export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: string, data: Buffer, serverState?: ServerStateConfig): Promise<string> {
+  const { resolve: pathResolve, join: pathJoin, dirname, basename, relative, sep } = await import("node:path");
   const { realpathSync, existsSync } = await import("node:fs");
   const { mkdir: mkd } = await import("node:fs/promises");
   const absDir = pathResolve(downloadDir);
@@ -143,6 +146,8 @@ export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: 
   if (!isPathInside(realDir, realProbe, sep)) {
     throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
   }
+  const serverStateError = () => new McpError(ErrorCode.InvalidParams, "saveTo is inside the server's own data directory or configuration, which attachments are never saved to.");
+  if (isInsideServerState(pathJoin(realProbe, relative(probe, absTarget)), serverState)) throw serverStateError();
   await mkd(pathResolve(absTarget, ".."), { recursive: true, mode: 0o700 });
   let realTarget: string;
   try {
@@ -157,6 +162,7 @@ export async function writeAttachmentToDownloadDir(downloadDir: string, saveTo: 
   if (!isPathInside(realDir, realTarget, sep)) {
     throw new McpError(ErrorCode.InvalidParams, "saveTo path escapes the allowed directory.");
   }
+  if (isInsideServerState(realTarget, serverState)) throw serverStateError();
   // Not wf(absTarget): that would write through a symlink planted at the target (a dangling one passes the checks above).
   const { writeFileNoFollow } = await import("../utils/safe-write.js");
   await writeFileNoFollow(absTarget, data);
