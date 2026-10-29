@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { appendFile, chmod, mkdir, readFile, rename, stat } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AuditEntry, ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
+import { writeFileAtomic } from "../utils/atomic-write.js";
 import { withFileLock } from "../utils/file-lock.js";
 
 const MAX_AUDIT_BYTES = 5 * 1024 * 1024;
@@ -57,6 +58,16 @@ function parseLine(line: string): AuditEntry | undefined {
   }
 }
 
+// A line cut short by a crash mid-append: it starts like an entry but is not valid JSON.
+function isIncompleteEntry(line: string): boolean {
+  try {
+    JSON.parse(line);
+    return false;
+  } catch {
+    return line.trimStart().startsWith("{");
+  }
+}
+
 function isEnoent(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT");
 }
@@ -65,6 +76,7 @@ export class AuditService {
   private readonly auditPath: string;
   private readonly archivePath: string;
   private readonly archivePath2: string;
+  private readonly headPath: string;
   private _rotateLock: Promise<void> = Promise.resolve();
   private permissionsChecked = false;
   private identityChecked = false;
@@ -76,6 +88,7 @@ export class AuditService {
     this.auditPath = join(this.config.dataDir, "audit.log");
     this.archivePath = `${this.auditPath}.1`;
     this.archivePath2 = `${this.auditPath}.2`;
+    this.headPath = join(this.config.dataDir, "audit.head");
   }
 
   getPath(): string {
@@ -122,7 +135,12 @@ export class AuditService {
     await this.withRotateLock(() =>
       withFileLock(this.auditPath, async () => {
         await this.rotateIfNeeded();
-        const head = await this.readHead();
+        const fileHead = await this.readHead();
+        // If audit.log lost its newest entries (or all of them), carry on from the head audit.head recorded, so
+        // the gap stays visible to verify instead of a fresh chain hiding it.
+        const recorded = await this.readRecordedHead();
+        const head = recorded && recorded !== "invalid" && (!fileHead || recorded.seq > fileHead.seq) ? recorded : fileHead;
+        const needsNewline = !(await this.endsWithNewline());
         const chained: AuditEntry = head
           ? { ...persistedEntry, seq: head.seq + 1, prevHash: head.hash }
           : { ...persistedEntry, seq: 1, prevHash: GENESIS_HASH, chainStart: true };
@@ -130,9 +148,15 @@ export class AuditService {
         // The chain detects an edit, deletion or reordering, but anyone who can write the file can also
         // recompute every hash after the point they changed; only a head hash kept elsewhere catches that.
         // mode: 0o600 — the audit trail can contain full request/error detail, so it must not land world-readable at the default umask.
-        await appendFile(this.auditPath, `${JSON.stringify(chained)}\n`, { encoding: "utf8", mode: 0o600 });
+        // A crash can leave a half-written last line; the new entry must not be glued onto it and lost.
+        await appendFile(this.auditPath, `${needsNewline ? "\n" : ""}${JSON.stringify(chained)}\n`, { encoding: "utf8", mode: 0o600 });
         const info = await stat(this.auditPath);
-        this.cachedHead = { ino: info.ino, size: info.size, head: { seq: chained.seq as number, hash: chained.hash } };
+        const newHead = { seq: chained.seq as number, hash: chained.hash };
+        this.cachedHead = { ino: info.ino, size: info.size, head: newHead };
+        // Written after the append: a crash between the two leaves audit.head one entry behind, which verify accepts.
+        // Like the log itself this only raises the bar: someone who can write both files can forge both. The real
+        // defense is a head hash (verify_audit_log returns it) saved somewhere they cannot reach.
+        await writeFileAtomic(this.headPath, `${JSON.stringify(newHead)}\n`);
       }),
     );
   }
@@ -151,11 +175,10 @@ export class AuditService {
   async verify(): Promise<AuditVerification> {
     await this.ensureIdentity();
     // Under the lock so a half-written line or a rotation in progress is never mistaken for tampering.
-    const files = await withFileLock(this.auditPath, async () => [
-      await this.readLines(this.archivePath2),
-      await this.readLines(this.archivePath),
-      await this.readLines(this.auditPath),
-    ]);
+    const [files, recorded] = await withFileLock(this.auditPath, async () => [
+      [await this.readLines(this.archivePath2), await this.readLines(this.archivePath), await this.readLines(this.auditPath)],
+      await this.readRecordedHead(),
+    ] as const);
     const hasArchive2 = files[0].length > 0;
     const lines = files.flat();
 
@@ -163,6 +186,8 @@ export class AuditService {
     let checked = 0;
     let prev: (AuditEntry & { seq: number; hash: string }) | undefined;
     let rotatedBeforeSeq: number | undefined;
+    let torn = 0;
+    let hashAtRecordedSeq: string | undefined;
     const broken = (seq: number, reason: AuditBreakReason, detail: string): AuditVerification => ({
       ok: false, checked, legacyEntries, headSeq: null, headHash: null, brokenSeq: seq, reason, detail,
     });
@@ -170,6 +195,10 @@ export class AuditService {
     for (let index = 0; index < lines.length; index++) {
       const line = lines[index];
       const entry = parseLine(line);
+      if (!entry && isIncompleteEntry(line)) {
+        torn++;
+        continue;
+      }
       if (!entry || !isChained(entry)) {
         if (!prev) {
           legacyEntries++;
@@ -207,6 +236,25 @@ export class AuditService {
       }
       prev = entry as AuditEntry & { seq: number; hash: string };
       checked++;
+      if (recorded && recorded !== "invalid" && seq === recorded.seq) hashAtRecordedSeq = entry.hash;
+    }
+
+    // audit.head is only a claim once it exists; without it nothing is checked against the head.
+    if (recorded === "invalid") {
+      return broken(prev?.seq ?? 0, "edited", "audit.head exists but cannot be read, so the chain head cannot be confirmed");
+    }
+    if (recorded) {
+      if (!prev) {
+        return legacyEntries > 0
+          ? broken(recorded.seq, "edited", `audit.log has no chained entries, but audit.head records the chain up to seq ${recorded.seq}; the chain fields were removed`)
+          : broken(recorded.seq, "deleted", `audit.log is missing or empty, but audit.head records the chain up to seq ${recorded.seq}`);
+      }
+      if (prev.seq < recorded.seq) {
+        return broken(prev.seq + 1, "deleted", `audit.log ends at seq ${prev.seq}, but audit.head records seq ${recorded.seq}; the newest entries were removed`);
+      }
+      if (prev.seq === recorded.seq ? prev.hash !== recorded.hash : hashAtRecordedSeq !== undefined && hashAtRecordedSeq !== recorded.hash) {
+        return broken(recorded.seq, "edited", `seq ${recorded.seq} does not match the hash audit.head recorded for it`);
+      }
     }
 
     return {
@@ -216,7 +264,43 @@ export class AuditService {
       headSeq: prev?.seq ?? null,
       headHash: prev?.hash ?? null,
       ...(rotatedBeforeSeq !== undefined ? { rotatedBeforeSeq } : {}),
+      ...(torn > 0 ? { detail: `${torn} incomplete line${torn === 1 ? "" : "s"} (a write cut short, e.g. by a crash) skipped; the entries around ${torn === 1 ? "it are" : "them are"} intact` } : {}),
     };
+  }
+
+  // The head audit.head holds, undefined when there is none yet (nothing is claimed then), "invalid" when it is unreadable.
+  private async readRecordedHead(): Promise<ChainHead | "invalid" | undefined> {
+    let raw: string;
+    try {
+      raw = await readFile(this.headPath, "utf8");
+    } catch (error) {
+      if (isEnoent(error)) return undefined;
+      throw error;
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<ChainHead> | null;
+      return parsed && Number.isInteger(parsed.seq) && (parsed.seq as number) > 0 && typeof parsed.hash === "string" ? { seq: parsed.seq as number, hash: parsed.hash } : "invalid";
+    } catch {
+      return "invalid";
+    }
+  }
+
+  // Whether the next append starts on a fresh line. A file this process just wrote is known to end in one.
+  private async endsWithNewline(): Promise<boolean> {
+    const info = await stat(this.auditPath).catch((error) => {
+      if (isEnoent(error)) return undefined;
+      throw error;
+    });
+    if (!info || info.size === 0) return true;
+    if (this.cachedHead && this.cachedHead.ino === info.ino && this.cachedHead.size === info.size) return true;
+    const handle = await open(this.auditPath, "r");
+    try {
+      const last = Buffer.alloc(1);
+      await handle.read(last, 0, 1, info.size - 1);
+      return last[0] === 0x0a;
+    } finally {
+      await handle.close();
+    }
   }
 
   // Newest chained entry across audit.log and its archives (an archive holds the head right after a rotation).
