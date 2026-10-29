@@ -5,5 +5,5 @@ import { EventLogService } from "../../dist/services/event-log-service.js";
 const [, , dataDir, count, tag] = process.argv;
 const log = new EventLogService({ dataDir, smtp: { username: "owner@example.com" } });
 for (let i = 0; i < Number(count); i += 1) {
-  await log.append([{ type: "mail.new", emailId: `INBOX::${tag}${i}`, from: "alice@example.com", subject: `${tag} ${i}` }]);
+  await log.append([{ type: "mail.new", emailId: `INBOX::${tag}${i}`, from: `${tag}${i}@example.com`, subject: `${tag} ${i}` }]);
 }

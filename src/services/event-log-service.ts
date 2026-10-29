@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
@@ -56,7 +56,7 @@ export interface StoredEvent {
   subject?: string;
   refId?: string;
   detail?: string;
-  /** Set when `from` or `subject` came out of a message: text somebody else wrote. */
+  /** Set when `from`, `subject` or `detail` may carry text somebody else wrote (a message, an SMTP server's answer). */
   untrusted?: true;
   key?: string;
 }
@@ -69,6 +69,24 @@ const SUBJECT_MAX = 160;
 const ADDRESS_MAX = 254;
 const ID_MAX = 300;
 const DETAIL_MAX = 300;
+const HOUR_MS = 60 * 60 * 1000;
+// A sender, or a burst of spam, must not be able to fill the log: mail.new is limited per hour (the excess is counted in
+// one mail.new_overflow event), and the newest events of the types that matter are kept through rotation whatever else arrives.
+const MAIL_NEW_PER_SENDER_PER_HOUR = 50;
+const MAIL_NEW_PER_HOUR = 200;
+const OVERFLOW_PER_HOUR = 20;
+const KEEP_PER_IMPORTANT_TYPE = 200;
+const IMPORTANT_TYPES: ReadonlySet<string> = new Set<EventType>([
+  "send.sent",
+  "send.failed",
+  "delegation.used",
+  "plan.applied",
+  "plan.undone",
+  "rule.acted",
+  "reply_reminder.due",
+  "snooze.woke",
+  "snooze.failed",
+]);
 
 const BREAKS = /[\t\n\r\u000b\u000c\u0085\u2028\u2029]/g;
 // Controls, soft hyphen, bidi marks and overrides/isolates, zero-width and word-joiner characters, the BOM, the interlinear anchors.
@@ -95,6 +113,21 @@ function parseEvents(text: string): StoredEvent[] {
     }
   }
   return events;
+}
+
+/** The events of `older` that stay when it is dropped: those still among the newest KEEP_PER_IMPORTANT_TYPE of their type once `newer` is counted. */
+function importantToKeep(older: StoredEvent[], newer: StoredEvent[]): StoredEvent[] {
+  const counts = new Map<string, number>();
+  for (const event of newer) if (IMPORTANT_TYPES.has(event.type)) counts.set(event.type, (counts.get(event.type) ?? 0) + 1);
+  const kept: StoredEvent[] = [];
+  for (let index = older.length - 1; index >= 0; index--) {
+    const event = older[index];
+    const count = counts.get(event.type) ?? 0;
+    if (!IMPORTANT_TYPES.has(event.type) || count >= KEEP_PER_IMPORTANT_TYPE) continue;
+    counts.set(event.type, count + 1);
+    kept.push(event);
+  }
+  return kept.reverse();
 }
 
 export class EventLogService {
@@ -151,16 +184,43 @@ export class EventLogService {
     return this.withLock(async () => {
       let current = await this.readText(this.path);
       const existing = parseEvents(current);
-      // The file before is read only when it can matter: for the last seq of a log that has just rotated, and for keys.
-      const rotated = existing.length === 0 || events.some((event) => event.key) ? parseEvents(await this.readText(this.rotatedPath)) : [];
+      const rotating = existing.length >= MAX_EVENTS_PER_FILE || Buffer.byteLength(current) >= MAX_BYTES_PER_FILE;
+      // The file before is read only when it can matter: for the last seq of a log that has just rotated, for keys, for the mail.new quota and for rotating.
+      const rotated = rotating || existing.length === 0 || events.some((event) => event.key || event.type === "mail.new") ? parseEvents(await this.readText(this.rotatedPath)) : [];
       let lastSeq = existing.at(-1)?.seq ?? rotated.at(-1)?.seq ?? Date.now() - 1;
       const seen = new Set([...rotated, ...existing].map((event) => event.key).filter((key): key is string => Boolean(key)));
+
+      const windowStart = now.getTime() - HOUR_MS;
+      let mailThisHour = 0;
+      let overflowThisHour = 0;
+      const perSender = new Map<string, number>();
+      for (const event of [...rotated, ...existing]) {
+        if (!(Date.parse(event.at) > windowStart)) continue;
+        if (event.type === "mail.new") {
+          mailThisHour++;
+          perSender.set(event.from ?? "", (perSender.get(event.from ?? "") ?? 0) + 1);
+        } else if (event.type === "mail.new_overflow") {
+          overflowThisHour++;
+        }
+      }
+      let dropped = 0;
 
       const stored: StoredEvent[] = [];
       for (const event of events) {
         if (event.key && seen.has(event.key)) continue;
         const from = cleanEventText(event.from, ADDRESS_MAX)?.toLowerCase();
+        if (event.type === "mail.new") {
+          if (mailThisHour >= MAIL_NEW_PER_HOUR || (perSender.get(from ?? "") ?? 0) >= MAIL_NEW_PER_SENDER_PER_HOUR) {
+            dropped++;
+            continue;
+          }
+          mailThisHour++;
+          perSender.set(from ?? "", (perSender.get(from ?? "") ?? 0) + 1);
+        } else if (event.type === "mail.new_overflow") {
+          overflowThisHour++;
+        }
         const subject = cleanEventText(event.subject, SUBJECT_MAX);
+        const detail = event.detail ? cleanEventText(event.detail, DETAIL_MAX) : undefined;
         const entry: StoredEvent = {
           seq: ++lastSeq,
           at: now.toISOString(),
@@ -169,19 +229,32 @@ export class EventLogService {
           ...(from ? { from } : {}),
           ...(subject ? { subject } : {}),
           ...(event.refId ? { refId: cleanEventText(event.refId, ID_MAX) } : {}),
-          ...(event.detail ? { detail: cleanEventText(event.detail, DETAIL_MAX) } : {}),
-          ...(from || subject ? { untrusted: true as const } : {}),
+          ...(detail ? { detail } : {}),
+          // The overflow note is the one detail nobody else wrote.
+          ...(from || subject || (detail && event.type !== "mail.new_overflow") ? { untrusted: true as const } : {}),
           ...(event.key ? { key: cleanEventText(event.key, ID_MAX) } : {}),
         };
         if (event.key) seen.add(event.key);
         stored.push(entry);
       }
+      if (dropped > 0 && overflowThisHour < OVERFLOW_PER_HOUR) {
+        stored.push({ seq: ++lastSeq, at: now.toISOString(), type: "mail.new_overflow", detail: `${dropped} more new messages not listed (too many in an hour)` });
+      }
       if (stored.length === 0) return [];
 
       await mkdir(this.config.dataDir, { recursive: true, mode: 0o700 });
-      if (existing.length >= MAX_EVENTS_PER_FILE || Buffer.byteLength(current) >= MAX_BYTES_PER_FILE) {
-        // The newest events are always in the current file or the one before it; the oldest generation is dropped.
-        await rename(this.path, this.rotatedPath);
+      if (rotating) {
+        // The newest events are always in the current file or the one before it; the oldest generation is dropped,
+        // except for the newest events of the important types, which move on with the current file.
+        const keep = importantToKeep(rotated, existing);
+        if (keep.length === 0) {
+          await rename(this.path, this.rotatedPath);
+        } else {
+          const temporary = `${this.rotatedPath}.tmp`;
+          await writeFile(temporary, [...keep, ...existing].map((event) => `${JSON.stringify(event)}\n`).join(""), { encoding: "utf8", mode: 0o600 });
+          await rename(temporary, this.rotatedPath);
+          await rm(this.path, { force: true });
+        }
         current = "";
       }
       const handle = await open(this.path, "a", 0o600);
@@ -208,7 +281,9 @@ export class EventLogService {
     return this.withLock(async () => {
       const older = parseEvents(await this.readText(this.rotatedPath));
       const current = parseEvents(await this.readText(this.path));
-      return [...older, ...current];
+      // A crash while rotating can leave the current events in both files for a moment.
+      const newest = new Set(current.map((event) => event.seq));
+      return [...older.filter((event) => !newest.has(event.seq)), ...current];
     });
   }
 
