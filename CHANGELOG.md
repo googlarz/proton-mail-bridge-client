@@ -2,9 +2,9 @@
 
 All notable changes to this project are documented here.
 
-## Unreleased (2.17.0)
+## [2.17.0] — 2026-10-29
 
-Eleven new tools (127 in all). The package version is still 2.16.3 until this is released.
+Eleven new tools (127 in all).
 
 ### Added
 
