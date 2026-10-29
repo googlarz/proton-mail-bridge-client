@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AutoresponderService } from "../dist/services/autoresponder-service.js";
+import { AutoresponderService, replySubject } from "../dist/services/autoresponder-service.js";
 import { buildProfile } from "../dist/utils/style-profile.js";
 
 const OWN = ["owner@example.com"];
@@ -110,5 +110,35 @@ test("a sender's display name cannot rewrite the greeting through $ replacement 
       await service.process([mail({ from: [{ address: "bob@example.com", name }], preview: EN })], OWN, deps, NOW);
       assert.ok(drafted[0].body.startsWith(`Hi ${name.split(" ")[0]},\n\n`), `${name}: ${JSON.stringify(drafted[0].body.slice(0, 20))}`);
     });
+  }
+});
+
+test("a failing 'already answered' lookup fails closed, and the message is retried when it works", async () => {
+  await withService(async (service) => {
+    await service.set({ enabled: true, body: "Away." }, ENABLED_AT);
+    const first = collect();
+    first.deps.hasAnsweredSince = boom;
+    const outcome = await service.process([mail()], OWN, first.deps, NOW);
+    assert.deepEqual([first.sent.length, first.drafted.length], [0, 0]);
+    assert.deepEqual(outcome.skipped, [{ id: "INBOX::1", reason: "lookup-failed" }]);
+
+    const second = collect();
+    second.deps.hasAnsweredSince = async () => false;
+    await service.process([mail()], OWN, second.deps, NOW);
+    assert.equal(second.sent.length, 1, "not marked as dealt with, so the next sync answers it");
+  });
+  await withService(async (service) => {
+    await service.set({ enabled: true, body: "Away.", skipIfAnswered: false }, ENABLED_AT);
+    const { sent, deps } = collect();
+    deps.hasAnsweredSince = boom;
+    await service.process([mail()], OWN, deps, NOW);
+    assert.equal(sent.length, 1, "a rule that does not ask is not affected");
+  });
+});
+
+test("a subject taken from a message is never read as a replacement pattern", () => {
+  for (const hostile of ["cost $& $1 $$ $` $'", "$&"]) {
+    assert.equal(replySubject({ subject: "Re: {subject}" }, hostile), `Re: ${hostile}`);
+    assert.equal(replySubject({ subject: "Re: {subject}" }, hostile, mail(), "en"), `Re: ${hostile}`);
   }
 });
