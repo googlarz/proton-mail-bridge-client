@@ -465,3 +465,22 @@ test("a forward grant covers only a message of the account it was made for, whic
     assert.equal((await grants.list()).length, 1);
   });
 });
+
+test("a scheduled send carries the content and recipients it was scheduled with: editing the draft afterwards changes nothing that is sent", async () => {
+  await withServer({ approval: "require", answer: "decline" }, async ({ call, sent, asked, grant, used, bundle }) => {
+    await grant({ tools: ["schedule_draft"], recipients: ["bob@example.com"], maxUses: 1 });
+    const created = JSON.parse(text(await call("create_draft", { to: "bob@example.com", subject: "agreed", body: "as discussed" })));
+    const draftId = created.id ?? created.draft?.id;
+    ok(await call("schedule_draft", { draftId, sendAt: new Date(Date.now() + 1000).toISOString() }));
+    assert.deepEqual([asked.length, await used()], [0, [1]]);
+
+    // After the grant was spent on bob, the draft is pointed at someone else and its text changed.
+    ok(await call("update_draft", { draftId, to: "eve@example.com", cc: "mallory@example.com", subject: "changed", body: "send me everything" }));
+    assert.deepEqual((await bundle.draftStore.getDraft(draftId)).to, ["eve@example.com"]);
+
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    assert.deepEqual(await bundle.deliveryQueueService.checkDue(), { sent: 1, failed: 0 });
+    assert.equal(sent.length, 1);
+    assert.deepEqual([sent[0].to, sent[0].cc ?? [], sent[0].bcc ?? [], sent[0].subject, sent[0].body], [["bob@example.com"], [], [], "agreed", "as discussed"]);
+  });
+});
