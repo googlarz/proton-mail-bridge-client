@@ -7,11 +7,11 @@ import { dirname } from "node:path";
 // do, and after a power loss the renamed file is empty. So: write, fsync the file, rename, then fsync the
 // directory so the rename itself is durable. The temp name (`<path>.tmp`) is the one the stores already
 // clean up after a crash. The file is created owner-only: it holds private mail data.
-export async function writeFileAtomic(path: string, data: string): Promise<void> {
+export async function writeFileAtomic(path: string, data: string | Uint8Array): Promise<void> {
   const tempPath = `${path}.tmp`;
   const handle = await open(tempPath, "w", 0o600);
   try {
-    await handle.writeFile(data, "utf8");
+    await (typeof data === "string" ? handle.writeFile(data, "utf8") : handle.writeFile(data));
     await handle.sync();
   } finally {
     await handle.close();

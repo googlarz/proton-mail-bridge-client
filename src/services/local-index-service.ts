@@ -4,6 +4,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
   ActionableThreadSummary,
+  EmailAddress,
   EmailSummary,
   FolderInfo,
   MailboxLabel,
@@ -222,7 +223,7 @@ type ParsedSearchQuery = {
   subject?: string;
 };
 
-function parseSearchQuery(query?: string): ParsedSearchQuery {
+export function parseSearchQuery(query?: string): ParsedSearchQuery {
   const parsed: ParsedSearchQuery = { residualTerms: [] };
 
   for (const rawToken of query?.trim().split(/\s+/) ?? []) {
@@ -991,6 +992,53 @@ export class LocalIndexService {
       ...(staleWarning ? { staleWarning } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
+  }
+
+  // What the semantic index embeds, newest first, one entry per message (its copies in other folders share it). The
+  // key is the one dedupeEmails uses: the Message-ID, or the email id of a message without one.
+  async listEmbeddingSources(limit: number): Promise<Array<{ key: string; subject: string; from: EmailAddress[]; preview: string }>> {
+    const db = await this.ensureDb();
+    const sources = new Map<string, { key: string; subject: string; from: EmailAddress[]; preview: string }>();
+    const rows = db
+      .prepare(`SELECT email_id, message_id, subject, from_json, preview FROM messages ORDER BY COALESCE(internal_date, date) DESC, uid DESC`)
+      .iterate() as IterableIterator<{ email_id: string; message_id: string | null; subject: string; from_json: string | null; preview: string | null }>;
+    for (const row of rows) {
+      const key = row.message_id || row.email_id;
+      if (!sources.has(key)) sources.set(key, { key, subject: row.subject ?? "", from: safeJsonArray<EmailAddress>(row.from_json), preview: row.preview ?? "" });
+      if (sources.size >= limit) break;
+    }
+    return [...sources.values()];
+  }
+
+  // The messages behind semantic-index keys, in the order given, keeping those the filters allow. Field shortcuts in
+  // filters.query (from:, subject:...) count as filters; its other words do not, the vectors already matched them.
+  async getEmailsByKeys(keys: string[], filters: SearchEmailsInput = {}): Promise<EmailSummary[]> {
+    const db = await this.ensureDb();
+    const parsed = parseSearchQuery(filters.query);
+    const structural: SearchEmailsInput = {
+      ...filters,
+      query: undefined,
+      senderDomain: (filters.senderDomain || parsed.senderDomain)?.toLowerCase(),
+      label: filters.label || parsed.label,
+      from: filters.from || parsed.from,
+      to: filters.to || parsed.to,
+      subject: filters.subject || parsed.subject,
+    };
+    const wanted = new Set(keys);
+    const chosen = new Map<string, EmailSummary>();
+    for (let start = 0; start < keys.length; start += 400) {
+      const chunk = keys.slice(start, start + 400);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = db
+        .prepare(`SELECT * FROM messages WHERE message_id IN (${placeholders}) OR email_id IN (${placeholders}) ORDER BY COALESCE(internal_date, date) DESC, uid DESC`)
+        .all(...chunk, ...chunk) as MessageRow[];
+      for (const row of rows) {
+        const email = this.rowToEmailSummary(row);
+        const key = email.messageId || email.id;
+        if (wanted.has(key) && !chosen.has(key) && matchesIndexedSearch(email, structural)) chosen.set(key, email);
+      }
+    }
+    return keys.flatMap((key) => chosen.get(key) ?? []);
   }
 
   async clear(): Promise<{ path: string; removed: boolean }> {

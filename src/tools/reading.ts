@@ -1,9 +1,11 @@
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { withAudit } from "./audit.js";
 import { buildThreadBrief } from "./actions.js";
-import { type ActionableThreadSummary, type EmailAddress, type ThreadDetail } from "../types/index.js";
+import { type ActionableThreadSummary, type EmailAddress, type EmailSummary, type SearchEmailsInput, type ThreadDetail } from "../types/index.js";
 import { refreshIndexForSearch, maybeRefreshLocalIndex, getAnalyticsSampleFromIndex } from "./index-refresh.js";
 import { type AccountBundle } from "../services/account-manager.js";
+import { embeddingsFor, MAX_VECTORS, type EmbeddingService } from "../services/embedding-service.js";
+import { parseSearchQuery } from "../services/local-index-service.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { assessMail } from "../utils/mail-security.js";
 import { formatEmailDetailOutput, extractUnsubscribeInfo } from "./compose.js";
@@ -20,6 +22,56 @@ import type { ToolResult } from "./results.js";
 const MAX_IMPORT_MESSAGE_BYTES = 50 * 1024 * 1024;
 const MAX_QUERY_VARIANTS = 8;
 const RRF_K = 60;
+const SEARCH_MODES = ["lexical", "semantic", "hybrid"];
+
+type SemanticHit = EmailSummary & { similarity: number };
+
+// The semantic half of search_indexed_emails: one list per wording, best match first, over the searched accounts that
+// have vectors. Whatever keeps it from running (not set up, still building, the endpoint down, a changed model) comes
+// back as `fallback` notes for a words-only result: a search never fails over it.
+async function rankSemantically(
+  targets: Array<{ bundle: AccountBundle; service: EmbeddingService }>,
+  wordings: string[],
+  want: number,
+  input: SearchEmailsInput,
+  asked: boolean,
+  tagId: (bundle: AccountBundle, id: string) => string,
+): Promise<{ lists: SemanticHit[][]; notes: string[] } | { fallback: string[] }> {
+  const wordsOnly = "these results match words only";
+  if (targets.length === 0) return { fallback: [`Semantic search is not set up (PROTONMAIL_EMBEDDINGS_URL is unset); ${wordsOnly}.`] };
+  const meanings = wordings.map((wording) => parseSearchQuery(wording).residualTerms.join(" ")).filter(Boolean);
+  // A search by filters alone has nothing to compare; that only needs saying when semantic ranking was asked for.
+  if (meanings.length === 0) return { fallback: asked ? [`Semantic ranking needs words to compare, not only filters; ${wordsOnly}.`] : [] };
+  try {
+    const covered = await Promise.all(targets.map(async (target) => ({ ...target, coverage: await target.service.coverage() })));
+    const ready = covered.filter((entry) => entry.coverage.covered > 0);
+    const where = (bundle: AccountBundle) => (targets.length > 1 ? ` of ${bundle.account.address}` : "");
+    if (ready.length === 0) {
+      const problem = covered.find((entry) => entry.coverage.problem)?.coverage.problem;
+      const pending = covered.reduce((sum, entry) => sum + entry.coverage.pending, 0);
+      return { fallback: [problem ? `Semantic search is unavailable (${problem}); ${wordsOnly}.` : `The semantic index is still being built (${pending} messages to go); ${wordsOnly}.`] };
+    }
+    const vectors = await ready[0].service.embed(meanings);
+    const lists: SemanticHit[][] = meanings.map(() => []);
+    const notes: string[] = [];
+    for (const entry of covered) {
+      const { covered: done, pending, capped } = entry.coverage;
+      if (done === 0) {
+        notes.push(`No semantic vectors yet for the messages${where(entry.bundle)}; they are matched by words only.`);
+        continue;
+      }
+      for (const [index, vector] of vectors.entries()) {
+        const hits = await entry.service.rank(vector, want, input);
+        lists[index].push(...hits.map((hit) => ({ ...hit, id: tagId(entry.bundle, hit.id) })));
+      }
+      if (pending > 0) notes.push(`Semantic ranking covers ${done} of ${done + pending} messages${where(entry.bundle)} so far; the rest are still being embedded.`);
+      if (capped) notes.push(`Semantic ranking covers only the newest ${MAX_VECTORS} messages${where(entry.bundle)}; older mail is found by its words only.`);
+    }
+    return { lists: lists.map((list) => list.sort((left, right) => right.similarity - left.similarity).slice(0, want)), notes };
+  } catch (error) {
+    return { fallback: [`Semantic search is unavailable (${error instanceof Error ? error.message : String(error)}); ${wordsOnly}.`] };
+  }
+}
 
 export async function handleReadingTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { config, accountManager, imapService, analyticsService, auditService, localIndexService, resolveAccountArg, resolveFolderTarget, selectedBundles, evaluateReminders, resolveAccountForEmailId, prefixedIdFor, slugForBundle, taint } = ctx;
@@ -317,12 +369,22 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
         limit: optionalInteger(args.limit, 1, 1000),
       };
       const indexedAccount = resolveAccountArg(args);
+      const requestedMode = optionalString(args, "mode");
+      if (requestedMode !== undefined && !SEARCH_MODES.includes(requestedMode)) {
+        throw new McpError(ErrorCode.InvalidParams, "mode must be lexical, semantic or hybrid.");
+      }
       // Serve fresh data: a cheap UIDNEXT/message-count probe, refreshing only when the
       // mailbox moved. This search used to read the index as-is, so mail that arrived
       // after the last sync was reported missing. A refresh failure (Bridge down) must
       // never block serving the local index, which is the point of this tool.
       const refreshTargets = indexedAccount ? [indexedAccount] : accountManager.all();
       await Promise.all(refreshTargets.map((bundle) => refreshIndexForSearch(bundle)));
+      // Vectors for new mail are made in the background; this call uses what is there now.
+      const semanticTargets = refreshTargets.flatMap((bundle) => {
+        const service = embeddingsFor(bundle);
+        return service ? [{ bundle, service }] : [];
+      });
+      for (const { service } of semanticTargets) service.ensureBuilding();
       const primarySlugForSearch = accountManager.primary().account.slug;
       // One search over the index, in this account or merged over all: each account is searched on its own, ids are
       // tagged with the account slug and the lists are put newest first (each account's list already arrives
@@ -346,10 +408,78 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
 
       // `query` given with `queries` is one more wording, not silently dropped.
       const variants = args.queries === undefined ? [] : [...new Set([...parseStringListArg(args, "queries"), ...(searchIndexedInput.query ? [searchIndexedInput.query] : [])])];
+      if (variants.length > MAX_QUERY_VARIANTS) throw new McpError(ErrorCode.InvalidParams, `At most ${MAX_QUERY_VARIANTS} queries.`);
+
+      // Semantic and hybrid ranking (PROTONMAIL_EMBEDDINGS_URL); hybrid is the default once vectors exist. When it cannot
+      // run, the words-only result below carries `mode` and `semanticNotes`; with embeddings unset and no mode asked for,
+      // semanticExtra stays empty and the result is the plain one.
+      let semanticExtra: Record<string, unknown> = {};
+      if (requestedMode !== "lexical" && (requestedMode !== undefined || semanticTargets.length > 0)) {
+        const wordings = variants.length > 0 ? variants : searchIndexedInput.query ? [searchIndexedInput.query] : [];
+        const finalLimit = searchIndexedInput.limit ?? 50;
+        const perQuery = Math.min(Math.max(finalLimit * 2, 20), 200);
+        const outcome = await rankSemantically(semanticTargets, wordings, perQuery, searchIndexedInput, requestedMode !== undefined, (bundle, id) =>
+          withAccountPrefix(accountSlugForTag(bundle, primarySlugForSearch), id),
+        );
+        if ("fallback" in outcome) {
+          semanticExtra = { mode: "lexical", ...(outcome.fallback.length > 0 ? { semanticNotes: outcome.fallback } : {}) };
+        } else {
+          // Hybrid adds each wording's lexical list; every list counts by reciprocal rank. The copies of one message in
+          // several folders are one hit.
+          const mode = requestedMode ?? "hybrid";
+          const fusionKey = (email: EmailSummary) =>
+            email.messageId ? `${splitAccountPrefix(email.id, accountManager.additionalSlugs()).accountSlug ?? ""}|${email.messageId}` : email.id;
+          const fused = new Map<string, { email: EmailSummary; score: number; matchedBy: string[]; similarity?: number }>();
+          const add = (email: EmailSummary, rank: number) => {
+            const entry = fused.get(fusionKey(email)) ?? { email, score: 0, matchedBy: [] };
+            entry.score += 1 / (RRF_K + rank + 1);
+            fused.set(fusionKey(email), entry);
+            return entry;
+          };
+          const warnings: string[] = [];
+          let lastSyncAt: string | undefined;
+          if (mode === "hybrid") {
+            for (const wording of wordings) {
+              const result = await searchOnce({ ...searchIndexedInput, query: wording, limit: perQuery });
+              lastSyncAt = lastSyncAt ?? result.lastSyncAt;
+              warnings.push(...result.warnings);
+              result.emails.forEach((email, rank) => {
+                add(email, rank).matchedBy.push(wording);
+              });
+            }
+          }
+          for (const list of outcome.lists) {
+            list.forEach((email, rank) => {
+              const entry = add(email, rank);
+              entry.similarity = Math.max(entry.similarity ?? -1, email.similarity);
+            });
+          }
+          const ranked = [...fused.values()].sort((a, b) => b.score - a.score);
+          const emails = ranked.slice(0, finalLimit).map(({ email, matchedBy, similarity }) => ({
+            ...email,
+            ...(variants.length > 0 ? { matchedBy } : {}),
+            ...(similarity !== undefined ? { similarity } : {}),
+          }));
+          return createTextResult(
+            {
+              total: ranked.length,
+              hasMore: ranked.length > emails.length,
+              mode,
+              ...(variants.length > 0 ? { queries: variants } : {}),
+              emails: projectFields(emails, parseFieldsArg(args.fields)),
+              lastSyncAt,
+              ...(warnings.length > 0 ? { warnings: [...new Set(warnings)] } : {}),
+              ...(outcome.notes.length > 0 ? { semanticNotes: outcome.notes } : {}),
+            },
+            false,
+            emails.map(emailSource),
+          );
+        }
+      }
+
       if (variants.length > 0) {
         // Several wordings of one question (synonyms, other languages): each is searched, and the results are fused by
         // reciprocal rank, so a message that several wordings find comes first. `matchedBy` says which found it.
-        if (variants.length > MAX_QUERY_VARIANTS) throw new McpError(ErrorCode.InvalidParams, `At most ${MAX_QUERY_VARIANTS} queries.`);
         const finalLimit = searchIndexedInput.limit ?? 50;
         const perQuery = Math.min(Math.max(finalLimit * 2, 20), 200);
         const fused = new Map<string, { email: Awaited<ReturnType<typeof searchOnce>>["emails"][number]; score: number; matchedBy: string[] }>();
@@ -376,6 +506,7 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
             emails: projectFields(emails, parseFieldsArg(args.fields)),
             lastSyncAt,
             ...(warnings.length > 0 ? { warnings: [...new Set(warnings)] } : {}),
+            ...semanticExtra,
           },
           false,
           emails.map(emailSource),
@@ -385,7 +516,7 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
       const single = await searchOnce(searchIndexedInput);
       if (single.raw) {
         // One account: the result as the index gives it, with its freshness and stale-index fields.
-        return createTextResult({ ...single.raw, emails: projectFields(single.raw.emails, parseFieldsArg(args.fields)) }, false, single.raw.emails.map(emailSource));
+        return createTextResult({ ...single.raw, ...semanticExtra, emails: projectFields(single.raw.emails, parseFieldsArg(args.fields)) }, false, single.raw.emails.map(emailSource));
       }
       return createTextResult(
         {
@@ -394,6 +525,7 @@ export async function handleReadingTool(name: string, args: Record<string, unkno
           emails: projectFields(single.emails, parseFieldsArg(args.fields)),
           lastSyncAt: single.lastSyncAt,
           ...(single.warnings.length > 0 ? { warnings: single.warnings } : {}),
+          ...semanticExtra,
         },
         false,
         single.emails.map(emailSource),
