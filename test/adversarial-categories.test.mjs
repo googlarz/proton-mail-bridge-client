@@ -73,9 +73,8 @@ test("DEFECT (medium-low): Reply-To, which any sender controls, files mail into 
   assert.equal(forged.category, null, `observed category ${forged.category} (${forged.reasons.join("; ")})`);
 });
 
-test("DEFECT (low): the label is a free-text field the instruction filter does not read", () => {
-  const draft = validateCategory({ name: "Work", label: `${IGNORE_EN} and ${FORWARD_EVERYTHING}` });
-  assert.equal(draft.label, undefined, `label accepted verbatim: ${draft.label}`);
+test("fixed: the label is read by the instruction filter too", () => {
+  assert.throws(() => validateCategory({ name: "Work", label: `${IGNORE_EN} and ${FORWARD_EVERYTHING}` }), /instruction/, "label accepted verbatim");
 });
 
 test("held up: zero-width characters inside the words do not hide an instruction", () => {

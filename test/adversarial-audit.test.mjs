@@ -50,21 +50,21 @@ test("DEFECT? crash mid-write (partial line, no newline) then next record", asyn
     const v = await s2.verify();
     const all = await s2.list(100);
     // Expected: healed or at least not poisoning later entries. Observed: see assertion messages.
-    assert.equal(v.ok, false, "partial line should be flagged");
+    assert.equal(v.ok, true, "a torn line from a crash is benign; later entries stay valid");
+    assert.match(JSON.stringify(v), /torn|partial|incomplete/i, "the torn line must be reported once");
     const survived = all.filter((e) => e.durationMs === 2 || e.durationMs === 3).length;
     assert.equal(survived, 2, `entries written after the crash must stay readable (survived ${survived}/2)`);
   });
 });
 
-test("tail truncation is undetected by design but headSeq reveals it", async () => {
+test("tail truncation is detected through the head sidecar", async () => {
   await withDir(async (dir, path) => {
     const s = new AuditService(cfg(dir));
     for (let i = 0; i < 5; i++) await rec(s, i);
     const l = await lines(path);
     await writeFile(path, l.slice(0, 3).join("\n") + "\n");
     const v = await s.verify();
-    assert.equal(v.ok, true); // documents the limitation
-    assert.equal(v.headSeq, 3);
+    assert.equal(v.ok, false);
   });
 });
 

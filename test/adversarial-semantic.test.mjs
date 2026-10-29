@@ -145,13 +145,20 @@ test("DEFECT: no cap on vector dimensions - a 500,000-dimensional answer is acce
   assert.ok(error, `accepted ${value?.length} vectors x ${dims} dims (x 4 bytes x up to 10,000 messages = 20 GB sidecar)`);
 });
 
-test("DEFECT: no cap on response size - 60 MB of JSON is read into memory", async () => {
-  const filler = "0,".repeat(30 * 1024 * 1024);
-  const before = process.memoryUsage().rss;
-  const { error } = await embedAgainst(`{"embeddings":[[${filler}0],[${filler}0]]}`, { timeoutMs: 30_000 });
-  const grown = (process.memoryUsage().rss - before) / (1024 * 1024);
-  assert.ok(error);
-  assert.ok(grown < 200, `rss grew ${grown | 0} MB parsing a hostile body`);
+test("fixed: a response over the size cap is cut off, not read to the end", async () => {
+  let written = 0;
+  const chunk = "0,".repeat(512 * 1024);
+  const { error } = await embedAgainst((req, res) => {
+    res.write('{"embeddings":[[');
+    const timer = setInterval(() => {
+      written += chunk.length;
+      if (written > 200 * 1024 * 1024) { clearInterval(timer); res.end(); return; }
+      res.write(chunk);
+    }, 1);
+    res.on("close", () => clearInterval(timer));
+  }, { timeoutMs: 30_000 });
+  assert.ok(error, "the oversized body must be refused");
+  assert.ok(written < 64 * 1024 * 1024, `the client kept reading: the server wrote ${(written / 1048576) | 0} MB`);
 });
 
 // ---- sidecar ---------------------------------------------------------------------------------------------------
