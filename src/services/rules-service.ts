@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import type { EmailSummary, ProtonMailConfig } from "../types/index.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
@@ -577,7 +578,7 @@ export class RulesService {
 
   private async loadUnlocked(): Promise<RulesState> {
     try {
-      const parsed = JSON.parse(await readFile(this.storePath, "utf8")) as Partial<RulesState>;
+      const parsed = JSON.parse(await readRegularFile(this.storePath)) as Partial<RulesState>;
       return {
         ...emptyState(),
         ...parsed,

@@ -1,4 +1,5 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound } from "../utils/corrupt-store.js";
@@ -22,7 +23,7 @@ export class BriefStore {
 
   async read(): Promise<BriefState> {
     try {
-      const parsed = JSON.parse(await readFile(this.path, "utf8")) as BriefState;
+      const parsed = JSON.parse(await readRegularFile(this.path)) as BriefState;
       const valid = (value: unknown): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value));
       return {
         ...(valid(parsed.lastAt) ? { lastAt: parsed.lastAt } : {}),

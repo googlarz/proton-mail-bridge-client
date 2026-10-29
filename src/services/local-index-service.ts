@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { chmodSync } from "node:fs";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import type {
   ActionableThreadSummary,
@@ -2680,7 +2681,7 @@ export class LocalIndexService {
     }
 
     try {
-      const raw = await readFile(this.legacyIndexPath, "utf8");
+      const raw = await readRegularFile(this.legacyIndexPath);
       const legacy = JSON.parse(raw) as LegacyLocalIndexFile;
       this.log.info("Importing legacy JSON mailbox index into SQLite", "LocalIndexService", {
         legacyPath: this.legacyIndexPath,

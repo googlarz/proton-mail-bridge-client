@@ -1,4 +1,5 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../utils/atomic-write.js";
 import { INVISIBLE } from "../utils/contact-text.js";
@@ -364,7 +365,7 @@ export class CategoryService {
 
   private async load(): Promise<CategoryState> {
     try {
-      const parsed = JSON.parse(await readFile(this.storePath, "utf8")) as Partial<CategoryState>;
+      const parsed = JSON.parse(await readRegularFile(this.storePath)) as Partial<CategoryState>;
       return { categories: Array.isArray(parsed.categories) ? parsed.categories : [], learned: Array.isArray(parsed.learned) ? parsed.learned : [] };
     } catch (error) {
       if (isFileNotFound(error)) return { categories: [], learned: [] };

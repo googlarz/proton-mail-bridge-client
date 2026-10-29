@@ -1,4 +1,5 @@
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import type { AccountBundle } from "./account-manager.js";
 import type { LocalIndexService } from "./local-index-service.js";
@@ -381,7 +382,7 @@ export class EmbeddingService {
     if (this.cached && this.cached.mtimeMs === info.mtimeMs && this.cached.size === info.size) return this.cached.store;
     let store: Store | undefined;
     try {
-      store = decode(await readFile(this.path));
+      store = decode(await readRegularFile(this.path, { binary: true }));
     } catch (error) {
       if (!(error instanceof CorruptSidecar)) throw error;
       // Derived data: nothing to recover by hand, the next build replaces it.

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, stat, unlink } from "node:fs/promises";
+import { mkdir, open, stat, unlink } from "node:fs/promises";
+import { readRegularFile } from "./regular-file.js";
 import { dirname } from "node:path";
 import { logger } from "./logger.js";
 
@@ -114,7 +115,7 @@ async function isStale(lockPath: string): Promise<boolean> {
     // death, since age alone can't tell "dead holder" apart from "slow but
     // live holder". A dead PID means the lock is stealable immediately,
     // regardless of age.
-    const content = await readFile(lockPath, "utf8").catch(() => undefined);
+    const content = await readRegularFile(lockPath).catch(() => undefined);
     const pidMatch = content?.match(/^(\d+)-/);
     if (pidMatch) {
       const pid = Number(pidMatch[1]);
@@ -193,7 +194,7 @@ async function acquire(lockPath: string): Promise<string> {
       }
 
       if (Date.now() > deadline) {
-        const owner = await readFile(lockPath, "utf8").catch(() => "unknown");
+        const owner = await readRegularFile(lockPath).catch(() => "unknown");
         throw new Error(
           `Timed out after ${LOCK_ACQUIRE_TIMEOUT_MS}ms waiting for lock ${lockPath} (held by ${owner.trim()}). ` +
             "Another process is using the same data directory right now.",
@@ -206,7 +207,7 @@ async function acquire(lockPath: string): Promise<string> {
 }
 
 async function release(lockPath: string, token: string): Promise<void> {
-  const current = await readFile(lockPath, "utf8").catch(() => undefined);
+  const current = await readRegularFile(lockPath).catch(() => undefined);
   if (current !== undefined && current !== token) {
     // Stolen as stale by another process while we were still working —
     // that lock is now theirs. Deleting it here would let a third caller

@@ -55,8 +55,8 @@ for (const [name, mutate] of Object.entries(variants)) {
   });
 }
 
-// Known defect: readFile on a FIFO blocks forever (and pins a thread, so the process cannot exit). Opt in with ADV_FIFO=1.
-test("audit.head = FIFO must not hang verify or record", { skip: process.platform === "win32" || !process.env.ADV_FIFO, timeout: 30000 }, async () => {
+// A FIFO in place of audit.head must not hang (readFile on one blocks a thread forever); fixed by readRegularFile.
+test("audit.head = FIFO must not hang verify or record", { skip: process.platform === "win32", timeout: 30000 }, async () => {
   await withDir(async (dir) => {
     const s = new AuditService(config(dir));
     await rec(s, 0);

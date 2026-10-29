@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
@@ -101,7 +102,7 @@ export class CommitmentService {
 
   private async load(): Promise<CommitmentFile> {
     try {
-      const parsed = JSON.parse(await readFile(this.storePath, "utf8")) as Partial<CommitmentFile>;
+      const parsed = JSON.parse(await readRegularFile(this.storePath)) as Partial<CommitmentFile>;
       return { items: Array.isArray(parsed.items) ? parsed.items : [] };
     } catch (error) {
       if (isFileNotFound(error)) return { items: [] };

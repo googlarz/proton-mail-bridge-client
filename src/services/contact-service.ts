@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
+import { mkdir, readdir, unlink } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import type { ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
@@ -245,7 +246,7 @@ export class ContactService {
     }
     await this.cleanOrphanedTempFiles();
     try {
-      const parsed = JSON.parse(await readFile(this.storePath, "utf8")) as ContactFile;
+      const parsed = JSON.parse(await readRegularFile(this.storePath)) as ContactFile;
       if (!parsed || typeof parsed.items !== "object" || parsed.items === null || Array.isArray(parsed.items)) throw new Error("contacts.json has no items object");
       // A hand-edited record without a list of addresses would break every lookup; it is left out.
       const items: Record<string, ContactRecord> = Object.create(null);

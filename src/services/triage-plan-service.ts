@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../utils/atomic-write.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
@@ -139,7 +140,7 @@ export class TriagePlanService {
 
   private async load(): Promise<TriageState> {
     try {
-      const parsed = JSON.parse(await readFile(this.storePath, "utf8")) as Partial<TriageState>;
+      const parsed = JSON.parse(await readRegularFile(this.storePath)) as Partial<TriageState>;
       return { plans: Array.isArray(parsed.plans) ? parsed.plans : [], declined: Array.isArray(parsed.declined) ? parsed.declined : [] };
     } catch (error) {
       if (isFileNotFound(error)) return { plans: [], declined: [] };

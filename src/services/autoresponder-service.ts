@@ -1,4 +1,5 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import type { EmailSummary, ProtonMailConfig } from "../types/index.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
@@ -811,7 +812,7 @@ export class AutoresponderService {
 
   private async loadUnlocked(): Promise<AutoresponderState> {
     try {
-      const parsed = JSON.parse(await readFile(this.storePath, "utf8")) as Partial<AutoresponderState>;
+      const parsed = JSON.parse(await readRegularFile(this.storePath)) as Partial<AutoresponderState>;
       return {
         ...emptyState(),
         ...parsed,

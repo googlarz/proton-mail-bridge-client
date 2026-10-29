@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { readRegularFile } from "./regular-file.js";
 import { join } from "node:path";
 import { withFileLock } from "./file-lock.js";
 import { lowerCaseAddress } from "./helpers.js";
@@ -86,7 +87,7 @@ export async function ensureAccountIdentityMatches(
     // this call was waiting for the lock.
     let existing: AccountMarkerFile | undefined;
     try {
-      const raw = await readFile(path, "utf8");
+      const raw = await readRegularFile(path);
       existing = JSON.parse(raw) as AccountMarkerFile;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {

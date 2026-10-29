@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
-import { appendFile, chmod, mkdir, open, readFile, rename, stat } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AuditEntry, ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
+import { readRegularFile } from "../utils/regular-file.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { logger } from "../utils/logger.js";
 
 const MAX_AUDIT_BYTES = 5 * 1024 * 1024;
 const MAX_AUDIT_LINES = 10000;
+const MAX_HEAD_BYTES = 64 * 1024;
 const GENESIS_HASH = "0".repeat(64);
 
 export type AuditBreakReason = "edited" | "deleted" | "reordered" | "head-unreadable";
@@ -285,7 +287,7 @@ export class AuditService {
   private async readRecordedHead(): Promise<ChainHead | "invalid" | "unreadable" | undefined> {
     let raw: string;
     try {
-      raw = await readFile(this.headPath, "utf8");
+      raw = await readRegularFile(this.headPath, { maxBytes: MAX_HEAD_BYTES });
     } catch (error) {
       if (isEnoent(error)) return undefined;
       // No permission, a directory in its place, an I/O error: the head exists but says nothing, like a damaged one.
@@ -385,7 +387,7 @@ export class AuditService {
 
   private async readLines(path: string): Promise<string[]> {
     try {
-      return (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
+      return (await readRegularFile(path)).split(/\r?\n/).filter(Boolean);
     } catch (error) {
       if (isEnoent(error)) {
         return [];
@@ -396,7 +398,7 @@ export class AuditService {
 
   private async readEntries(path: string, maxLines = MAX_AUDIT_LINES): Promise<AuditEntry[]> {
     try {
-      const raw = await readFile(path, "utf8");
+      const raw = await readRegularFile(path);
       const allLines = raw.split(/\r?\n/).filter(Boolean);
       const lines = allLines.slice(-maxLines);
       return lines.flatMap((line) => {

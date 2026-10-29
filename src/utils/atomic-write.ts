@@ -1,4 +1,4 @@
-import { open, rename } from "node:fs/promises";
+import { open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
 // Replaces `path` with `data` so that a crash or power loss leaves either the old content or the new,
@@ -16,7 +16,13 @@ export async function writeFileAtomic(path: string, data: string | Uint8Array): 
   } finally {
     await handle.close();
   }
-  await rename(tempPath, path);
+  try {
+    await rename(tempPath, path);
+  } catch (error) {
+    // e.g. a directory in the place of `path`: do not leave the temp file behind on every attempt.
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
   await syncDirectory(dirname(path));
 }
 

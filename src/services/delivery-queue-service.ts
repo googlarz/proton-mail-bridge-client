@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
+import { mkdir, readdir, unlink } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import type { DeliveryQueueKind, DeliveryQueueRecord, ProtonMailConfig, SendEmailInput } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
@@ -565,7 +566,7 @@ export class DeliveryQueueService {
     await this.cleanOrphanedTempFiles();
 
     try {
-      const raw = await readFile(this.queuePath, "utf8");
+      const raw = await readRegularFile(this.queuePath);
       const parsed = JSON.parse(raw) as DeliveryQueueFile;
       return { ...createEmptyStore(), ...parsed };
     } catch (error) {

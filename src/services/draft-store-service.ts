@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, readdir, unlink } from "node:fs/promises";
+import { mkdir, rm, readdir, unlink } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
 import type {
   DraftMode,
@@ -507,7 +508,7 @@ export class DraftStoreService {
     await this.cleanOrphanedTempFiles();
 
     try {
-      const raw = await readFile(this.draftPath, "utf8");
+      const raw = await readRegularFile(this.draftPath);
       const parsed = JSON.parse(raw) as DraftStoreFile;
       const drafts = Object.fromEntries(
         Object.entries(parsed.drafts ?? {}).map(([id, draft]) => [id, this.normalizeDraft(draft)]),

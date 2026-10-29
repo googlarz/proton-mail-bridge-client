@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { join } from "node:path";
 import type { ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
@@ -289,7 +290,7 @@ export class EventLogService {
 
   private async readText(path: string): Promise<string> {
     try {
-      return await readFile(path, "utf8");
+      return await readRegularFile(path);
     } catch (error) {
       if (isFileNotFound(error)) return "";
       throw error;

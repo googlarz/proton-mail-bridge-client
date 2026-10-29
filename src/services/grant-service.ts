@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { readRegularFile } from "../utils/regular-file.js";
 import { join } from "node:path";
 import type { ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
@@ -244,7 +245,7 @@ export class GrantService {
       this.identityChecked = true;
     }
     try {
-      const parsed = JSON.parse(await readFile(this.storePath, "utf8")) as Partial<GrantFile>;
+      const parsed = JSON.parse(await readRegularFile(this.storePath)) as Partial<GrantFile>;
       const entries = Array.isArray(parsed.grants) ? parsed.grants : [];
       const grants = entries.flatMap((entry) => {
         const grant = readStoredGrant(entry, this.account);
