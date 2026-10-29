@@ -68,6 +68,7 @@ test("sanitized runtime config excludes secrets and preserves policy flags", () 
     idleWatchEnabled: true,
     idleMaxSeconds: 30,
     confirmDestructive: false,
+    approval: "off",
     allowEmptyFolder: false,
     restrictOutboundToSelf: false,
     allowFileDownloadDir: null,

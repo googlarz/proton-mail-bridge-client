@@ -555,6 +555,9 @@ export interface LocalIndexStatus {
 export type SafetyMode = "read-only" | "drafts" | "assisted" | "full";
 
 export interface ProtonRuntimeConfig {
+  /** PROTONMAIL_APPROVAL: who may confirm a gated action. Unset is "off": the model's `confirmed: true` counts. */
+  approval?: "off" | "elicit" | "require";
+  approvalTimeoutSeconds?: number;
   /** The PROTONMAIL_MODE preset the flags below started from, when one was set. */
   mode?: SafetyMode;
   readOnly: boolean;
