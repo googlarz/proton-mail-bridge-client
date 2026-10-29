@@ -12,6 +12,8 @@ import {
   ListResourcesRequestSchema,
   McpError,
   ReadResourceRequestSchema,
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { isMainModule } from "./is-main.js";
 import { CORE_TOOL_NAMES, TOOLS, listedTools } from "./tools/definitions.js";
@@ -44,12 +46,13 @@ import { withIgnoredArgumentsNote, asObject } from "./tools/args.js";
 import { handleBriefTool } from "./tools/brief.js";
 import { handleTriageTool } from "./tools/triage.js";
 import { handleCategoryTool } from "./tools/categories.js";
+import { EventsNotifier, eventsResourceText, handleEventsTool } from "./tools/events.js";
 import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
 import { handleContactTool } from "./tools/contacts.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
 import { applyApprovalPolicy, type ApprovalLookups } from "./utils/approval.js";
-import { buildEmailResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
+import { buildEmailResourceUri, buildEventsResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
 export { mailboxChangedSinceCheckpoint } from "./tools/index-refresh.js";
 export { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
@@ -118,6 +121,8 @@ export function createServer(
   config: ProtonMailConfig,
   options: {
     startBackgroundSync?: boolean;
+    /** How long events are gathered into one resources/updated notification, and how often files are checked for events from another process. */
+    eventNotifications?: { debounceMs?: number; pollMs?: number };
   } = {},
 ) {
   // AccountManager builds one full, isolated service stack per configured account
@@ -175,7 +180,7 @@ export function createServer(
     {
       capabilities: {
         tools: {},
-        resources: {},
+        resources: { subscribe: true },
         prompts: {},
       },
       instructions: buildServerInstructions(new Set(listedTools().map((tool) => tool.name))),
@@ -257,7 +262,11 @@ export function createServer(
         ];
       }),
     );
-    const resources = perAccount.flat();
+    // First in the list: the one resource a client can subscribe to.
+    const resources = [
+      { uri: buildEventsResourceUri(), name: "events", title: "Mailbox events", description: "What happened while nobody asked (get_events as a resource); subscribe to be told when it changes.", mimeType: "application/json" },
+      ...perAccount.flat(),
+    ];
 
     const pageSize = 50;
     const nextCursor =
@@ -273,6 +282,8 @@ export function createServer(
     const target = parseResourceUri(request.params.uri);
 
     switch (target.kind) {
+      case "events":
+        return { contents: [{ uri: request.params.uri, mimeType: "application/json", text: await eventsResourceText(ctx) }] };
       case "email": {
         const { bundle: emailBundle, rest: emailRest } = resolveAccountForEmailId(target.emailId);
         const detail = await emailBundle.imapService.getEmailById(emailRest);
@@ -365,6 +376,19 @@ export function createServer(
     }
   });
 
+  // Only protonmail://events can be subscribed to. Nothing is listened to or sent until a client does.
+  const eventsNotifier = new EventsNotifier(accountManager.all(), (uri) => server.sendResourceUpdated({ uri }), options.eventNotifications);
+  server.setRequestHandler(SubscribeRequestSchema, async (request) => {
+    if (request.params.uri !== buildEventsResourceUri()) throw new McpError(ErrorCode.InvalidParams, `Only ${buildEventsResourceUri()} can be subscribed to.`);
+    eventsNotifier.subscribe();
+    return {};
+  });
+  server.setRequestHandler(UnsubscribeRequestSchema, async (request) => {
+    if (request.params.uri === buildEventsResourceUri()) eventsNotifier.unsubscribe();
+    return {};
+  });
+  server.onclose = () => eventsNotifier.unsubscribe();
+
   server.setRequestHandler(CallToolRequestSchema, withIgnoredArgumentsNote(withRiskScan(ctx.taint, async (request) => {
     const name = request.params.name;
     const args = asObject(request.params.arguments);
@@ -404,6 +428,9 @@ export function createServer(
 
         case "get_brief":
           return await handleBriefTool(name, args, ctx);
+
+        case "get_events":
+          return await handleEventsTool(name, args, ctx);
 
         case "get_style_profile":
           return await handleStyleTool(name, args, ctx);

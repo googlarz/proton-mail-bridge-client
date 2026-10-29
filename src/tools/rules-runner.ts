@@ -213,6 +213,7 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
     for (const rule of change.rules) {
       if (options.automatic && email.messageId) handled.push({ ruleId: rule.id, messageId: email.messageId });
       if (did.length || entry.error) {
+        bundle.eventLog.emit({ type: "rule.acted", refId: rule.id, emailId: email.id, from: entry.from, subject: email.subject, detail: `${rule.name}: ${entry.error ? `failed (${entry.error})` : did.join(", ")}` });
         log.push({
           at: new Date().toISOString(),
           ruleId: rule.id,

@@ -143,6 +143,7 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
         return out;
       });
       await plans.markApplied(planId, applied, left.filter((item) => item.source === "scan").map((item) => item.from.toLowerCase()));
+      bundle.eventLog.emit({ type: "plan.applied", refId: planId, detail: `${applied.filter((item) => item.ok).length} applied, ${applied.filter((item) => !item.ok).length} failed` });
       return createTextResult({
         account: bundle.account.address,
         planId,
@@ -185,6 +186,7 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
         return next;
       });
       const saved = await plans.markUndone(planId, outcome);
+      bundle.eventLog.emit({ type: "plan.undone", refId: planId, detail: `${outcome.filter((item) => item.undone).length} undone` });
       return createTextResult({
         account: bundle.account.address,
         planId,

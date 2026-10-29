@@ -2237,6 +2237,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "get-brief", tool: "get_brief", positionals: [], help: "(tool form; see also `brief`)" },
   { command: "autoresponder", tool: "get_autoresponder", positionals: [], help: "Show the automatic reply of an address (--account)" },
   { command: "set-autoresponder", tool: "set_autoresponder", positionals: [], help: "Set up or switch off the automatic reply of an address (--enabled, --body, --subject, --startsAt, --endsAt, --outgoingNote, --mode, --timezone, --rules, --confirmed)" },
+  { command: "events", tool: "get_events", positionals: [], help: "What happened while nobody asked: new mail, snoozes, reminders, sends, rules, plans (--args '{\"sinceCursor\":\"<nextCursor>\",\"types\":[\"mail\"],\"limit\":50}')" },
   { command: "list-templates", tool: "list_templates", positionals: [], help: "List saved email templates" },
   { command: "get-template", tool: "get_template", positionals: ["id"], help: "Get a saved template by id" },
   { command: "delete-template", tool: "delete_template", positionals: ["id"], help: "Delete a saved template" },

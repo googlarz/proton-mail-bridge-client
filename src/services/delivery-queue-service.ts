@@ -12,6 +12,7 @@ import { withTimeout } from "../utils/helpers.js";
 import { SMTPService } from "./smtp-service.js";
 import type { DraftStoreService } from "./draft-store-service.js";
 import { ownRecord } from "../utils/own-record.js";
+import type { EventSink } from "./event-log-service.js";
 
 const SEND_ITEM_TIMEOUT_MS = 30_000;
 // How long a terminal (sent/failed) record is kept before checkDue() prunes
@@ -76,6 +77,13 @@ export class DeliveryQueueService {
   ) {
     this.queuePath = join(this.config.dataDir, "delivery-queue.json");
     this.sendTimeoutMs = options.sendTimeoutMs ?? SEND_ITEM_TIMEOUT_MS;
+  }
+
+  private emitEvent: EventSink = () => {};
+
+  /** Where a send that went out or failed is reported (the account's event log). */
+  setEventSink(sink: EventSink): void {
+    this.emitEvent = sink;
   }
 
   setDraftStore(draftStore: DraftStoreService): void {
@@ -282,6 +290,7 @@ export class DeliveryQueueService {
               record.failureReason =
                 "Skipped: the source draft was already sent (or is being sent) via another path, most likely a manual send_draft call that won the race. This scheduled send did not call SMTP and did not deliver a duplicate.";
               await this.save(store);
+              this.emitEvent({ type: "send.failed", refId: id, subject: record.payload.subject, detail: record.failureReason, key: `send.failed:${id}` });
             }
           });
           failed += 1;
@@ -317,6 +326,7 @@ export class DeliveryQueueService {
         );
         delivered = true;
         sent += 1;
+        this.emitEvent({ type: "send.sent", refId: id, subject: claimed.payload.subject, key: `send.sent:${id}` });
         // Persist "sent" with bounded retries. If every attempt fails the record stays
         // "sending" (never "failed", never resendable): startup recovery then reports
         // it as an unknown outcome to verify in the Sent folder, and the source draft
@@ -424,6 +434,7 @@ export class DeliveryQueueService {
             record.status = "failed";
             record.failureReason = message;
             await this.save(store);
+            this.emitEvent({ type: "send.failed", refId: id, subject: record.payload.subject, detail: message, key: `send.failed:${id}` });
           }
         });
         failed += 1;
@@ -482,6 +493,7 @@ export class DeliveryQueueService {
         record.status = "failed";
         record.failureReason = "Interrupted by a server restart while sending — delivery outcome is unknown. Not auto-resent; check the mailbox's Sent folder to confirm whether it actually went out before resending manually.";
         changed = true;
+        this.emitEvent({ type: "send.failed", refId: record.id, subject: record.payload.subject, detail: record.failureReason, key: `send.failed:${record.id}` });
       }
       if (changed) await this.save(store);
     });
