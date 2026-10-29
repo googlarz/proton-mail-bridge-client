@@ -1,7 +1,7 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { AccountBundle } from "../services/account-manager.js";
 import type { AppliedItem, PlanAction, PlanItem } from "../services/triage-plan-service.js";
-import { normalizeLimit, optionalNumber, parseEmailId } from "../utils/helpers.js";
+import { labelMatchesFolder, normalizeLimit, optionalNumber, parseEmailId } from "../utils/helpers.js";
 import { ensureEmailActionAllowed, ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { withAudit } from "./audit.js";
 import { requireString } from "./args.js";
@@ -60,7 +60,7 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
         if (used.has(resolved.rest)) continue;
         used.add(resolved.rest);
         const detail = await bundle.imapService.getEmailById(resolved.rest);
-        items.push({ emailId: detail.id, from: detail.from[0]?.address ?? "", subject: detail.subject, action, ...(target ? { target } : {}), reason: typeof entry.reason === "string" && entry.reason.trim() ? entry.reason.trim().slice(0, 300) : "proposed by the assistant", source: "client", wasRead: detail.isRead, hadLabel: target ? detail.labels.includes(target) : undefined });
+        items.push({ emailId: detail.id, from: detail.from[0]?.address ?? "", subject: detail.subject, action, ...(target ? { target } : {}), reason: typeof entry.reason === "string" && entry.reason.trim() ? entry.reason.trim().slice(0, 300) : "proposed by the assistant", source: "client", wasRead: detail.isRead, hadLabel: target ? detail.labels.some((carried) => labelMatchesFolder(carried, target)) : undefined });
       }
 
       if (args.scan !== false) {

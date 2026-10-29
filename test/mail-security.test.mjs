@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/index.js";
-import { assessMail, isGatedAction } from "../dist/utils/mail-security.js";
+import { MailTaint, annotateHighRisk, assessMail, isGatedAction } from "../dist/utils/mail-security.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 import { createMessage, makeCertificate, startFakeBridge } from "./helpers/fake-bridge.mjs";
 import { HIDE_FROM_USER, IGNORE_DE, IGNORE_EN, IGNORE_PL, INJECTION, ROLE_MARKER } from "./helpers/injection-samples.mjs";
@@ -124,4 +124,15 @@ test("the gate applies to a call only through arguments the tool declares", () =
   assert.equal(isGatedAction("batch_email_action", { action: "mark_read" }, declared("action", "dryRun")), false);
   assert.equal(isGatedAction("delete_folder", {}, declared("path")), true);
   assert.equal(isGatedAction("get_emails", {}, declared("folder")), false);
+  assert.equal(isGatedAction("set_contact", { address: "a@example.com", addTags: ["vip"] }, declared("address", "addTags")), true, "a hostile mail must not get its sender tagged vip");
+});
+
+test("attachmentText is scanned like the body: an instruction inside a DOCX text taints the session", () => {
+  const taint = new MailTaint();
+  const result = { id: "INBOX::1", subject: "Report", text: "See attached.", attachmentText: `Quarterly numbers. ${INJECTION}` };
+  assert.equal(annotateHighRisk(result, taint), true);
+  assert.equal(result.risk.level, "high");
+  assert.equal(taint.current()?.emailId, "INBOX::1");
+  const clean = { id: "INBOX::2", subject: "Report", text: "See attached.", attachmentText: "Quarterly numbers: 1, 2, 3." };
+  assert.equal(annotateHighRisk(clean, new MailTaint()), false);
 });

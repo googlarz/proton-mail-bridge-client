@@ -32,7 +32,7 @@ async function withServer(runtimeOverrides, fn) {
     accounts: [{ address: "owner@example.com", slug: "owner-example-com", ...conn, dataDir: dir }],
     runtime: { readOnly: false, allowSend: false, allowRemoteDraftSync: false, allowedActions: ["archive", "move", "mark_read"], startupSync: false, autoSyncFolder: "INBOX", autoSyncFull: false, autoSyncLimitPerFolder: 50, idleWatchEnabled: false, idleMaxSeconds: 30, confirmDestructive: true, allowEmptyFolder: false, restrictOutboundToSelf: false, maxInlineBytes: 40960, opDelayMs: 0, ...runtimeOverrides },
   };
-  const { server } = createServer(config, { startBackgroundSync: false });
+  const { server, imapService } = createServer(config, { startBackgroundSync: false });
   const client = new Client({ name: "t", version: "0" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(b), client.connect(a)]);
@@ -41,7 +41,7 @@ async function withServer(runtimeOverrides, fn) {
     const text = result.content.find((c) => c.type === "text").text;
     return result.isError ? { error: text } : JSON.parse(text);
   };
-  try { await fn({ call, folders }); } finally {
+  try { await fn({ call, folders, imapService }); } finally {
     await client.close(); await server.close(); await closeTrackedIndexes(); await bridge.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
@@ -127,5 +127,23 @@ test("undo does not invent state: a message that was already read stays read", n
     const undone = await call("undo_plan", { planId: plan.planId });
     assert.equal(undone.undone, 0, "there was nothing to put back");
     assert.ok(seen.flags.has("\\Seen"), "still read on the server");
+  });
+});
+
+test("a label Bridge reports as Labels/<name> counts as already there, so undo does not take it off", needsOpenssl, async () => {
+  await withServer({}, async ({ call, imapService }) => {
+    const real = imapService.getEmailById.bind(imapService);
+    imapService.getEmailById = async (id) => ({ ...(await real(id)), labels: ["Labels/Receipts"] });
+    const unlabelled = [];
+    imapService.updateMessageLabels = async (_id, _add, remove) => { unlabelled.push(...remove); return {}; };
+    const { items } = await call("plan_inbox", {});
+    const emailId = items[0].emailId;
+    for (const target of ["Receipts", "Labels/Receipts"]) {
+      const plan = await call("plan_inbox", { scan: false, items: [{ emailId, action: "label", target }] });
+      const applied = await call("approve_plan", { planId: plan.planId });
+      assert.equal(applied.applied, 1, JSON.stringify(applied));
+      await call("undo_plan", { planId: plan.planId });
+    }
+    assert.deepEqual(unlabelled, [], "the label was there before the plan: undo must leave it");
   });
 });

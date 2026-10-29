@@ -388,6 +388,18 @@ test("LocalIndexService.clear() still succeeds for the matching account", async 
   });
 });
 
+test("LocalIndexService.clear() also deletes the semantic sidecar, which is derived from mail", async () => {
+  await withTempDir(async (dataDir) => {
+    const serviceA = new LocalIndexService(createConfig(dataDir, "accountA@example.com"));
+    await serviceA.recordSnapshot({ syncedAt: "2026-03-24T12:00:00.000Z", folders: [], emails: [], folderStats: [] });
+    const sidecar = join(dataDir, "mail-embeddings.bin");
+    await writeFile(sidecar, "vectors");
+
+    await serviceA.clear();
+    assert.equal(await pathExists(sidecar), false, "mail-embeddings.bin should be gone after clear()");
+  });
+});
+
 test("DraftStoreService.clear() refuses a mismatched account and does NOT delete another account's drafts (P1)", async () => {
   await withTempDir(async (dataDir) => {
     const draftsA = new DraftStoreService(createConfig(dataDir, "accountA@example.com"));

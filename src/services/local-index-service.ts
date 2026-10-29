@@ -1052,7 +1052,8 @@ export class LocalIndexService {
     this.closeDb();
     let removed = false;
 
-    for (const path of [this.dbPath, this.legacyIndexPath]) {
+    // The semantic sidecar holds vectors of mail text: derived data that must not outlive the index.
+    for (const path of [this.dbPath, this.legacyIndexPath, join(this.config.dataDir, "mail-embeddings.bin")]) {
       try {
         await rm(path);
         removed = true;

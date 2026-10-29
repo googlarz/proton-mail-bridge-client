@@ -182,6 +182,8 @@ export class MailTaint {
 export const TAINT_GATED_TOOLS = new Set([
   "send_email", "reply_to_email", "reply_all_email", "forward_email", "send_draft", "schedule_draft", "respond_to_invite",
   "unsubscribe_sender", "delete_email", "delete_thread", "bulk_delete", "empty_folder", "delete_folder", "set_rule", "set_autoresponder",
+  // A vip tag changes the autoresponder text for that sender.
+  "set_contact",
 ]);
 
 // Tools that only act for some arguments: apply_rules runs its rules when dryRun is false (it previews otherwise), and the
@@ -222,7 +224,7 @@ export function annotateHighRisk(value: unknown, taint: MailTaint, depth = 0): b
   }
   const node = value as Record<string, unknown>;
   if (node.risk === undefined) {
-    const text = [node.text, node.preview, node.snippet, node.sentence, node.body, node.subject].filter((part): part is string => typeof part === "string").join("\n");
+    const text = [node.text, node.preview, node.snippet, node.sentence, node.body, node.attachmentText, node.subject].filter((part): part is string => typeof part === "string").join("\n");
     const id = ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
     if (id && text) {
       const assessment = assessMail({ subject: typeof node.subject === "string" ? node.subject : undefined, text });
