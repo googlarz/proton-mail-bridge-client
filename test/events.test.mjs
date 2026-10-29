@@ -89,7 +89,7 @@ test("the log is bounded by count and by size: it rotates, keeps the newest even
   await withDir(async (dir) => {
     const log = new EventLogService(logConfig(dir));
     for (let batch = 0; batch < 9; batch += 1) {
-      await log.append(Array.from({ length: 300 }, (_, i) => mailEvent(batch * 300 + i)));
+      await log.append(Array.from({ length: 300 }, (_, i) => ({ type: "autoresponder.replied", emailId: `INBOX::${batch * 300 + i}` })));
     }
     const all = await log.readAll();
     assert.ok(all.length < 2700 && all.length >= 1000, `kept ${all.length}`);
@@ -230,7 +230,7 @@ test("get_events: types and groups filter, bad arguments are refused, and a curs
     assert.equal((await call("get_events", { account: "nobody@example.com" })).error, true);
 
     const early = (await call("get_events", { limit: 1 })).json.nextCursor;
-    for (let batch = 0; batch < 9; batch += 1) await log.append(Array.from({ length: 300 }, (_, i) => mailEvent(batch * 300 + i)));
+    for (let batch = 0; batch < 9; batch += 1) await log.append(Array.from({ length: 300 }, (_, i) => ({ type: "autoresponder.replied", emailId: `INBOX::${batch * 300 + i}` })));
     const late = await call("get_events", { sinceCursor: early, limit: 5 });
     assert.equal(late.json.missed, true, "events between the cursor and the oldest kept are gone");
     assert.equal(late.json.events.length, 5);
@@ -239,6 +239,18 @@ test("get_events: types and groups filter, bad arguments are refused, and a curs
     const caughtUp = await call("get_events", { sinceCursor: current.json.nextCursor });
     assert.deepEqual(caughtUp.json.events, []);
     assert.notEqual(caughtUp.json.missed, true);
+  });
+});
+
+test("get_events: an important event kept through rotation does not hide that the events after the cursor were dropped", async () => {
+  await withServer({}, async ({ call, bundles }) => {
+    const log = bundles[0].eventLog;
+    await log.append([{ type: "send.failed", refId: "send.1", detail: "refused" }]);
+    const cursor = (await call("get_events", {})).json.nextCursor;
+    for (let batch = 0; batch < 9; batch += 1) await log.append(Array.from({ length: 300 }, (_, i) => ({ type: "autoresponder.replied", emailId: `INBOX::${batch * 300 + i}` })));
+    const page = await call("get_events", { sinceCursor: cursor, limit: 3 });
+    assert.equal(page.json.missed, true);
+    assert.ok(page.json.events.every((event) => event.type !== "send.failed"), "already seen, not returned again");
   });
 });
 

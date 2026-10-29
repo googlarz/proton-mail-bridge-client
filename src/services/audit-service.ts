@@ -5,12 +5,13 @@ import type { AuditEntry, ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { logger } from "../utils/logger.js";
 
 const MAX_AUDIT_BYTES = 5 * 1024 * 1024;
 const MAX_AUDIT_LINES = 10000;
 const GENESIS_HASH = "0".repeat(64);
 
-export type AuditBreakReason = "edited" | "deleted" | "reordered";
+export type AuditBreakReason = "edited" | "deleted" | "reordered" | "head-unreadable";
 
 export interface AuditVerification {
   ok: boolean;
@@ -80,6 +81,7 @@ export class AuditService {
   private _rotateLock: Promise<void> = Promise.resolve();
   private permissionsChecked = false;
   private identityChecked = false;
+  private headWarned = false;
   // The head this process last wrote, valid while audit.log is still the same file at the same size: then no
   // other process appended in between and the file need not be re-read.
   private cachedHead?: { ino: number; size: number; head: ChainHead };
@@ -139,7 +141,7 @@ export class AuditService {
         // If audit.log lost its newest entries (or all of them), carry on from the head audit.head recorded, so
         // the gap stays visible to verify instead of a fresh chain hiding it.
         const recorded = await this.readRecordedHead();
-        const head = recorded && recorded !== "invalid" && (!fileHead || recorded.seq > fileHead.seq) ? recorded : fileHead;
+        const head = recorded && recorded !== "invalid" && recorded !== "unreadable" && (!fileHead || recorded.seq > fileHead.seq) ? recorded : fileHead;
         const needsNewline = !(await this.endsWithNewline());
         const chained: AuditEntry = head
           ? { ...persistedEntry, seq: head.seq + 1, prevHash: head.hash }
@@ -156,7 +158,15 @@ export class AuditService {
         // Written after the append: a crash between the two leaves audit.head one entry behind, which verify accepts.
         // Like the log itself this only raises the bar: someone who can write both files can forge both. The real
         // defense is a head hash (verify_audit_log returns it) saved somewhere they cannot reach.
-        await writeFileAtomic(this.headPath, `${JSON.stringify(newHead)}\n`);
+        try {
+          await writeFileAtomic(this.headPath, `${JSON.stringify(newHead)}\n`);
+        } catch (error) {
+          // The entry is already in the log; an audit.head that cannot be replaced must not stop auditing. verify reports it.
+          if (!this.headWarned) {
+            this.headWarned = true;
+            logger.warn("Could not update audit.head; entries are still appended to the audit log", "AuditService", error);
+          }
+        }
       }),
     );
   }
@@ -236,10 +246,13 @@ export class AuditService {
       }
       prev = entry as AuditEntry & { seq: number; hash: string };
       checked++;
-      if (recorded && recorded !== "invalid" && seq === recorded.seq) hashAtRecordedSeq = entry.hash;
+      if (recorded && recorded !== "invalid" && recorded !== "unreadable" && seq === recorded.seq) hashAtRecordedSeq = entry.hash;
     }
 
     // audit.head is only a claim once it exists; without it nothing is checked against the head.
+    if (recorded === "unreadable") {
+      return broken(prev?.seq ?? 0, "head-unreadable", "audit.head cannot be read (permissions, or something that is not a file in its place), so the chain head cannot be confirmed");
+    }
     if (recorded === "invalid") {
       return broken(prev?.seq ?? 0, "edited", "audit.head exists but cannot be read, so the chain head cannot be confirmed");
     }
@@ -268,14 +281,15 @@ export class AuditService {
     };
   }
 
-  // The head audit.head holds, undefined when there is none yet (nothing is claimed then), "invalid" when it is unreadable.
-  private async readRecordedHead(): Promise<ChainHead | "invalid" | undefined> {
+  // The head audit.head holds, undefined when there is none yet (nothing is claimed then), "invalid" when its content is damaged, "unreadable" when the file cannot be read at all.
+  private async readRecordedHead(): Promise<ChainHead | "invalid" | "unreadable" | undefined> {
     let raw: string;
     try {
       raw = await readFile(this.headPath, "utf8");
     } catch (error) {
       if (isEnoent(error)) return undefined;
-      throw error;
+      // No permission, a directory in its place, an I/O error: the head exists but says nothing, like a damaged one.
+      return "unreadable";
     }
     try {
       const parsed = JSON.parse(raw) as Partial<ChainHead> | null;

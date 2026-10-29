@@ -27,7 +27,7 @@ export interface OfficeTextResult {
 
 export class OfficeTextError extends Error {
   constructor(
-    readonly reason: "invalid" | "too-large" | "unsupported" | "empty" | "timeout",
+    readonly reason: "invalid" | "too-large" | "unsupported" | "empty" | "timeout" | "busy",
     message: string,
   ) {
     super(message);
@@ -57,21 +57,20 @@ function assertInputSize(content: Buffer): void {
   }
 }
 
-/**
- * The same extraction in a worker thread, so a heavy file cannot stall the server's event loop, with a hard time limit
- * (the worker is terminated). The parse itself is extractOfficeText; the worker runs it inside office-text-worker.js.
- */
-export async function extractOfficeTextAsync(
-  content: Buffer,
-  kind: OfficeKind,
-  options: { maxChars?: number; timeoutMs?: number } = {},
-): Promise<OfficeTextResult> {
-  assertInputSize(content);
-  const timeoutMs = options.timeoutMs ?? OFFICE_EXTRACTION_TIMEOUT_MS;
+// Each worker can expand a document to tens of MB, so a burst of attachments must not mean a burst of threads: at most
+// two run at once, the rest wait in order, and a long queue is refused instead of growing without bound.
+const MAX_WORKERS = 2;
+const MAX_QUEUED = 16;
+const WORKER_LIMITS = { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32 };
+let running = 0;
+const waiting: Array<() => void> = [];
+
+function runInWorker(content: Buffer, kind: OfficeKind, maxChars: number | undefined, timeoutMs: number): Promise<OfficeTextResult> {
   return new Promise<OfficeTextResult>((resolve, reject) => {
     // The worker gets a copy: the caller keeps its buffer.
     const worker = new Worker(new URL("./office-text-worker.js", import.meta.url), {
-      workerData: { content: new Uint8Array(content), kind, maxChars: options.maxChars },
+      workerData: { content: new Uint8Array(content), kind, maxChars },
+      resourceLimits: WORKER_LIMITS,
     });
     let settled = false;
     const finish = (action: () => void) => {
@@ -92,6 +91,34 @@ export async function extractOfficeTextAsync(
     worker.once("error", () => finish(() => reject(new OfficeTextError("invalid", "The document could not be read; the file looks damaged."))));
     worker.once("exit", (code) => finish(() => reject(new OfficeTextError("invalid", `The document reader stopped unexpectedly (exit code ${code}).`))));
   });
+}
+
+/**
+ * The same extraction in a worker thread, so a heavy file cannot stall the server's event loop, with a hard time limit
+ * (the worker is terminated). The parse itself is extractOfficeText; the worker runs it inside office-text-worker.js.
+ * The limit counts from the start of the job, not from the wait for a free worker.
+ */
+export async function extractOfficeTextAsync(
+  content: Buffer,
+  kind: OfficeKind,
+  options: { maxChars?: number; timeoutMs?: number } = {},
+): Promise<OfficeTextResult> {
+  assertInputSize(content);
+  const timeoutMs = options.timeoutMs ?? OFFICE_EXTRACTION_TIMEOUT_MS;
+  if (running >= MAX_WORKERS) {
+    if (waiting.length >= MAX_QUEUED) throw new OfficeTextError("busy", "Too many documents are being read at the moment; try again in a few seconds.");
+    // A finishing job hands its slot straight to the next one, so `running` stays at the limit.
+    await new Promise<void>((resolve) => waiting.push(resolve));
+  } else {
+    running++;
+  }
+  try {
+    return await runInWorker(content, kind, options.maxChars, timeoutMs);
+  } finally {
+    const next = waiting.shift();
+    if (next) next();
+    else running--;
+  }
 }
 
 export function extractOfficeText(content: Buffer, kind: OfficeKind, options: { maxChars?: number } = {}): OfficeTextResult {
