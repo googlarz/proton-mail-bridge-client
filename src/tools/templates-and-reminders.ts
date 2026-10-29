@@ -7,8 +7,33 @@ import { withAudit } from "./audit.js";
 import { ensureMailboxWriteAllowed, ensureDestructiveConfirmed, ensureEmailActionAllowed } from "../utils/runtime-policy.js";
 import type { ToolContext } from "./context.js";
 import type { ToolResult } from "./results.js";
+import type { AutoresponderPatch } from "../services/autoresponder-service.js";
+import { assertApprovedContentUnchanged, autoresponderApprovalDigest } from "../utils/approval.js";
 
 // Templates, the autoresponder, reply reminders and snoozing: small local stores that belong to one account.
+
+/** The change set_autoresponder makes to the stored reply; the question to the person is worked out from the same one. */
+export function autoresponderPatch(args: Record<string, unknown>): AutoresponderPatch {
+  return {
+    enabled: optionalBoolean(args.enabled),
+    subject: optionalString(args, "subject"),
+    body: optionalString(args, "body"),
+    subjects: args.subjects,
+    bodies: args.bodies,
+    returnDate: optionalString(args, "returnDate"),
+    backupContact: optionalString(args, "backupContact"),
+    startsAt: optionalString(args, "startsAt"),
+    endsAt: optionalString(args, "endsAt"),
+    replyEveryDays: optionalInteger(args.replyEveryDays, 1, 90),
+    dailyLimit: optionalInteger(args.dailyLimit, 1, 200),
+    mode: optionalString(args, "mode") as "send" | "draft" | undefined,
+    timezone: optionalString(args, "timezone"),
+    outsideHours: args.outsideHours === null ? null : (args.outsideHours as { days: number[]; from: string; to: string } | undefined),
+    skipIfAnswered: optionalBoolean(args.skipIfAnswered),
+    rules: args.rules,
+    outgoingNote: optionalString(args, "outgoingNote"),
+  };
+}
 
 export async function handleTemplateAndReminderTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { config, accountManager, primaryBundle, auditService, snoozeService, templateService, resolveAccountArg, selectedBundles, presentReminder, evaluateReminders, resolveAccountForEmailId, resolveAccountForSnoozeId, responseSlug } = ctx;
@@ -78,26 +103,9 @@ export async function handleTemplateAndReminderTool(name: string, args: Record<s
           ensureDestructiveConfirmed(config.runtime, normalizeBoolean(args.confirmed, false), `Switch on the automatic reply of ${target.account.address}: it will send mail without asking each time`);
         }
       }
+      // The person was asked about the reply this makes of the stored one: refused if it makes another one now.
       const rule = await withAudit(target.auditService, name, args, async () =>
-        target.autoresponderService.set({
-          enabled,
-          subject: optionalString(args, "subject"),
-          body: optionalString(args, "body"),
-          subjects: args.subjects,
-          bodies: args.bodies,
-          returnDate: optionalString(args, "returnDate"),
-          backupContact: optionalString(args, "backupContact"),
-          startsAt: optionalString(args, "startsAt"),
-          endsAt: optionalString(args, "endsAt"),
-          replyEveryDays: optionalInteger(args.replyEveryDays, 1, 90),
-          dailyLimit: optionalInteger(args.dailyLimit, 1, 200),
-          mode: optionalString(args, "mode") as "send" | "draft" | undefined,
-          timezone: optionalString(args, "timezone"),
-          outsideHours: args.outsideHours === null ? null : (args.outsideHours as { days: number[]; from: string; to: string } | undefined),
-          skipIfAnswered: optionalBoolean(args.skipIfAnswered),
-          rules: args.rules,
-          outgoingNote: optionalString(args, "outgoingNote"),
-        }),
+        target.autoresponderService.set(autoresponderPatch(args), Date.now(), (next) => assertApprovedContentUnchanged(args, "autoresponder", autoresponderApprovalDigest(next), name)),
       );
       const sync = target.backgroundSyncService.getStatus();
       const warnings: string[] = [];

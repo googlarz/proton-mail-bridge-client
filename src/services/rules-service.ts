@@ -414,6 +414,18 @@ export interface RulePatch {
   source?: string;
 }
 
+/** What a set_rule patch makes of the stored rule (the rule it changes, if any), before validation: what the person is asked about. */
+export interface EffectiveRule {
+  name?: string;
+  enabled: boolean;
+  when: unknown;
+  actions: unknown;
+}
+
+export function effectiveRule(patch: RulePatch, existing?: MailRule): EffectiveRule {
+  return { name: (patch.name ?? existing?.name)?.trim().slice(0, 100), enabled: patch.enabled ?? existing?.enabled ?? true, when: patch.when ?? existing?.when, actions: patch.actions ?? existing?.actions };
+}
+
 export class RulesService {
   private readonly storePath: string;
 
@@ -430,10 +442,11 @@ export class RulesService {
   }
 
   /** Create a rule, or change the one with `id`. Switching one on (from off) restarts "only mail after this moment". */
-  async set(patch: RulePatch, now = Date.now()): Promise<MailRule> {
+  async set(patch: RulePatch, now = Date.now(), verify?: (effective: EffectiveRule) => void): Promise<MailRule> {
     return this.withLock(async () => {
       const state = await this.loadUnlocked();
       const existing = patch.id ? state.rules.find((rule) => rule.id === patch.id) : undefined;
+      verify?.(effectiveRule(patch, existing));
       if (patch.id && !existing) throw new InvalidArgumentError(`No rule with id ${patch.id}.`);
       if (!existing && state.rules.length >= MAX_RULES) throw new InvalidArgumentError(`At most ${MAX_RULES} rules.`);
       const when = patch.when !== undefined ? validateWhen(patch.when) : existing?.when;

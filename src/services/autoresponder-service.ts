@@ -525,6 +525,96 @@ export interface AutoresponderPatch {
   rules?: unknown;
 }
 
+/** What the rule becomes when `patch` is applied to `before`. Pure: nothing is stored. */
+function mergePatch(before: AutoresponderRule | undefined, patch: AutoresponderPatch, now: number): AutoresponderRule {
+  const next: AutoresponderRule = {
+    enabled: before?.enabled ?? false,
+    subject: before?.subject ?? DEFAULT_SUBJECT,
+    body: before?.body ?? "",
+    subjects: before?.subjects,
+    bodies: before?.bodies,
+    returnDate: before?.returnDate,
+    backupContact: before?.backupContact,
+    startsAt: before?.startsAt,
+    endsAt: before?.endsAt,
+    replyEveryDays: before?.replyEveryDays ?? 7,
+    outgoingNote: before?.outgoingNote,
+    updatedAt: new Date(now).toISOString(),
+    activatedAt: before?.activatedAt,
+    mode: before?.mode,
+    timezone: before?.timezone,
+    outsideHours: before?.outsideHours,
+    dailyLimit: before?.dailyLimit,
+    skipIfAnswered: before?.skipIfAnswered,
+    rules: before?.rules,
+  };
+  if (patch.enabled !== undefined) next.enabled = patch.enabled;
+  if (patch.subject !== undefined) {
+    if (patch.subject.length > 200) throw new InvalidArgumentError("subject is limited to 200 characters.");
+    next.subject = patch.subject.trim() || DEFAULT_SUBJECT;
+  }
+  if (patch.body !== undefined) {
+    if (patch.body.length > 4000) throw new InvalidArgumentError("body is limited to 4000 characters.");
+    next.body = patch.body.trim();
+  }
+  if (patch.subjects !== undefined) next.subjects = validateLanguageTexts(patch.subjects, "subjects", 200);
+  if (patch.bodies !== undefined) next.bodies = validateLanguageTexts(patch.bodies, "bodies", 4000);
+  if (patch.returnDate !== undefined) {
+    next.returnDate = validateLine(patch.returnDate, "returnDate", 100);
+    const day = next.returnDate && PLAIN_DATE.test(next.returnDate) ? Date.parse(`${next.returnDate}T00:00:00Z`) : undefined;
+    if (day !== undefined && (!Number.isFinite(day) || new Date(day).toISOString().slice(0, 10) !== next.returnDate)) {
+      throw new InvalidArgumentError(`returnDate "${next.returnDate}" is not a real date.`);
+    }
+  }
+  if (patch.backupContact !== undefined) next.backupContact = validateLine(patch.backupContact, "backupContact", 200);
+  if (patch.startsAt !== undefined) next.startsAt = parseDate(patch.startsAt, "startsAt");
+  if (patch.endsAt !== undefined) next.endsAt = parseDate(patch.endsAt, "endsAt");
+  if (patch.replyEveryDays !== undefined) {
+    if (!Number.isInteger(patch.replyEveryDays) || patch.replyEveryDays < 1 || patch.replyEveryDays > 90) {
+      throw new InvalidArgumentError("replyEveryDays must be a whole number from 1 to 90.");
+    }
+    next.replyEveryDays = patch.replyEveryDays;
+  }
+  if (patch.outgoingNote !== undefined) {
+    if (patch.outgoingNote.length > 1000) throw new InvalidArgumentError("outgoingNote is limited to 1000 characters.");
+    next.outgoingNote = patch.outgoingNote.trim() || undefined;
+  }
+  if (patch.mode !== undefined) {
+    if (patch.mode !== "send" && patch.mode !== "draft") throw new InvalidArgumentError('mode must be "send" or "draft".');
+    next.mode = patch.mode;
+  }
+  if (patch.timezone !== undefined) {
+    if (patch.timezone === "") next.timezone = undefined;
+    else {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: patch.timezone });
+      } catch {
+        throw new InvalidArgumentError(`timezone must be an IANA name such as Europe/Warsaw (got "${patch.timezone}").`);
+      }
+      next.timezone = patch.timezone;
+    }
+  }
+  if (patch.outsideHours !== undefined) next.outsideHours = validateOutsideHours(patch.outsideHours);
+  if (patch.dailyLimit !== undefined) {
+    if (!Number.isInteger(patch.dailyLimit) || patch.dailyLimit < 1 || patch.dailyLimit > MAX_DAILY_LIMIT) {
+      throw new InvalidArgumentError(`dailyLimit must be a whole number from 1 to ${MAX_DAILY_LIMIT}.`);
+    }
+    next.dailyLimit = patch.dailyLimit;
+  }
+  if (patch.skipIfAnswered !== undefined) next.skipIfAnswered = patch.skipIfAnswered;
+  if (patch.rules !== undefined) next.rules = validateRules(patch.rules);
+  if (next.rules && next.rules.length === 0) next.rules = undefined;
+  if (next.startsAt && next.endsAt && Date.parse(next.endsAt) <= Date.parse(next.startsAt)) {
+    throw new InvalidArgumentError("endsAt must be after startsAt.");
+  }
+  const hasText = Boolean(next.body) || Boolean(next.bodies) || Boolean(next.outgoingNote) || Boolean(next.rules?.some((rule) => rule.action !== "skip" && rule.body));
+  if (next.enabled && !hasText) {
+    throw new InvalidArgumentError("Give a body (the reply), a rule with a body, or an outgoingNote before switching the autoresponder on.");
+  }
+  if (next.enabled && !before?.enabled) next.activatedAt = new Date(now).toISOString();
+  return next;
+}
+
 export class AutoresponderService {
   private readonly storePath: string;
 
@@ -598,96 +688,18 @@ export class AutoresponderService {
     };
   }
 
+  /** The rule as it would be after `set(patch)`, without storing anything (what a question to the person describes). */
+  async previewSet(patch: AutoresponderPatch, now = Date.now()): Promise<AutoresponderRule> {
+    return mergePatch((await this.load()).rule, patch, now);
+  }
+
   /** Create or change the rule. Switching it on (from off) restarts "mail from before this moment is not answered". */
-  async set(patch: AutoresponderPatch, now = Date.now()): Promise<AutoresponderRule> {
+  async set(patch: AutoresponderPatch, now = Date.now(), verify?: (next: AutoresponderRule) => void): Promise<AutoresponderRule> {
     return this.withLock(async () => {
       const state = await this.loadUnlocked();
       const before = state.rule;
-      const next: AutoresponderRule = {
-        enabled: before?.enabled ?? false,
-        subject: before?.subject ?? DEFAULT_SUBJECT,
-        body: before?.body ?? "",
-        subjects: before?.subjects,
-        bodies: before?.bodies,
-        returnDate: before?.returnDate,
-        backupContact: before?.backupContact,
-        startsAt: before?.startsAt,
-        endsAt: before?.endsAt,
-        replyEveryDays: before?.replyEveryDays ?? 7,
-        outgoingNote: before?.outgoingNote,
-        updatedAt: new Date(now).toISOString(),
-        activatedAt: before?.activatedAt,
-        mode: before?.mode,
-        timezone: before?.timezone,
-        outsideHours: before?.outsideHours,
-        dailyLimit: before?.dailyLimit,
-        skipIfAnswered: before?.skipIfAnswered,
-        rules: before?.rules,
-      };
-      if (patch.enabled !== undefined) next.enabled = patch.enabled;
-      if (patch.subject !== undefined) {
-        if (patch.subject.length > 200) throw new InvalidArgumentError("subject is limited to 200 characters.");
-        next.subject = patch.subject.trim() || DEFAULT_SUBJECT;
-      }
-      if (patch.body !== undefined) {
-        if (patch.body.length > 4000) throw new InvalidArgumentError("body is limited to 4000 characters.");
-        next.body = patch.body.trim();
-      }
-      if (patch.subjects !== undefined) next.subjects = validateLanguageTexts(patch.subjects, "subjects", 200);
-      if (patch.bodies !== undefined) next.bodies = validateLanguageTexts(patch.bodies, "bodies", 4000);
-      if (patch.returnDate !== undefined) {
-        next.returnDate = validateLine(patch.returnDate, "returnDate", 100);
-        const day = next.returnDate && PLAIN_DATE.test(next.returnDate) ? Date.parse(`${next.returnDate}T00:00:00Z`) : undefined;
-        if (day !== undefined && (!Number.isFinite(day) || new Date(day).toISOString().slice(0, 10) !== next.returnDate)) {
-          throw new InvalidArgumentError(`returnDate "${next.returnDate}" is not a real date.`);
-        }
-      }
-      if (patch.backupContact !== undefined) next.backupContact = validateLine(patch.backupContact, "backupContact", 200);
-      if (patch.startsAt !== undefined) next.startsAt = parseDate(patch.startsAt, "startsAt");
-      if (patch.endsAt !== undefined) next.endsAt = parseDate(patch.endsAt, "endsAt");
-      if (patch.replyEveryDays !== undefined) {
-        if (!Number.isInteger(patch.replyEveryDays) || patch.replyEveryDays < 1 || patch.replyEveryDays > 90) {
-          throw new InvalidArgumentError("replyEveryDays must be a whole number from 1 to 90.");
-        }
-        next.replyEveryDays = patch.replyEveryDays;
-      }
-      if (patch.outgoingNote !== undefined) {
-        if (patch.outgoingNote.length > 1000) throw new InvalidArgumentError("outgoingNote is limited to 1000 characters.");
-        next.outgoingNote = patch.outgoingNote.trim() || undefined;
-      }
-      if (patch.mode !== undefined) {
-        if (patch.mode !== "send" && patch.mode !== "draft") throw new InvalidArgumentError('mode must be "send" or "draft".');
-        next.mode = patch.mode;
-      }
-      if (patch.timezone !== undefined) {
-        if (patch.timezone === "") next.timezone = undefined;
-        else {
-          try {
-            new Intl.DateTimeFormat("en-US", { timeZone: patch.timezone });
-          } catch {
-            throw new InvalidArgumentError(`timezone must be an IANA name such as Europe/Warsaw (got "${patch.timezone}").`);
-          }
-          next.timezone = patch.timezone;
-        }
-      }
-      if (patch.outsideHours !== undefined) next.outsideHours = validateOutsideHours(patch.outsideHours);
-      if (patch.dailyLimit !== undefined) {
-        if (!Number.isInteger(patch.dailyLimit) || patch.dailyLimit < 1 || patch.dailyLimit > MAX_DAILY_LIMIT) {
-          throw new InvalidArgumentError(`dailyLimit must be a whole number from 1 to ${MAX_DAILY_LIMIT}.`);
-        }
-        next.dailyLimit = patch.dailyLimit;
-      }
-      if (patch.skipIfAnswered !== undefined) next.skipIfAnswered = patch.skipIfAnswered;
-      if (patch.rules !== undefined) next.rules = validateRules(patch.rules);
-      if (next.rules && next.rules.length === 0) next.rules = undefined;
-      if (next.startsAt && next.endsAt && Date.parse(next.endsAt) <= Date.parse(next.startsAt)) {
-        throw new InvalidArgumentError("endsAt must be after startsAt.");
-      }
-      const hasText = Boolean(next.body) || Boolean(next.bodies) || Boolean(next.outgoingNote) || Boolean(next.rules?.some((rule) => rule.action !== "skip" && rule.body));
-      if (next.enabled && !hasText) {
-        throw new InvalidArgumentError("Give a body (the reply), a rule with a body, or an outgoingNote before switching the autoresponder on.");
-      }
-      if (next.enabled && !before?.enabled) next.activatedAt = new Date(now).toISOString();
+      const next = mergePatch(before, patch, now);
+      verify?.(next);
       state.rule = next;
       await this.save(state);
       this.cache = { rule: next, loadedAt: Date.now() };

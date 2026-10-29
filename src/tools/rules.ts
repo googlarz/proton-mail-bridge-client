@@ -1,8 +1,10 @@
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
-import { planChanges, type MailRule } from "../services/rules-service.js";
+import type { AccountBundle } from "../services/account-manager.js";
+import { planChanges, type MailRule, type PlannedChange, type RulePatch, type RuleProposal } from "../services/rules-service.js";
 import { exportSieve } from "../services/sieve-export.js";
 import type { EmailSummary } from "../types/index.js";
 import { ensureDestructiveConfirmed, ensureMailboxWriteAllowed, ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
+import { assertApprovedContentUnchanged, ruleApprovalDigest } from "../utils/approval.js";
 import { normalizeBoolean, optionalBoolean, optionalInteger } from "../utils/helpers.js";
 import { optionalString, requireString } from "./args.js";
 import { withAudit } from "./audit.js";
@@ -11,6 +13,31 @@ import { createTextResult, type ToolResult } from "./results.js";
 import { assertPlanAllowed, describe, executePlan, requiredActions } from "./rules-runner.js";
 
 // Mailbox rules: scan for proposals, keep rules, and apply them to mail that is already there (after a preview).
+
+/** The patch set_rule stores for a call; the question to the person is built from the same one. */
+export function rulePatch(args: Record<string, unknown>, proposal?: RuleProposal): RulePatch {
+  return {
+    id: optionalString(args, "id"),
+    name: optionalString(args, "name") ?? proposal?.rule.name,
+    enabled: optionalBoolean(args.enabled),
+    when: args.when ?? proposal?.rule.when,
+    actions: args.actions ?? proposal?.rule.actions,
+    source: optionalString(args, "proposalId"),
+  };
+}
+
+/** What apply_rules would do to the mail in the local index, per rule and message; it changes nothing. */
+export async function planApplyRules(target: AccountBundle, ruleId: string | undefined): Promise<{ rules: MailRule[]; plan: PlannedChange[] }> {
+  const all = await target.rulesService.allRules();
+  if (ruleId && !all.some((rule) => rule.id === ruleId)) throw new McpError(ErrorCode.InvalidParams, `No rule with id ${ruleId}.`);
+  // A named rule runs even if it is switched off (to try it); otherwise the enabled ones.
+  const rules = ruleId ? all.filter((rule) => rule.id === ruleId).map((rule) => ({ ...rule, enabled: true })) : all.filter((rule) => rule.enabled);
+  if (rules.length === 0) return { rules, plan: [] };
+  const folders = [...new Set(rules.map((rule) => rule.when.folder ?? "INBOX"))];
+  const emails: EmailSummary[] = [];
+  for (const folder of folders) emails.push(...(await target.localIndexService.search({ folder, limit: 3000 })).emails);
+  return { rules, plan: planChanges(rules, emails, Date.now(), { ownAddresses: target.ownAddresses }).filter((change) => describe(change).length > 0) };
+}
 
 export async function handleRuleTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { config, resolveAccountArg, primaryBundle } = ctx;
@@ -58,14 +85,7 @@ export async function handleRuleTool(name: string, args: Record<string, unknown>
       const proposalId = optionalString(args, "proposalId");
       const proposal = proposalId ? await target.rulesService.findProposal(proposalId) : undefined;
       if (proposalId && !proposal) throw new McpError(ErrorCode.InvalidParams, `No pending proposal ${proposalId}. Run suggest_rules to see the current ones.`);
-      const patch = {
-        id: optionalString(args, "id"),
-        name: optionalString(args, "name") ?? proposal?.rule.name,
-        enabled: optionalBoolean(args.enabled),
-        when: args.when ?? proposal?.rule.when,
-        actions: args.actions ?? proposal?.rule.actions,
-        source: proposalId,
-      };
+      const patch = rulePatch(args, proposal);
       // Validate first (a bad rule fails with its own message), actions apply the policy to what it would do.
       const existing = patch.id ? (await target.rulesService.allRules()).find((rule) => rule.id === patch.id) : undefined;
       const effectiveThen = (patch.actions ?? existing?.actions) as MailRule["actions"] | undefined;
@@ -81,7 +101,9 @@ export async function handleRuleTool(name: string, args: Record<string, unknown>
       } else if (patch.enabled !== false) {
         ensureMailboxWriteAllowed(runtime);
       }
-      const rule = await withAudit(target.auditService, name, args, async () => target.rulesService.set(patch));
+      // The person was asked about this rule (or proposal): it is refused if what is stored now makes another one.
+      const rule = await withAudit(target.auditService, name, args, async () =>
+        target.rulesService.set(patch, Date.now(), (effective) => assertApprovedContentUnchanged(args, "rule", ruleApprovalDigest(effective), name)));
       const warnings: string[] = [];
       if (rule.enabled && !target.backgroundSyncService.getStatus().enabled) warnings.push("Background sync is off (PROTONMAIL_AUTO_SYNC), so the rule only acts on mail when you run apply_rules.");
       if (rule.enabled && (rule.actions.trash || rule.actions.delete)) warnings.push("This rule trashes or deletes, so it never runs by itself: use apply_rules (it shows a preview first).");
@@ -118,15 +140,8 @@ export async function handleRuleTool(name: string, args: Record<string, unknown>
       const dryRun = normalizeBoolean(args.dryRun, true);
       const limit = optionalInteger(args.limit, 1, 1000) ?? 200;
       const ruleId = optionalString(args, "ruleId");
-      const all = await target.rulesService.allRules();
-      if (ruleId && !all.some((rule) => rule.id === ruleId)) throw new McpError(ErrorCode.InvalidParams, `No rule with id ${ruleId}.`);
-      // A named rule runs even if it is switched off (to try it); otherwise the enabled ones.
-      const rules = ruleId ? all.filter((rule) => rule.id === ruleId).map((rule) => ({ ...rule, enabled: true })) : all.filter((rule) => rule.enabled);
+      const { rules, plan } = await planApplyRules(target, ruleId);
       if (rules.length === 0) return createTextResult({ account: target.account.address, dryRun, note: "There are no enabled rules." });
-      const folders = [...new Set(rules.map((rule) => rule.when.folder ?? "INBOX"))];
-      const emails: EmailSummary[] = [];
-      for (const folder of folders) emails.push(...(await target.localIndexService.search({ folder, limit: 3000 })).emails);
-      const plan = planChanges(rules, emails, Date.now(), { ownAddresses: target.ownAddresses }).filter((change) => describe(change).length > 0);
       const kinds = requiredActions(plan);
       if (!dryRun) {
         assertPlanAllowed(target, plan.slice(0, limit));
