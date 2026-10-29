@@ -361,7 +361,7 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           appendSignature: false,
       };
       const undoWindowreply = resolveUndoWindowSeconds(args);
-      await ctx.delegation.claim(args, name, sendBundleForReply, [...to, ...cc, ...extraBcc]);
+      await ctx.delegation.claim(args, name, sendBundleForReply, [...to, ...cc, ...extraBcc], readBundleReply);
       if (undoWindowreply > 0) {
         return queueUndoSend(sendBundleForReply, replyPayload, undoWindowreply, name, args, { repliedTo: prefixedIdFor(readBundleReply, detail.id), to, cc });
       }
@@ -463,7 +463,7 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           appendSignature: false,
       };
       const undoWindowreplyAll = resolveUndoWindowSeconds(args);
-      await ctx.delegation.claim(args, name, sendBundleForRa, [...toRa, ...ccRa, ...extraBccRa]);
+      await ctx.delegation.claim(args, name, sendBundleForRa, [...toRa, ...ccRa, ...extraBccRa], readBundleRa);
       if (undoWindowreplyAll > 0) {
         return queueUndoSend(sendBundleForRa, replyAllPayload, undoWindowreplyAll, name, args, { repliedTo: prefixedIdFor(readBundleRa, detailRa.id), to: toRa, cc: ccRa });
       }

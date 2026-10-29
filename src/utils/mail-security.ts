@@ -242,11 +242,19 @@ const MAX_FLAT_NODES = 1_000_000;
 const MAX_SCAN_CHARS = 2_000_000;
 const MAX_PARSE_CHARS = 32_000_000;
 const SCAN_WINDOW = 100_000;
-// Fields the server fills itself (ids, dates, counts, hashes). Skipped only while short: a long value under such a key is text.
-const MACHINE_KEYS = new Set<string>([
-  ...ID_KEYS, "uid", "uids", "date", "receivedAt", "sentAt", "internalDate", "createdAt", "updatedAt", "expiresAt",
-  "flags", "count", "total", "size", "hash", "sha256", "checksum", "account", "mimeType",
-]);
+// Fields the server fills itself (ids, dates, counts, hashes). Skipped only while short and only if the value looks like what the
+// key promises: a header-derived string (a Message-ID, a Date header, a Content-Type with parameters, a name used as an id) is text.
+const DATE_KEYS = ["date", "receivedAt", "sentAt", "internalDate", "createdAt", "updatedAt", "expiresAt"];
+const TOKEN_KEYS = [...ID_KEYS, "uid", "uids", "flags", "count", "total", "size", "hash", "sha256", "checksum", "account"];
+const TOKEN_VALUE = /^[\w.:@<>+=~%/!$*\\-]+$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+const RFC_DATE = /^(?:[A-Za-z]{3}, )?\d{1,2} [A-Za-z]{3} \d{2,4} \d{2}:\d{2}(?::\d{2})?(?: (?:[+-]\d{4}|[A-Z]{1,5}))?$/;
+const MIME_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
+const MACHINE_VALUE: Record<string, (value: string) => boolean> = {
+  ...Object.fromEntries(TOKEN_KEYS.map((key) => [key, (value: string) => TOKEN_VALUE.test(value)])),
+  ...Object.fromEntries(DATE_KEYS.map((key) => [key, (value: string) => ISO_DATE.test(value) || RFC_DATE.test(value)])),
+  mimeType: (value) => MIME_TYPE.test(value),
+};
 const MACHINE_VALUE_MAX = 128;
 const UNIDENTIFIED = "unidentified-result";
 // Notes this module put on nodes, so a `risk` key that came with the data is never mistaken for one.
@@ -287,7 +295,8 @@ function scanText(text: string, ctx: ScanContext): string | undefined {
 }
 
 const idOf = (node: Node): string | undefined => ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
-const isMachineField = (key: string | undefined, value: string): boolean => key !== undefined && MACHINE_KEYS.has(key) && value.length <= MACHINE_VALUE_MAX;
+const isMachineField = (key: string | undefined, value: string): boolean =>
+  key !== undefined && Object.hasOwn(MACHINE_VALUE, key) && value.length <= MACHINE_VALUE_MAX && MACHINE_VALUE[key](value);
 const isNote = (value: unknown): boolean => typeof value === "object" && value !== null && RISK_NOTES.has(value);
 
 function flag(target: Node | undefined, assessment: SecurityAssessment, taint: MailTaint, ctx: ScanContext, ownerId: string | undefined): void {
