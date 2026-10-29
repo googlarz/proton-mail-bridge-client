@@ -418,9 +418,40 @@ proton-mail-bridge-client verify-audit-log                     # checks the hash
 proton-mail-bridge-client clear-index
 ```
 
-`verify-audit-log` reads the audit log only. Keep the head hash it prints somewhere other than this
-machine: with no stored head, deleting the newest entries (or rewriting the whole file) cannot be
-detected. See the README, "Audit log".
+`verify-audit-log` reads the audit log only. The server keeps the newest entry's hash in `audit.head`
+next to `audit.log`, so cut-off or emptied logs fail verification; someone who can write both files
+can still forge both. Keep the head hash it prints somewhere other than this machine to catch that.
+See the README, "Audit log".
+
+### Mailbox events
+
+```bash
+proton-mail-bridge-client events                               # the newest events (new mail, snoozes, reminders, sends, rules, plans)
+proton-mail-bridge-client events --args '{"sinceCursor":"<nextCursor>","types":["mail"],"limit":50}'
+```
+
+`events` is the tool `get_events`. Pass the `nextCursor` of one call as `sinceCursor` of the next to get only
+what is new. The log holds no message bodies; events with a sender or subject are marked `untrusted`. Events
+are only recorded while a server (or background sync) runs. See the README, "Mailbox events".
+
+### Delegation grants
+
+Grants are made, listed and revoked on the command line only; there is no tool that creates or revokes one.
+A server honours them only when started with `PROTONMAIL_DELEGATION=on`.
+
+```bash
+# Let the assistant send_email and reply_to_email to these recipients, up to 5 times, for 7 days
+proton-mail-bridge-client grant-create --tools send_email,reply_to_email --recipients pat@client.example,@my-team.example --expires 7d --uses 5 --note "weekly report"
+proton-mail-bridge-client grant-list                           # active grants (add --all for used up, expired and revoked ones)
+proton-mail-bridge-client grant-revoke <id>                    # revoke at once
+proton-mail-bridge-client list-grants                          # the read-only tool form, what the assistant itself can see
+```
+
+`grant-create` requires an interactive terminal and a typed confirmation. `--expires` takes `30m`, `12h`, `7d` or a
+timestamp (at most 30 days); `--uses` is 1 to 50 (default 1); `--tools` is any of `send_email`,
+`reply_to_email`, `reply_all_email`, `forward_email`, `send_draft`, `schedule_draft`; every To, Cc and Bcc
+address of a send must match a recipient (an exact address or `@domain`). Use `--account` to choose the
+account. See the README, "Delegation grants".
 
 `clear-index` deletes the local SQLite index (it is rebuilt by the next sync); it never touches
 mail on the server.
