@@ -370,6 +370,8 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       tlsInsecureHosts: parseHostList(process.env.PROTONMAIL_TLS_INSECURE_HOSTS),
       pdfMaxMb: parseIntegerEnv("PROTONMAIL_PDF_MAX_MB", DEFAULT_PDF_MAX_MB, 1, 100),
       pdfMaxPages: parseIntegerEnv("PROTONMAIL_PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, 1, 2000),
+      ocrCommand: process.env.PROTONMAIL_OCR_COMMAND?.trim() || undefined,
+      indexAttachments: parseBooleanEnv("PROTONMAIL_INDEX_ATTACHMENTS", false),
       opDelayMs,
       sendDelaySeconds,
     },
