@@ -62,8 +62,9 @@ test("a program that ignores SIGTERM is still stopped at the timeout, and the te
   const seen = join(mkdtempSync(join(tmpdir(), "ocr-test-")), "image-path");
   const file = script(`echo "$1" > '${seen}'\ntrap '' TERM\nexec sleep 8`);
   const start = Date.now();
-  await assert.rejects(runOcr(file, Buffer.from("x"), ".png", { timeoutMs: 500 }), /longer than/);
-  assert.ok(Date.now() - start < 3000, `took ${Date.now() - start} ms`);
+  // The timeout is long enough for a loaded machine to start the stub shell and let it write `seen` before it is cut.
+  await assert.rejects(runOcr(file, Buffer.from("x"), ".png", { timeoutMs: 1500 }), /longer than/);
+  assert.ok(Date.now() - start < 5000, `took ${Date.now() - start} ms`);
   const image = readFileSync(seen, "utf8").trim();
   assert.match(image, /image\.png$/);
   assert.ok(!existsSync(dirname(image)), "the temporary directory is gone");

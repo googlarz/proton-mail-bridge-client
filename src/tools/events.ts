@@ -179,6 +179,7 @@ export class EventsNotifier {
   private detach: Array<() => void> = [];
   private timer?: NodeJS.Timeout;
   private poller?: NodeJS.Timeout;
+  // What the files looked like when the client was last told (or when it subscribed).
   private signature = "";
 
   constructor(
@@ -195,7 +196,7 @@ export class EventsNotifier {
     if (this.subscribed) return;
     this.detach = this.bundles.map((bundle) => bundle.eventLog.onAppend(() => this.schedule()));
     void this.snapshot().then((signature) => {
-      if (!this.signature) this.signature = signature;
+      if (!this.signature && !this.timer) this.signature = signature;
     });
     this.poller = setInterval(() => void this.checkOthers(), this.options.pollMs ?? 5000);
     this.poller.unref?.();
@@ -218,9 +219,13 @@ export class EventsNotifier {
 
   private async fire(): Promise<void> {
     // The timer stays set while the files are looked at, so the check for other processes does not take this batch for theirs.
-    this.signature = await this.snapshot();
+    const signature = await this.snapshot();
     this.timer = undefined;
     if (!this.subscribed) return;
+    // The poll can see an append before its own listener runs (the file is synced first), and then both ask for a
+    // notification: the second finds the files as the client was last told about them and stays quiet.
+    if (signature === this.signature) return;
+    this.signature = signature;
     try {
       await this.send(buildEventsResourceUri());
     } catch (error) {
@@ -233,7 +238,6 @@ export class EventsNotifier {
     const signature = await this.snapshot();
     if (this.timer || !this.subscribed) return;
     if (this.signature && signature !== this.signature) this.schedule();
-    this.signature = signature;
   }
 
   private async snapshot(): Promise<string> {

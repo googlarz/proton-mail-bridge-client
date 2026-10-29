@@ -158,6 +158,8 @@ test("relationship targets cannot leave the archive", () => {
 
 // ---- OCR ----------------------------------------------------------------------------------------------------
 
+const posix = process.platform === "win32" ? { skip: "needs a POSIX shell for the stub programs" } : {};
+
 function script(body) {
   const dir = mkdtempSync(join(tmpdir(), "adv-ocr-"));
   const file = join(dir, "fake ocr's \"cmd\".sh");
@@ -166,7 +168,7 @@ function script(body) {
   return file;
 }
 
-test("OCR: a path with spaces and quotes is one argv entry, never shell-parsed", async () => {
+test("OCR: a path with spaces and quotes is one argv entry, never shell-parsed", posix, async () => {
   const file = script('echo "got:$#:$2"');
   const out = await runOcr(file, Buffer.from("x"), ".png");
   assert.equal(out.text, "got:2:stdout");
@@ -182,7 +184,7 @@ test("OCR: shell metacharacters in the command are not interpreted", async () =>
   assert.ok(!readdirSync(join(marker, "..")).includes("pwned"));
 });
 
-test("OCR: output cap stops a program that prints forever", async () => {
+test("OCR: output cap stops a program that prints forever", posix, async () => {
   const file = script("yes AAAAAAAAAAAAAAAA");
   const { ms, value } = await (async () => {
     const start = Date.now();
@@ -193,14 +195,14 @@ test("OCR: output cap stops a program that prints forever", async () => {
   assert.ok(ms < 5000);
 });
 
-test("OCR: timeout stops a plain sleeper", async () => {
+test("OCR: timeout stops a plain sleeper", posix, async () => {
   const file = script("exec sleep 30");
   const start = Date.now();
   await assert.rejects(runOcr(file, Buffer.from("x"), ".png", { timeoutMs: 500 }), /longer than/);
   assert.ok(Date.now() - start < 3000);
 });
 
-test("DEFECT: timeout is not enforced against a program that ignores SIGTERM", async () => {
+test("DEFECT: timeout is not enforced against a program that ignores SIGTERM", posix, async () => {
   const file = script("trap '' TERM\nsleep 6");
   const start = Date.now();
   await runOcr(file, Buffer.from("x"), ".png", { timeoutMs: 500 }).catch(() => undefined);
@@ -208,7 +210,7 @@ test("DEFECT: timeout is not enforced against a program that ignores SIGTERM", a
   assert.ok(elapsed < 3000, `a 500 ms timeout took ${elapsed} ms`);
 });
 
-test("OCR: timeout holds when a child process keeps stdout open (macOS; held up)", async () => {
+test("OCR: timeout holds when a child process keeps stdout open (macOS; held up)", posix, async () => {
   const file = script("sleep 6 &\nwait");
   const start = Date.now();
   await runOcr(file, Buffer.from("x"), ".png", { timeoutMs: 500 }).catch(() => undefined);

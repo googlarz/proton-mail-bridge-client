@@ -114,9 +114,12 @@ test("the async extraction keeps the event loop running while a heavy file is pa
     last = now;
     ticks += 1;
   }, 5);
+  const started = Date.now();
   await assert.rejects(extractOfficeTextAsync(docx, "docx"), (error) => error.name === "OfficeTextError" && error.reason === "empty");
+  const asyncMs = Date.now() - started;
   clearInterval(timer);
-  assert.ok(ticks >= Math.floor(direct.ms / 5 / 4), `${ticks} ticks in a parse that takes ${direct.ms} ms`);
+  // Windows timers tick every ~15.6 ms whatever the interval, so the count is rated against the time the async parse took, with room for that.
+  assert.ok(ticks >= Math.floor(asyncMs / 40), `${ticks} ticks in an async parse of ${asyncMs} ms (${direct.ms} ms direct)`);
   assert.ok(longest < direct.ms / 2, `the loop stalled for ${longest} ms`);
 });
 

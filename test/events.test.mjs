@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { appendFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
@@ -13,6 +13,7 @@ import { AccountManager } from "../dist/services/account-manager.js";
 import { DeliveryQueueService } from "../dist/services/delivery-queue-service.js";
 import { EventLogService } from "../dist/services/event-log-service.js";
 import { SnoozeService } from "../dist/services/snooze-service.js";
+import { EventsNotifier } from "../dist/tools/events.js";
 import { slugifyAccountAddress } from "../dist/utils/helpers.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 import { createMessage, makeCertificate, startFakeBridge } from "./helpers/fake-bridge.mjs";
@@ -458,6 +459,61 @@ test("a subscriber is told once per batch of events; nobody who did not subscrib
     await log.append([mailEvent(6)]);
     await sleep(250);
     assert.equal(updates.length, 2, "after unsubscribing nothing more is sent");
+  });
+});
+
+test("one batch gives one notification even when the poll sees the file before the append listener runs", async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, "events.jsonl");
+    await appendFile(file, "a\n");
+    let listener;
+    const onAppend = (fn) => {
+      listener = fn;
+      return () => {};
+    };
+    const bundle = { eventLog: { filePath: file, onAppend } };
+    const sent = [];
+    // Timers are driven by hand and only the file system is real, so no ordering depends on how fast the machine is.
+    mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+    try {
+      const notifier = new EventsNotifier([bundle], async (uri) => void sent.push(uri), { debounceMs: 40, pollMs: 40 });
+      const until = async (condition) => {
+        for (let i = 0; i < 20000 && !condition(); i++) await new Promise((resolve) => setImmediate(resolve));
+        assert.ok(condition(), "the notifier did not settle");
+      };
+      notifier.subscribe();
+      await until(() => notifier.signature !== "");
+
+      // The file has grown (a slow fsync keeps the listener waiting): the poll notices it and the debounce fires.
+      await appendFile(file, "b\n");
+      mock.timers.tick(40);
+      await until(() => notifier.timer !== undefined);
+      mock.timers.tick(40);
+      await until(() => notifier.timer === undefined && sent.length === 1);
+
+      // Now the listener of that same append runs: the client has already been told.
+      listener([]);
+      mock.timers.tick(40);
+      await until(() => notifier.timer === undefined);
+      assert.equal(sent.length, 1, "the same batch is not announced twice");
+
+      await appendFile(file, "c\n");
+      listener([]);
+      mock.timers.tick(40);
+      await until(() => sent.length === 2);
+      mock.timers.tick(40);
+      await until(() => notifier.timer === undefined);
+      assert.equal(sent.length, 2, "the next batch gives the next notification, once");
+
+      await appendFile(file, "d\n");
+      mock.timers.tick(40);
+      await until(() => notifier.timer !== undefined);
+      mock.timers.tick(40);
+      await until(() => sent.length === 3);
+      notifier.unsubscribe();
+    } finally {
+      mock.timers.reset();
+    }
   });
 });
 
