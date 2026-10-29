@@ -72,7 +72,10 @@ function readStoredGrant(raw: unknown, account: string): Grant | undefined {
   if (tools.length === 0 || recipients.length === 0) return undefined;
   if (typeof maxUses !== "number" || !Number.isInteger(maxUses) || maxUses < 1 || maxUses > MAX_GRANT_USES) return undefined;
   if (typeof raw.expiresAt !== "string" || Number.isNaN(Date.parse(raw.expiresAt))) return undefined;
-  const createdAt = typeof raw.createdAt === "string" && !Number.isNaN(Date.parse(raw.createdAt)) ? raw.createdAt : new Date(0).toISOString();
+  // The creation-time cap is enforced again on read, so a hand-edited expiry cannot outlive it.
+  if (typeof raw.createdAt !== "string" || Number.isNaN(Date.parse(raw.createdAt))) return undefined;
+  const createdAt = raw.createdAt;
+  if (Date.parse(raw.expiresAt) > Date.parse(createdAt) + MAX_GRANT_DAYS * DAY_MS) return undefined;
   // A used count that cannot be read counts as used up.
   const used = raw.usedCount;
   const usedCount = typeof used === "number" && Number.isInteger(used) && used >= 0 ? Math.min(used, maxUses) : maxUses;

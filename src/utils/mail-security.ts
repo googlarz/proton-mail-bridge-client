@@ -226,68 +226,221 @@ export function isGatedAction(name: string, args: Record<string, unknown>, decla
 
 const ID_KEYS = ["id", "emailId", "primaryEmailId", "latestEmailId"] as const;
 const MAX_SCAN_DEPTH = 7;
+// A result is walked in full: every string in it is text to check, one node at a time (a list of ordinary previews is
+// many small scans, not one big one). The work is capped two ways, so padding cannot buy a stall: a total of characters
+// and a wall-clock deadline. Whatever the cap left unchecked taints the session ("oversized-unscanned") with the count in
+// the reason, rather than the result passing unchecked. Clean text costs about 8 ms per MB, adversarial text up to about
+// 0.3 s per MB per normalisation variant, so the deadline, not the character budget, is the CPU bound.
+const SCAN_BUDGET = 24_000_000;
+const SCAN_DEADLINE_MS = 1_000;
+const SCAN_CHUNK = 32_768;
+const SCAN_OVERLAP = 512;
+// How much of the end of one node and the start of the next is read together, for an instruction split between them.
+const SEAM = 250;
+const MAX_FLAT_NODES = 1_000_000;
+// Where the walk does not parse: a result that is not JSON or is too large to parse keeps a head and a tail window.
 const MAX_SCAN_CHARS = 2_000_000;
-// Past MAX_SCAN_CHARS a result is not scanned whole (padding must not buy a bypass, and must not buy a stall either): each
-// long text field gets a head and a tail window, a total budget caps the work, and whatever was not looked at makes the
-// node high risk ("oversized-unscanned"), so the session is tainted rather than the result passing unchecked.
 const MAX_PARSE_CHARS = 32_000_000;
 const SCAN_WINDOW = 100_000;
-const SCAN_BUDGET = 2_000_000;
-const UNSCANNED_REASON = "oversized-unscanned: part of this text is longer than the scan limit and was not checked for instructions to an AI.";
-const TEXT_KEYS = ["text", "preview", "snippet", "sentence", "body", "attachmentText", "subject"] as const;
+// Fields the server fills itself (ids, dates, counts, hashes). Skipped only while short: a long value under such a key is text.
+const MACHINE_KEYS = new Set<string>([
+  ...ID_KEYS, "uid", "uids", "date", "receivedAt", "sentAt", "internalDate", "createdAt", "updatedAt", "expiresAt",
+  "flags", "count", "total", "size", "hash", "sha256", "checksum", "account", "mimeType",
+]);
+const MACHINE_VALUE_MAX = 128;
+const UNIDENTIFIED = "unidentified-result";
+// Notes this module put on nodes, so a `risk` key that came with the data is never mistaken for one.
+const RISK_NOTES = new WeakSet<object>();
 
-export interface OversizeScan {
+type Node = Record<string, unknown>;
+interface ScanContext {
   budget: number;
+  deadline: number;
+  unscanned: number;
+  flatNodes: number;
+  cut: boolean;
+  firstShort?: { holder: Node | undefined; ownerId: string | undefined };
+  orphan?: SecurityAssessment;
+}
+const newContext = (deadline: number): ScanContext => ({ budget: SCAN_BUDGET, deadline, unscanned: 0, flatNodes: 0, cut: false });
+
+// Long runs of white space and invisible characters are cut to eight, so padding between two words cannot push them into
+// different chunks; the variants in matchesInstruction read a shortened run the same way as the full one.
+
+const PADDING_RUN = new RegExp(`[\\s${HIDDEN_CHARS.source.slice(1, -1)}]{9,}`, "g");
+
+/** The first instruction pattern found in the text, reading it chunk by chunk within the context's budget and deadline. */
+function scanText(text: string, ctx: ScanContext): string | undefined {
+  const rest = text.length > SCAN_CHUNK ? text.replace(PADDING_RUN, (run) => run.slice(0, 8)) : text;
+  for (let start = 0; start < rest.length; start += SCAN_CHUNK - SCAN_OVERLAP) {
+    const piece = rest.slice(start, start + SCAN_CHUNK);
+    if (piece.length > ctx.budget || performance.now() > ctx.deadline) {
+      ctx.unscanned += rest.length - start;
+      return undefined;
+    }
+    ctx.budget -= piece.length;
+    const hit = matchesInstruction(piece);
+    if (hit) return hit;
+    if (start + SCAN_CHUNK >= rest.length) break;
+  }
+  return undefined;
 }
 
-/** The text of a node's fields as far as the budget and windows allow, and whether any of it was left out. */
-function boundedText(parts: string[], scan: OversizeScan): { text: string; partial: boolean } {
-  const kept: string[] = [];
-  let partial = false;
-  for (const part of parts) {
-    if (scan.budget <= 0) {
-      partial = true;
-    } else if (part.length <= 2 * SCAN_WINDOW) {
-      kept.push(part);
-      scan.budget -= part.length;
-    } else {
-      kept.push(part.slice(0, SCAN_WINDOW), part.slice(-SCAN_WINDOW));
-      scan.budget -= 2 * SCAN_WINDOW;
-      partial = true;
+const idOf = (node: Node): string | undefined => ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
+const isMachineField = (key: string | undefined, value: string): boolean => key !== undefined && MACHINE_KEYS.has(key) && value.length <= MACHINE_VALUE_MAX;
+const isNote = (value: unknown): boolean => typeof value === "object" && value !== null && RISK_NOTES.has(value);
+
+function flag(target: Node | undefined, assessment: SecurityAssessment, taint: MailTaint, ctx: ScanContext, ownerId: string | undefined): void {
+  taint.mark(ownerId ?? UNIDENTIFIED, assessment);
+  if (!target) {
+    ctx.orphan ??= assessment;
+    return;
+  }
+  if (isNote(target.risk)) return;
+  RISK_NOTES.add(assessment);
+  target.risk = assessment;
+}
+
+const instructionNote = (reason: string): SecurityAssessment => ({ level: "high", reasons: [`The message ${reason}.`] });
+
+/** Runs a scan and remembers the first node it ran short on, so the final note lands on a node of the result. */
+function check(text: string, ctx: ScanContext, holder: Node | undefined, ownerId: string | undefined): string | undefined {
+  const before = ctx.unscanned;
+  const hit = scanText(text, ctx);
+  if (!hit && ctx.unscanned > before) ctx.firstShort ??= { holder, ownerId };
+  return hit;
+}
+
+interface Visited {
+  text: string;
+  changed: boolean;
+  flagged: boolean;
+}
+
+function visitChild(value: object, depth: number, holder: Node | undefined, ctx: ScanContext, taint: MailTaint, ownerId: string | undefined): Visited {
+  if (depth > MAX_SCAN_DEPTH) return { text: "", changed: scanDeep(value, Array.isArray(value) ? holder : (value as Node), ctx, taint, ownerId), flagged: false };
+  return Array.isArray(value) ? visitArray(value, depth, holder, ctx, taint, ownerId) : visitNode(value as Node, depth, ctx, taint, ownerId);
+}
+
+function visitNode(node: Node, depth: number, ctx: ScanContext, taint: MailTaint, outerId: string | undefined): Visited {
+  const id = idOf(node) ?? outerId;
+  const fields: string[] = [];
+  for (const [key, value] of Object.entries(node)) if (typeof value === "string" && !isMachineField(key, value)) fields.push(value);
+  const text = fields.join(" ");
+  let changed = false;
+  let flagged = false;
+  if (text) {
+    const hit = check(text, ctx, node, id);
+    if (hit) {
+      flag(node, instructionNote(hit), taint, ctx, id);
+      changed = flagged = true;
     }
   }
-  return { text: kept.join("\n"), partial };
+  for (const [key, child] of Object.entries(node)) {
+    if (child === null || typeof child !== "object" || (key === "risk" && isNote(child))) continue;
+    if (visitChild(child, depth + 1, node, ctx, taint, id).changed) changed = true;
+  }
+  return { text, changed, flagged };
 }
 
-// Walks a tool result and marks every message-like node (an id and some text: a body, a preview, an attachment's text)
-// that reads like an instruction to an AI. The session is tainted by it and the node gets a `risk` note. Only the
-// instruction patterns are used here: a list of previews would be too noisy with the weaker signals. Returns whether
-// anything was marked.
-export function annotateHighRisk(value: unknown, taint: MailTaint, depth = 0, scan?: OversizeScan): boolean {
-  if (depth > MAX_SCAN_DEPTH || value === null || typeof value !== "object") return false;
+function visitArray(items: unknown[], depth: number, holder: Node | undefined, ctx: ScanContext, taint: MailTaint, ownerId: string | undefined): Visited {
   let changed = false;
-  if (Array.isArray(value)) {
-    for (const item of value) if (annotateHighRisk(item, taint, depth + 1, scan)) changed = true;
-    return changed;
-  }
-  const node = value as Record<string, unknown>;
-  if (node.risk === undefined) {
-    const parts = TEXT_KEYS.map((key) => node[key]).filter((part): part is string => typeof part === "string");
-    const bounded = scan ? boundedText(parts, scan) : { text: parts.join("\n"), partial: false };
-    const id = ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
-    if ((id && bounded.text) || bounded.partial) {
-      const subject = typeof node.subject === "string" ? node.subject : undefined;
-      const assessed = assessMail({ subject, text: bounded.text });
-      const flagged = assessed.level === "high" ? assessed : (bounded.partial ? { level: "high" as const, reasons: [UNSCANNED_REASON] } : undefined);
-      if (flagged) {
-        node.risk = flagged;
-        taint.mark(id ?? "oversized-unscanned", flagged);
-        changed = true;
+  const strings: string[] = [];
+  let prev: Visited | undefined;
+  for (const item of items) {
+    if (typeof item === "string") {
+      strings.push(item);
+      continue;
+    }
+    if (item === null || typeof item !== "object") continue;
+    const visited = visitChild(item, depth + 1, holder, ctx, taint, ownerId);
+    if (visited.changed) changed = true;
+    if (Array.isArray(item) || !visited.text) continue;
+    // Two neighbours that each read harmlessly can carry one instruction between them.
+    if (prev && !prev.flagged && !visited.flagged) {
+      const node = item as Node;
+      const id = idOf(node) ?? ownerId;
+      const hit = check(`${prev.text.slice(-SEAM)} ${visited.text.slice(0, SEAM)}`, ctx, node, id);
+      if (hit) {
+        flag(node, instructionNote(hit), taint, ctx, id);
+        changed = visited.flagged = true;
       }
     }
+    prev = visited;
   }
-  for (const [key, child] of Object.entries(node)) if (key !== "risk" && annotateHighRisk(child, taint, depth + 1, scan)) changed = true;
-  return changed;
+  if (strings.length > 0) {
+    const hit = check(strings.join(" "), ctx, holder, ownerId);
+    if (hit) {
+      flag(holder, instructionNote(hit), taint, ctx, ownerId);
+      changed = true;
+    }
+  }
+  return { text: "", changed, flagged: false };
+}
+
+// Below the depth the recursive walk goes to, the same content is read by an explicit-stack walk (no recursion to exhaust):
+// strings in document order, joined by a space, so deep nesting hides no text and a long chain cannot overflow the stack.
+function scanDeep(root: object, target: Node | undefined, ctx: ScanContext, taint: MailTaint, ownerId: string | undefined): boolean {
+  const stack: Array<[unknown, string | undefined]> = [[root, undefined]];
+  let parts: string[] = [];
+  let length = 0;
+  let hit: string | undefined;
+  const flush = (): void => {
+    const joined = parts.join(" ");
+    hit = check(joined, ctx, target, ownerId);
+    const carry = joined.slice(-SEAM);
+    parts = carry ? [carry] : [];
+    length = carry.length;
+  };
+  while (stack.length > 0 && !hit) {
+    const [value, key] = stack.pop() as [unknown, string | undefined];
+    if (++ctx.flatNodes > MAX_FLAT_NODES) {
+      ctx.cut = true;
+      ctx.firstShort ??= { holder: target, ownerId };
+      break;
+    }
+    if (typeof value === "string") {
+      if (isMachineField(key, value)) continue;
+      parts.push(value);
+      length += value.length + 1;
+      if (length >= SCAN_CHUNK) flush();
+    } else if (Array.isArray(value)) {
+      for (let i = value.length - 1; i >= 0; i--) stack.push([value[i], key]);
+    } else if (value !== null && typeof value === "object") {
+      const entries = Object.entries(value);
+      for (let i = entries.length - 1; i >= 0; i--) if (!(entries[i][0] === "risk" && isNote(entries[i][1]))) stack.push([entries[i][1], entries[i][0]]);
+    }
+  }
+  if (!hit && parts.length > 0) flush();
+  if (!hit) return false;
+  flag(target, instructionNote(hit), taint, ctx, ownerId);
+  return true;
+}
+
+function unscannedNote(ctx: ScanContext): SecurityAssessment {
+  const reasons: string[] = [];
+  if (ctx.unscanned > 0) reasons.push(`oversized-unscanned: about ${ctx.unscanned} characters of this result were not checked for instructions to an AI (the scan limit was reached).`);
+  if (ctx.cut) reasons.push(`unscanned-depth: content nested more than ${MAX_SCAN_DEPTH} levels deep was too large to check for instructions to an AI.`);
+  return { level: "high", reasons };
+}
+
+// Walks a tool result and marks every node whose text reads like an instruction to an AI: any string value except the
+// server's own machine fields, a node's fields read together (an instruction can be split across them) and neighbouring
+// nodes read across their seam. The session is tainted by it and the node gets a `risk` note. Only the instruction
+// patterns are used here: a list of previews would be too noisy with the weaker signals.
+function annotateWith(value: unknown, taint: MailTaint, ctx: ScanContext): { changed: boolean; orphan?: SecurityAssessment } {
+  let changed = false;
+  if (value !== null && typeof value === "object") changed = visitChild(value, 0, undefined, ctx, taint, undefined).changed;
+  if (ctx.unscanned > 0 || ctx.cut) {
+    flag(ctx.firstShort?.holder, unscannedNote(ctx), taint, ctx, ctx.firstShort?.ownerId);
+    changed = true;
+  }
+  return { changed, orphan: ctx.orphan };
+}
+
+/** Marks the nodes of a result that read like an instruction to an AI. Returns whether anything was marked. */
+export function annotateHighRisk(value: unknown, taint: MailTaint): boolean {
+  return annotateWith(value, taint, newContext(performance.now() + SCAN_DEADLINE_MS)).changed;
 }
 
 /** A tool handler whose results are scanned for mail that tries to steer an AI, wherever that text came from. */
@@ -298,25 +451,27 @@ export function withRiskScan<R, T extends { content: unknown[]; structuredConten
   return async (request) => {
     const result = await handler(request);
     if (result.isError) return result;
+    const deadline = performance.now() + SCAN_DEADLINE_MS;
     let changed = false;
-    let oversized = false;
     const content = result.content.flatMap((part): unknown[] => {
       const item = part as { type?: string; text?: string };
       if (item.type !== "text" || typeof item.text !== "string" || !/^[\s]*[{[]/.test(item.text)) return [part];
-      const big = item.text.length > MAX_SCAN_CHARS;
-      if (big) oversized = true;
       try {
         if (item.text.length > MAX_PARSE_CHARS) throw new RangeError("too large to parse");
         const parsed = JSON.parse(item.text) as unknown;
-        if (!annotateHighRisk(parsed, taint, 0, big ? { budget: SCAN_BUDGET } : undefined)) return [part];
+        const scanned = annotateWith(parsed, taint, newContext(deadline));
+        if (!scanned.changed) return [part];
         changed = true;
-        return [{ ...item, text: JSON.stringify(parsed, null, item.text.includes("\n  ") ? 2 : undefined) }];
+        const rewritten = { ...item, text: JSON.stringify(parsed, null, item.text.includes("\n  ") ? 2 : undefined) };
+        return scanned.orphan ? [rewritten, { type: "text", text: JSON.stringify({ risk: scanned.orphan }) }] : [rewritten];
       } catch {
-        if (!big) return [part];
+        if (item.text.length <= MAX_SCAN_CHARS) return [part];
         // Not walked, so look at both ends and say so rather than let it pass.
-        const { text: ends } = boundedText([item.text], { budget: SCAN_BUDGET });
+        const ends = item.text.length > 2 * SCAN_WINDOW ? `${item.text.slice(0, SCAN_WINDOW)}\n${item.text.slice(-SCAN_WINDOW)}` : item.text;
         const assessment = assessMail({ text: ends });
-        const flagged = assessment.level === "high" ? assessment : { level: "high" as const, reasons: [UNSCANNED_REASON] };
+        const flagged: SecurityAssessment = assessment.level === "high"
+          ? assessment
+          : { level: "high", reasons: [`oversized-unscanned: ${Math.max(0, item.text.length - 2 * SCAN_WINDOW)} characters of this result could not be read as JSON and were not checked for instructions to an AI.`] };
         taint.mark("oversized-unscanned", flagged);
         changed = true;
         return [part, { type: "text", text: JSON.stringify({ risk: flagged }) }];
@@ -324,7 +479,7 @@ export function withRiskScan<R, T extends { content: unknown[]; structuredConten
     });
     if (!changed) return result;
     const structured = result.structuredContent;
-    if (structured && typeof structured === "object") annotateHighRisk(structured, taint, 0, oversized ? { budget: SCAN_BUDGET } : undefined);
+    if (structured && typeof structured === "object") annotateWith(structured, taint, newContext(deadline));
     return { ...result, content, ...(structured !== undefined ? { structuredContent: structured } : {}) };
   };
 }
