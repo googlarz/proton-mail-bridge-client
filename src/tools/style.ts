@@ -16,7 +16,7 @@ import type { ToolResult } from "./results.js";
 const MAX_AGE_MS = 7 * 86_400_000;
 const FETCH_BATCH = 6;
 
-async function readCached(path: string): Promise<StyleProfile | undefined> {
+export async function readCached(path: string): Promise<StyleProfile | undefined> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as StyleProfile;
     return typeof parsed.generatedAt === "string" && parsed.overall ? parsed : undefined;

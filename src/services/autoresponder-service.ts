@@ -7,6 +7,7 @@ import { withFileLock } from "../utils/file-lock.js";
 import { InvalidArgumentError } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { assessMail } from "../utils/mail-security.js";
+import { detectLanguage, greetingAndClosing, hasClosing, hasGreeting, STYLE_LANGUAGES, type StyleProfile } from "../utils/style-profile.js";
 
 // An automatic reply for one address, plus a note that address appends to what it sends. It sends mail without anyone
 // looking, so every default is the cautious one: off, only to a human sender who wrote to this address, once per
@@ -18,7 +19,9 @@ import { assessMail } from "../utils/mail-security.js";
 //  - rules, first match wins: a VIP or a domain can get another text, a draft for you to approve, or nothing;
 //  - it can prepare a DRAFT instead of sending (and does so by itself when the server may not send);
 //  - it can answer only outside working hours, in a time zone;
-//  - the text can use {senderName}, {senderFirstName}, {subject}, {startsAt}, {endsAt};
+//  - the text can use {senderName}, {senderFirstName}, {subject}, {startsAt}, {endsAt}, {returnDate}, {backupContact};
+//  - it can answer in the sender's language (en, pl, de) when a text in that language is given, dates included;
+//  - a draft opens and closes the way you do (from your style profile), so it reads as yours when you approve it;
 //  - it can tell people you have written to from people you have not;
 //  - it keeps a log, and `preview` shows what it would do to the mail already in the index without doing it.
 
@@ -43,6 +46,12 @@ export interface AutoresponderRule {
   /** Subject of the reply; {subject} is replaced by the subject of the message answered. */
   subject: string;
   body: string;
+  /** Subject and body by language code (en, pl, de), used when the message answered is in that language. */
+  subjects?: Record<string, string>;
+  bodies?: Record<string, string>;
+  /** Plain text for {returnDate} (a YYYY-MM-DD date is written out in the reply's language) and {backupContact}. */
+  returnDate?: string;
+  backupContact?: string;
   /** Only mail that arrived inside this window is answered, and the outgoing note shows only inside it. */
   startsAt?: string;
   endsAt?: string;
@@ -224,34 +233,45 @@ function firstName(display: string | undefined, address: string): string {
   return address.split("@")[0].split(/[._+-]/)[0];
 }
 
-function formatDate(iso: string | undefined, timezone?: string): string {
+const DATE_LOCALES: Record<string, string> = { en: "en-GB", pl: "pl-PL", de: "de-DE" };
+const PLAIN_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function formatDate(iso: string | undefined, timezone?: string, language?: string): string {
   if (!iso) return "";
   try {
-    return new Intl.DateTimeFormat("en-GB", { timeZone: timezone, day: "numeric", month: "long", year: "numeric" }).format(new Date(iso));
+    return new Intl.DateTimeFormat(DATE_LOCALES[language ?? ""] ?? "en-GB", { timeZone: timezone, day: "numeric", month: "long", year: "numeric" }).format(new Date(iso));
   } catch {
     return iso.slice(0, 10);
   }
 }
 
-/** Fills {subject}, {senderName}, {senderFirstName}, {senderAddress}, {startsAt}, {endsAt}; other braces stay as written. */
-export function renderText(template: string, rule: AutoresponderRule, email: EmailSummary): string {
+/**
+ * Fills {subject}, {senderName}, {senderFirstName}, {senderAddress}, {startsAt}, {endsAt}, {returnDate}, {backupContact};
+ * other braces stay as written. Values are inserted as they are, never read as a template. `language` writes the dates
+ * in that language (default English).
+ */
+export function renderText(template: string, rule: AutoresponderRule, email: EmailSummary, language?: string): string {
   const address = email.from[0]?.address ?? "";
   const display = email.from[0]?.name;
+  const returnDate = rule.returnDate ?? "";
   const values: Record<string, string> = {
     subject: email.subject.replace(/^(re|aw|odp)\s*:\s*/i, "").trim() || "(no subject)",
     senderName: (display ?? "").replace(/["<>]/g, "").trim() || address,
     senderFirstName: firstName(display, address),
     senderAddress: address,
-    startsAt: formatDate(rule.startsAt, rule.timezone),
-    endsAt: formatDate(rule.endsAt, rule.timezone),
+    startsAt: formatDate(rule.startsAt, rule.timezone, language),
+    endsAt: formatDate(rule.endsAt, rule.timezone, language),
+    // A plain date names a day, not a moment, so it is not shifted by a time zone.
+    returnDate: PLAIN_DATE.test(returnDate) ? formatDate(`${returnDate}T00:00:00Z`, "UTC", language) : returnDate,
+    backupContact: rule.backupContact ?? "",
   };
-  return template.replace(/\{(subject|senderName|senderFirstName|senderAddress|startsAt|endsAt)\}/g, (_, key: string) => values[key]);
+  return template.replace(/\{(subject|senderName|senderFirstName|senderAddress|startsAt|endsAt|returnDate|backupContact)\}/g, (_, key: string) => values[key]);
 }
 
-export function replySubject(rule: AutoresponderRule, original: string, email?: EmailSummary): string {
+export function replySubject(rule: AutoresponderRule, original: string, email?: EmailSummary, language?: string): string {
   const template = rule.subject || DEFAULT_SUBJECT;
   const stripped = original.replace(/^(re|aw|odp)\s*:\s*/i, "").trim() || "(no subject)";
-  const subject = email ? renderText(template, rule, { ...email, subject: original }) : template.replace(/\{subject\}/g, stripped);
+  const subject = email ? renderText(template, rule, { ...email, subject: original }, language) : template.replace(/\{subject\}/g, stripped);
   return subject.replace(/[\r\n]+/g, " ").slice(0, 200);
 }
 
@@ -278,6 +298,8 @@ export interface AutoresponderDeps {
   hasAnsweredSince?: (address: string, sinceIso: string) => Promise<boolean>;
   /** The contact tags of an address, for "tag:vip" in a rule's from. */
   contactTags?: (address: string) => Promise<string[]>;
+  /** Your style profile, if one was made (get_style_profile); a draft then opens and closes the way you do. */
+  styleProfile?: () => Promise<StyleProfile | undefined>;
 }
 
 export interface AutoresponderDecision {
@@ -288,6 +310,12 @@ export interface AutoresponderDecision {
   reason?: AutoresponderSkipReason;
   rule?: string;
   reply?: AutoresponderReply;
+  /** The language the message answered is in, when it could be told. */
+  language?: string;
+  /** Where the text came from: the matching rule's own text, the text for the sender's language, or the default. */
+  textFrom?: "rule" | "language" | "default";
+  /** A draft given your greeting and closing from the style profile. */
+  styled?: boolean;
 }
 
 /** Judges one message. Pure apart from the lookups in `deps`; records nothing. */
@@ -312,6 +340,8 @@ export async function decide(
   let subjectTemplate = rule.subject;
   let bodyTemplate = rule.body;
   let ruleName: string | undefined;
+  let ruleSubject = false;
+  let ruleBody = false;
   const needsKnown = rule.rules?.some((candidate) => candidate.known) === true;
   const known = needsKnown && deps.isKnownContact ? await deps.isKnownContact(sender).catch(() => false) : undefined;
   const needsTags = rule.rules?.some((candidate) => candidate.from?.some((pattern) => pattern.trim().toLowerCase().startsWith("tag:"))) === true;
@@ -322,11 +352,19 @@ export async function decide(
     if (candidate.known && (known === undefined || (candidate.known === "yes") !== known)) continue;
     action = candidate.action;
     ruleName = candidate.name || `rule ${index + 1}`;
-    if (candidate.subject !== undefined) subjectTemplate = candidate.subject;
-    if (candidate.body !== undefined) bodyTemplate = candidate.body;
+    if (candidate.subject !== undefined) [subjectTemplate, ruleSubject] = [candidate.subject, true];
+    if (candidate.body !== undefined) [bodyTemplate, ruleBody] = [candidate.body, true];
     break;
   }
   if (action === "skip") return { ...base, outcome: "skip", reason: "rule-skip", rule: ruleName };
+
+  // The sender's language picks the text where the matching rule has none of its own.
+  const language = detectLanguage(`${email.subject}\n${email.preview ?? ""}`.slice(0, 2000));
+  let textFrom: AutoresponderDecision["textFrom"] = ruleBody ? "rule" : "default";
+  let bodyLanguage: string | undefined;
+  let subjectLanguage: string | undefined;
+  if (language && !ruleBody && rule.bodies?.[language]) [bodyTemplate, bodyLanguage, textFrom] = [rule.bodies[language], language, "language"];
+  if (language && !ruleSubject && rule.subjects?.[language]) [subjectTemplate, subjectLanguage] = [rule.subjects[language], language];
   if (!bodyTemplate?.trim()) return { ...base, outcome: "skip", reason: "no-text", rule: ruleName };
 
   // What the server may do: a reply it may not send becomes a draft; with neither, nothing.
@@ -340,17 +378,31 @@ export async function decide(
     if (await deps.hasAnsweredSince(sender, since).catch(() => false)) return { ...base, outcome: "skip", reason: "answered-already", rule: ruleName };
   }
 
+  let body = renderText(bodyTemplate, rule, email, bodyLanguage);
+  let styled = false;
+  // Only a draft: it is read before it goes, while a sent reply carries exactly the text that was set.
+  const replyLanguage = bodyLanguage ?? detectLanguage(body);
+  if (action === "draft" && deps.styleProfile && replyLanguage) {
+    const profile = await deps.styleProfile().catch(() => undefined);
+    if (profile) {
+      const { greeting, closing } = greetingAndClosing(profile, sender, replyLanguage);
+      const open = greeting && !hasGreeting(body) ? `${greeting.replace("{name}", firstName(email.from[0]?.name, email.from[0]?.address ?? sender))}\n\n` : "";
+      const close = closing && !hasClosing(body) ? `\n\n${closing}` : "";
+      if (open || close) [body, styled] = [`${open}${body}${close}`, true];
+    }
+  }
+
   const reply: AutoresponderReply = {
     to: sender,
-    subject: replySubject({ ...rule, subject: subjectTemplate }, email.subject, email),
-    body: renderText(bodyTemplate, rule, email),
+    subject: replySubject({ ...rule, subject: subjectTemplate }, email.subject, email, subjectLanguage),
+    body,
     inReplyTo: email.messageId,
     references: [...(email.references ?? []), ...(email.messageId ? [email.messageId] : [])],
     headers: { "Auto-Submitted": "auto-replied", Precedence: "bulk", "X-Auto-Response-Suppress": "All" },
     sourceEmailId: email.id,
     rule: ruleName,
   };
-  return { ...base, outcome: action, reply, rule: ruleName };
+  return { ...base, outcome: action, reply, rule: ruleName, language, textFrom, ...(styled ? { styled } : {}) };
 }
 
 function validateRules(rules: unknown): AutoresponderMatchRule[] {
@@ -407,10 +459,37 @@ function validateOutsideHours(value: unknown): AutoresponderRule["outsideHours"]
   return { days: [...new Set(hours.days as number[])].sort(), from: hours.from, to: hours.to };
 }
 
+// Only the languages the detector can tell apart: a text for any other could never be chosen.
+function validateLanguageTexts(value: unknown, name: string, max: number): Record<string, string> | undefined {
+  if (value === null) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new InvalidArgumentError(`${name} must be an object keyed by language code (${STYLE_LANGUAGES.join(", ")}), or null to remove it.`);
+  }
+  const out: Record<string, string> = {};
+  for (const [key, text] of Object.entries(value)) {
+    const code = key.trim().toLowerCase();
+    if (!STYLE_LANGUAGES.includes(code)) throw new InvalidArgumentError(`${name}: "${key.slice(0, 20)}" is not a language that can be recognised; use ${STYLE_LANGUAGES.join(", ")}.`);
+    if (typeof text !== "string" || text.length > max) throw new InvalidArgumentError(`${name}.${code} must be text up to ${max} characters.`);
+    if (text.trim()) out[code] = text.trim();
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function validateLine(value: string, name: string, max: number): string | undefined {
+  if (value.length > max || /[\r\n]/.test(value)) throw new InvalidArgumentError(`${name} must be one line of up to ${max} characters.`);
+  return value.trim() || undefined;
+}
+
 export interface AutoresponderPatch {
   enabled?: boolean;
   subject?: string;
   body?: string;
+  /** Replace the whole map ({} or null clears it); an empty text removes that language. */
+  subjects?: unknown;
+  bodies?: unknown;
+  /** Empty string removes it. */
+  returnDate?: string;
+  backupContact?: string;
   startsAt?: string;
   endsAt?: string;
   replyEveryDays?: number;
@@ -507,6 +586,10 @@ export class AutoresponderService {
         enabled: before?.enabled ?? false,
         subject: before?.subject ?? DEFAULT_SUBJECT,
         body: before?.body ?? "",
+        subjects: before?.subjects,
+        bodies: before?.bodies,
+        returnDate: before?.returnDate,
+        backupContact: before?.backupContact,
         startsAt: before?.startsAt,
         endsAt: before?.endsAt,
         replyEveryDays: before?.replyEveryDays ?? 7,
@@ -529,6 +612,16 @@ export class AutoresponderService {
         if (patch.body.length > 4000) throw new InvalidArgumentError("body is limited to 4000 characters.");
         next.body = patch.body.trim();
       }
+      if (patch.subjects !== undefined) next.subjects = validateLanguageTexts(patch.subjects, "subjects", 200);
+      if (patch.bodies !== undefined) next.bodies = validateLanguageTexts(patch.bodies, "bodies", 4000);
+      if (patch.returnDate !== undefined) {
+        next.returnDate = validateLine(patch.returnDate, "returnDate", 100);
+        const day = next.returnDate && PLAIN_DATE.test(next.returnDate) ? Date.parse(`${next.returnDate}T00:00:00Z`) : undefined;
+        if (day !== undefined && (!Number.isFinite(day) || new Date(day).toISOString().slice(0, 10) !== next.returnDate)) {
+          throw new InvalidArgumentError(`returnDate "${next.returnDate}" is not a real date.`);
+        }
+      }
+      if (patch.backupContact !== undefined) next.backupContact = validateLine(patch.backupContact, "backupContact", 200);
       if (patch.startsAt !== undefined) next.startsAt = parseDate(patch.startsAt, "startsAt");
       if (patch.endsAt !== undefined) next.endsAt = parseDate(patch.endsAt, "endsAt");
       if (patch.replyEveryDays !== undefined) {
@@ -569,7 +662,7 @@ export class AutoresponderService {
       if (next.startsAt && next.endsAt && Date.parse(next.endsAt) <= Date.parse(next.startsAt)) {
         throw new InvalidArgumentError("endsAt must be after startsAt.");
       }
-      const hasText = Boolean(next.body) || Boolean(next.outgoingNote) || Boolean(next.rules?.some((rule) => rule.action !== "skip" && rule.body));
+      const hasText = Boolean(next.body) || Boolean(next.bodies) || Boolean(next.outgoingNote) || Boolean(next.rules?.some((rule) => rule.action !== "skip" && rule.body));
       if (next.enabled && !hasText) {
         throw new InvalidArgumentError("Give a body (the reply), a rule with a body, or an outgoingNote before switching the autoresponder on.");
       }

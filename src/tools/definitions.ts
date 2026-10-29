@@ -846,7 +846,7 @@ export const TOOLS = [
   },
   {
     name: "set_autoresponder",
-    description: "Set up, change or switch off the automatic reply of one address, and the note that address appends to what it sends. Off by default. While on, a message from a person who wrote to this address (not a list, not an automatic message, not a no-reply address, not mail that arrived before it was switched on, not someone you have already answered since) gets one reply per sender per `replyEveryDays` days, at most `dailyLimit` a day. It is made after each background sync, so it only works while this server is running with background sync on. `rules` give other senders another text, a draft for you to approve, or no reply; the text can use {senderName}, {senderFirstName}, {subject}, {startsAt}, {endsAt}. `mode: \"draft\"` prepares drafts instead of sending, and so does a server that may not send. `outsideHours` limits it to when you are not at work. Use preview_autoresponder first to see what it would do to recent mail. Switching it on needs confirmed: true when PROTONMAIL_CONFIRM_DESTRUCTIVE is on and the server can send; it is refused when the server can neither send nor write drafts. Switching it off is always allowed.",
+    description: "Set up, change or switch off the automatic reply of one address, and the note that address appends to what it sends. Off by default. While on, a message from a person who wrote to this address (not a list, not an automatic message, not a no-reply address, not mail that arrived before it was switched on, not someone you have already answered since) gets one reply per sender per `replyEveryDays` days, at most `dailyLimit` a day. It is made after each background sync, so it only works while this server is running with background sync on. `rules` give other senders another text, a draft for you to approve, or no reply; the text can use {senderName}, {senderFirstName}, {subject}, {startsAt}, {endsAt}, {returnDate}, {backupContact}. `bodies` / `subjects` answer in the sender's language (en, pl, de) when their message is in it. `mode: \"draft\"` prepares drafts instead of sending, and so does a server that may not send; a draft opens and closes the way you do when a style profile exists (get_style_profile). `outsideHours` limits it to when you are not at work. Use preview_autoresponder first to see what it would do to recent mail. Switching it on needs confirmed: true when PROTONMAIL_CONFIRM_DESTRUCTIVE is on and the server can send; it is refused when the server can neither send nor write drafts. Switching it off is always allowed.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -855,6 +855,18 @@ export const TOOLS = [
         enabled: { type: "boolean", description: "true switches the automatic reply on, false off. Omit to change only the text, rules or dates." },
         subject: { type: "string", description: "Subject of the reply; {subject} stands for the subject of the message answered. Default: \"Automatic reply: {subject}\"." },
         body: { type: "string", description: "Text of the default reply (up to 4000 characters). Can use {senderFirstName}, {endsAt} and the other placeholders." },
+        bodies: {
+          type: ["object", "null"],
+          description: "Reply text by language code, for example {\"pl\":\"Dzień dobry, wracam {returnDate}.\",\"de\":\"...\"}: a message detected to be in that language gets that text (dates written in it), anything else gets `body`. Languages: en, pl, de. Replaces the whole map; null or {} removes it.",
+          additionalProperties: { type: "string" },
+        },
+        subjects: {
+          type: ["object", "null"],
+          description: "Reply subject by language code, like `bodies`. A language without one gets `subject`.",
+          additionalProperties: { type: "string" },
+        },
+        returnDate: { type: "string", description: "What {returnDate} says: a date such as 2027-01-04 (written out in the reply's language) or plain text such as \"after the holidays\". One line, up to 100 characters. Empty string removes it." },
+        backupContact: { type: "string", description: "What {backupContact} says, for example \"Anna Nowak, anna@example.com\". Plain text, one line, up to 200 characters. Nobody is written to. Empty string removes it." },
         startsAt: { type: "string", description: "Start of the window, a date or date-time such as 2026-12-24 or 2026-12-24T18:00:00+01:00. Empty string clears it." },
         endsAt: { type: "string", description: "End of the window. Empty string clears it." },
         replyEveryDays: { type: "integer", description: "A sender gets at most one reply in this many days (1-90, default 7).", minimum: 1, maximum: 90 },
@@ -1087,7 +1099,7 @@ export const TOOLS = [
   },
   {
     name: "preview_autoresponder",
-    description: "Show what the automatic reply WOULD do with the mail already in the index from the last few days: for each message, whether it would be answered, left as a draft or skipped, why, which rule matched and the text it would use. Sends and records nothing, and works even while the rule is off (judged as if it were on now).",
+    description: "Show what the automatic reply WOULD do with the mail already in the index from the last few days: for each message, whether it would be answered, left as a draft or skipped, why, which rule matched, the language detected and which text it would get (rule, language or default), and the text itself. Sends and records nothing, and works even while the rule is off (judged as if it were on now).",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",

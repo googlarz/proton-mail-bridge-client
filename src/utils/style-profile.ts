@@ -48,7 +48,11 @@ function ownLines(text: string): string[] {
   return own.split(/\r?\n/).map((line) => line.trim());
 }
 
-function detectLanguage(text: string): string | undefined {
+/** The languages detectLanguage can tell apart. */
+export const STYLE_LANGUAGES = Object.keys(STOPWORDS);
+
+/** en, pl or de by common words (at least three of them), or undefined when it cannot tell. */
+export function detectLanguage(text: string): string | undefined {
   const words = text.toLowerCase().match(/\p{L}+/gu) ?? [];
   let best: string | undefined;
   let bestScore = 2;
@@ -165,4 +169,40 @@ export function styleHints(profile: StyleProfile, recipient?: string): string[] 
   if (summary.formality !== "unknown") lines.push(`Tone is ${summary.formality}.`);
   if (summary.medianWords) lines.push(`A typical mail is about ${summary.medianWords} words${summary.emojiRate < 0.05 ? ", without emoji" : ""}.`);
   return lines;
+}
+
+// Which language a greeting or closing word is in, so a Polish "Cześć {name}," never opens an English text.
+const PHRASE_LANGUAGE: Record<string, RegExp> = {
+  en: /^(hi|hello|hey|dear|good (?:morning|afternoon|evening)|best(?: regards| wishes)?|kind regards|warm regards|regards|thanks|thank you|cheers|sincerely)(?![\p{L}])/iu,
+  pl: /^(cześć|dzień dobry|dobry wieczór|witam|szanown\p{L}*|pozdrawiam|z poważaniem|serdecznie|pozdrowienia|dzięki|dziękuję|z pozdrowieniami)(?![\p{L}])/iu,
+  de: /^(hallo|guten (?:tag|morgen|abend)|sehr geehrte\p{L}*|liebe\p{L}*|moin|mit freundlichen grüßen|viele grüße|beste grüße|freundliche grüße|grüße|lg)(?![\p{L}])/iu,
+};
+
+/**
+ * The greeting ("Hi {name},") and closing ("Best regards") you use with `recipient` in `language`: from what you write
+ * to them, else to their domain, else in general. Only short patterns of the expected shape are taken, as the file
+ * could have been edited by hand.
+ */
+export function greetingAndClosing(profile: StyleProfile, recipient: string, language: string): { greeting?: string; closing?: string } {
+  const address = recipient.toLowerCase();
+  const summaries = [profile.byRecipient?.[recipientKey(address)], profile.byDomain?.[domainOf(address)], profile.overall];
+  const pick = (key: "greetings" | "closings", shape: RegExp): string | undefined => {
+    for (const summary of summaries) {
+      const list = Array.isArray(summary?.[key]) ? summary[key] : [];
+      const found = list.find((entry) => typeof entry?.text === "string" && entry.text.length <= 60 && shape.test(entry.text) && PHRASE_LANGUAGE[language]?.test(entry.text));
+      if (found) return found.text;
+    }
+    return undefined;
+  };
+  return { greeting: pick("greetings", /^[\p{L} ]+(?: \{name\})?[,!:]?$/u), closing: pick("closings", /^[\p{L} ]+$/u) };
+}
+
+/** Whether a text already opens with a greeting (its first line) and ends with a closing (one of its last lines). */
+export function hasGreeting(text: string): boolean {
+  const first = text.split(/\r?\n/).find((line) => line.trim().length > 0);
+  return first !== undefined && GREETING_HEAD.test(first.trim());
+}
+
+export function hasClosing(text: string): boolean {
+  return text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0).slice(-3).some((line) => closingHead(line) !== undefined);
 }
