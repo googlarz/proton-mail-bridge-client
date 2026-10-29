@@ -71,7 +71,7 @@ test("state paths: attachments folder replaced by a symlink to the data dir is n
 });
 
 test("state paths: case variants (case-insensitive filesystems)", async () => {
-  const { root, data, config } = await layout();
+  const { root, config } = await layout();
   try {
     const upper = join(root, "DATA", "audit.log");
     const insensitive = await import("node:fs").then((fs) => fs.existsSync(upper));
