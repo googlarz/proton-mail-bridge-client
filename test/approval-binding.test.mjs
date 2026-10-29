@@ -173,7 +173,7 @@ test("delete_draft: a swap between the question and the answer => refused, the d
     assert.match(text(result), CHANGED);
     assert.ok(!(await call("get_draft", { draftId })).isError, "still there");
   });
-  await withServer(async ({ call, text, makeDraft }) => {
+  await withServer(async ({ call, makeDraft }) => {
     const draftId = await makeDraft();
     assert.ok(!(await call("delete_draft", { draftId })).isError);
     assert.equal((await call("get_draft", { draftId })).isError, true);
