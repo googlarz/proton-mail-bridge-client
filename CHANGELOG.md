@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.16.2] — 2026-10-29
+
 - **A forwarding rule could forward a message twice when two server processes ran on one data directory** (some desktop clients start a stdio server twice, anthropics/claude-ai-mcp#1156). Both read the "already handled" list before either wrote to it. A forward is now claimed (message, rule and the day's cap) in one locked step before it is sent, so the second process sends nothing. It is at most once: a forward that fails after the claim is not retried. Found by a test that starts two instances; it failed once in a full run under load. The automatic reply was already claimed under a lock.
 
 - **Tests only** (no change to the package): the injection samples of the mail-firewall tests are assembled from pieces, because written out in full they made a third-party agent-package scanner report this repository as prompt injection. A new test starts two server instances on one data directory (some desktop clients start a stdio server twice, anthropics/claude-ai-mcp#1156) and checks that a message is answered once and forwarded once. Dev dependency: biome 2.6.3.
