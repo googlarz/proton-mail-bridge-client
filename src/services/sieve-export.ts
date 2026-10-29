@@ -98,8 +98,12 @@ function conditions(when: RuleWhen): Conditions {
     const exact: string[] = [];
     const domains: string[] = [];
     for (const pattern of when.from.map((entry) => entry.trim())) {
-      if (pattern.startsWith("*@") || pattern.startsWith("@")) domains.push(pattern.slice(pattern.indexOf("@") + 1));
-      else exact.push(pattern);
+      if (pattern.startsWith("*@") || pattern.startsWith("@")) {
+        const domain = pattern.slice(pattern.indexOf("@") + 1);
+        // Locally this matches nothing; as `:domain :is ""` it would match mail that has no domain at all.
+        if (!domain) return { part: "when.from", reason: `"${pattern}" has no domain after the @; on Proton it would match mail without a domain, which it never does locally.` };
+        domains.push(domain);
+      } else exact.push(pattern);
     }
     const from = [
       ...(exact.length ? [`address :all :is "from" ${stringList(exact)}`] : []),
@@ -148,6 +152,9 @@ export function exportSieve(rules: MailRule[]): SieveExport {
     const actionGaps: Array<{ part: string; reason: string }> = [];
     const body: string[] = [];
     const { actions } = rule;
+    // Locally the first matching rule with archive or moveTo decides where a message goes, also when that move cannot
+    // be exported; trash and delete never run by themselves, so they decide nothing here.
+    const decidesLocation = Boolean(actions.archive || actions.moveTo);
     if (actions.markRead) body.push(`addflag ${quote("\\Seen")};`);
     if (actions.label) {
       const label = labelTarget(actions.label);
@@ -174,6 +181,7 @@ export function exportSieve(rules: MailRule[]): SieveExport {
 
     if (body.length === 0 && move === undefined) {
       for (const entry of actionGaps) gap(entry.part, entry.reason, "rule not exported");
+      if (decidesLocation) earlierMoves.push(when.test);
       continue;
     }
     for (const entry of [...when.leftOut, ...actionGaps]) gap(entry.part, entry.reason, "left out");
@@ -182,8 +190,8 @@ export function exportSieve(rules: MailRule[]): SieveExport {
       const fileinto = `fileinto ${quote(move)};`;
       if (earlierMoves.length) body.push(`if not anyof (${earlierMoves.join(", ")}) {`, `    ${fileinto}`, "}");
       else body.push(fileinto);
-      earlierMoves.push(when.test);
     }
+    if (decidesLocation) earlierMoves.push(when.test);
     if (body.some((line) => line.startsWith("addflag"))) requires.add("imap4flags");
     if (body.some((line) => line.includes("fileinto"))) requires.add("fileinto");
     blocks.push([`# Rule ${quote(rule.name)} (${rule.id})`, `if ${when.test} {`, ...body.map((line) => `    ${line}`), "}"].join("\n"));
