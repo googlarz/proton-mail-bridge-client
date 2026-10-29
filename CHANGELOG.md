@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.16.3] — 2026-10-29
+
+- **Dependencies**: `imapflow` 2.5.5 → 2.9.1 and `unpdf` 1.9.0 → 1.9.1 (both pinned). Checked against the real Bridge before taking them, read-only: connection check, folder list, live fetch and search, listing a PDF attachment and extracting its text (4,033 characters with the new `unpdf`), a wait for mailbox changes (IDLE), and an index sync of 81 INBOX and 78 Sent messages (INBOX holds 28,975); the full test suite passes on the fake Bridge too. imapflow 2.6.0 rejects `fetch()` without a selected mailbox instead of returning nothing and makes the `error` event fire once per connection; nothing in this project depends on the old behaviour.
+
 From an independent review of the 2.16 code (a second reviewer with no knowledge of how it was written):
 
 - **One crafted HTML message could freeze the server.** The mail firewall's link check used a pattern that backtracked cubically: 12 KB of unclosed `<a` tags took 1.5 s, 24 KB over 8 s, a large mail hours, and the scan runs inside `get_email_by_id`, `get_emails_by_ids` and the email resource, blocking background sync too. HTML is now scanned tag by tag with every step bounded and at most 200 KB looked at (the crafted inputs take milliseconds). The hidden-text check now also covers single-quoted styles, the `hidden` attribute, off-screen positioning (`left:-9999px`), `max-height:0` and white-on-white text, and checks every hidden block instead of stopping at the first.
