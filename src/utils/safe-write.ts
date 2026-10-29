@@ -45,7 +45,7 @@ export async function writeFileNoFollow(path: string, data: Buffer, deps: WriteF
       await rm(tempPath, { force: true });
       if (!retry || !locked) throw error;
       // Names the destination, not the temp file, and keeps the system error as the cause.
-      throw Object.assign(new Error(`Cannot replace ${path}: the file is open in another program or locked (${code}). The existing file was left unchanged; close the program using it and try again.`, { cause: error }), { code });
+      throw Object.assign(new Error(`Could not replace ${path}: it may be open in another program, read-only, or a directory (${code}). The existing file was left unchanged; close the program using it and try again.`, { cause: error }), { code });
     }
   }
 }
