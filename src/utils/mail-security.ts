@@ -210,32 +210,78 @@ export function isGatedAction(name: string, args: Record<string, unknown>, decla
 const ID_KEYS = ["id", "emailId", "primaryEmailId", "latestEmailId"] as const;
 const MAX_SCAN_DEPTH = 7;
 const MAX_SCAN_CHARS = 2_000_000;
+// Past MAX_SCAN_CHARS a result is not scanned whole (padding must not buy a bypass, and must not buy a stall either): each
+// long text field gets a head and a tail window, a total budget caps the work, and whatever was not looked at makes the
+// node high risk ("oversized-unscanned"), so the session is tainted rather than the result passing unchecked.
+const MAX_PARSE_CHARS = 32_000_000;
+const SCAN_WINDOW = 100_000;
+const SCAN_BUDGET = 2_000_000;
+const UNSCANNED_REASON = "oversized-unscanned: part of this text is longer than the scan limit and was not checked for instructions to an AI.";
+const TEXT_KEYS = ["text", "preview", "snippet", "sentence", "body", "attachmentText", "subject"] as const;
+// Control and invisible characters that padding or splitting a word can use to slip past a pattern.
+const HIDDEN_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/g;
+
+export interface OversizeScan {
+  budget: number;
+}
+
+/** The text of a node's fields as far as the budget and windows allow, and whether any of it was left out. */
+function boundedText(parts: string[], scan: OversizeScan): { text: string; partial: boolean } {
+  const kept: string[] = [];
+  let partial = false;
+  for (const part of parts) {
+    if (scan.budget <= 0) {
+      partial = true;
+    } else if (part.length <= 2 * SCAN_WINDOW) {
+      kept.push(part);
+      scan.budget -= part.length;
+    } else {
+      kept.push(part.slice(0, SCAN_WINDOW), part.slice(-SCAN_WINDOW));
+      scan.budget -= 2 * SCAN_WINDOW;
+      partial = true;
+    }
+  }
+  return { text: kept.join("\n"), partial };
+}
+
+// The text as it is, with the hidden characters taken out and with them turned into spaces: a word split by one reads
+// whole in the second, two words run together by one stay apart in the third.
+function normalisedVariants(text: string): string[] {
+  HIDDEN_CHARS.lastIndex = 0;
+  if (!HIDDEN_CHARS.test(text)) return [text];
+  return [text, text.replace(HIDDEN_CHARS, ""), text.replace(HIDDEN_CHARS, " ")];
+}
 
 // Walks a tool result and marks every message-like node (an id and some text: a body, a preview, an attachment's text)
 // that reads like an instruction to an AI. The session is tainted by it and the node gets a `risk` note. Only the
 // instruction patterns are used here: a list of previews would be too noisy with the weaker signals. Returns whether
 // anything was marked.
-export function annotateHighRisk(value: unknown, taint: MailTaint, depth = 0): boolean {
+export function annotateHighRisk(value: unknown, taint: MailTaint, depth = 0, scan?: OversizeScan): boolean {
   if (depth > MAX_SCAN_DEPTH || value === null || typeof value !== "object") return false;
   let changed = false;
   if (Array.isArray(value)) {
-    for (const item of value) if (annotateHighRisk(item, taint, depth + 1)) changed = true;
+    for (const item of value) if (annotateHighRisk(item, taint, depth + 1, scan)) changed = true;
     return changed;
   }
   const node = value as Record<string, unknown>;
   if (node.risk === undefined) {
-    const text = [node.text, node.preview, node.snippet, node.sentence, node.body, node.attachmentText, node.subject].filter((part): part is string => typeof part === "string").join("\n");
+    const parts = TEXT_KEYS.map((key) => node[key]).filter((part): part is string => typeof part === "string");
+    const bounded = scan ? boundedText(parts, scan) : { text: parts.join("\n"), partial: false };
     const id = ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
-    if (id && text) {
-      const assessment = assessMail({ subject: typeof node.subject === "string" ? node.subject : undefined, text });
-      if (assessment.level === "high") {
-        node.risk = assessment;
-        taint.mark(id, assessment);
+    if ((id && bounded.text) || bounded.partial) {
+      const subject = typeof node.subject === "string" ? node.subject : undefined;
+      const assessment = (scan ? normalisedVariants(bounded.text) : [bounded.text])
+        .map((text) => assessMail({ subject, text }))
+        .find((candidate) => candidate.level === "high");
+      const flagged = assessment ?? (bounded.partial ? { level: "high" as const, reasons: [UNSCANNED_REASON] } : undefined);
+      if (flagged) {
+        node.risk = flagged;
+        taint.mark(id ?? "oversized-unscanned", flagged);
         changed = true;
       }
     }
   }
-  for (const [key, child] of Object.entries(node)) if (key !== "risk" && annotateHighRisk(child, taint, depth + 1)) changed = true;
+  for (const [key, child] of Object.entries(node)) if (key !== "risk" && annotateHighRisk(child, taint, depth + 1, scan)) changed = true;
   return changed;
 }
 
@@ -248,21 +294,32 @@ export function withRiskScan<R, T extends { content: unknown[]; structuredConten
     const result = await handler(request);
     if (result.isError) return result;
     let changed = false;
-    const content = result.content.map((part) => {
+    let oversized = false;
+    const content = result.content.flatMap((part): unknown[] => {
       const item = part as { type?: string; text?: string };
-      if (item.type !== "text" || typeof item.text !== "string" || item.text.length > MAX_SCAN_CHARS || !/^[\s]*[{[]/.test(item.text)) return part;
+      if (item.type !== "text" || typeof item.text !== "string" || !/^[\s]*[{[]/.test(item.text)) return [part];
+      const big = item.text.length > MAX_SCAN_CHARS;
+      if (big) oversized = true;
       try {
+        if (item.text.length > MAX_PARSE_CHARS) throw new RangeError("too large to parse");
         const parsed = JSON.parse(item.text) as unknown;
-        if (!annotateHighRisk(parsed, taint)) return part;
+        if (!annotateHighRisk(parsed, taint, 0, big ? { budget: SCAN_BUDGET } : undefined)) return [part];
         changed = true;
-        return { ...item, text: JSON.stringify(parsed, null, item.text.includes("\n  ") ? 2 : undefined) };
+        return [{ ...item, text: JSON.stringify(parsed, null, item.text.includes("\n  ") ? 2 : undefined) }];
       } catch {
-        return part;
+        if (!big) return [part];
+        // Not walked, so look at both ends and say so rather than let it pass.
+        const { text: ends } = boundedText([item.text], { budget: SCAN_BUDGET });
+        const assessment = normalisedVariants(ends).map((text) => assessMail({ text })).find((candidate) => candidate.level === "high");
+        const flagged = assessment ?? { level: "high" as const, reasons: [UNSCANNED_REASON] };
+        taint.mark("oversized-unscanned", flagged);
+        changed = true;
+        return [part, { type: "text", text: JSON.stringify({ risk: flagged }) }];
       }
     });
     if (!changed) return result;
     const structured = result.structuredContent;
-    if (structured && typeof structured === "object") annotateHighRisk(structured, taint);
+    if (structured && typeof structured === "object") annotateHighRisk(structured, taint, 0, oversized ? { budget: SCAN_BUDGET } : undefined);
     return { ...result, content, ...(structured !== undefined ? { structuredContent: structured } : {}) };
   };
 }
