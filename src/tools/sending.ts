@@ -683,7 +683,7 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           appendSignature: false,
       };
       const undoWindowforward = resolveUndoWindowSeconds(args);
-      await ctx.delegation.claim(args, name, sendBundleForFwd, [...to, ...cc, ...bcc]);
+      await ctx.delegation.claim(args, name, sendBundleForFwd, [...to, ...cc, ...bcc], readBundleFwd);
       if (undoWindowforward > 0) {
         return queueUndoSend(sendBundleForFwd, forwardPayload, undoWindowforward, name, args, { forwardedMessage: prefixedIdFor(readBundleFwd, detail.id), to, cc });
       }

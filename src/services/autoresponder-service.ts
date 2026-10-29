@@ -272,7 +272,7 @@ export function renderText(template: string, rule: AutoresponderRule, email: Ema
 export function replySubject(rule: AutoresponderRule, original: string, email?: EmailSummary, language?: string): string {
   const template = rule.subject || DEFAULT_SUBJECT;
   const stripped = original.replace(/^(re|aw|odp)\s*:\s*/i, "").trim() || "(no subject)";
-  const subject = email ? renderText(template, rule, { ...email, subject: original }, language) : template.replace(/\{subject\}/g, stripped);
+  const subject = email ? renderText(template, rule, { ...email, subject: original }, language) : template.replace(/\{subject\}/g, () => stripped);
   return subject.replace(/[\r\n]+/g, " ").slice(0, 200);
 }
 
@@ -392,7 +392,10 @@ export async function decide(
 
   if (rule.skipIfAnswered !== false && deps.hasAnsweredSince) {
     const since = email.internalDate ?? email.date ?? new Date(now).toISOString();
-    if (await deps.hasAnsweredSince(sender, since).catch(() => false)) return { ...base, outcome: "skip", reason: "answered-already", rule: ruleName };
+    // A lookup that throws is not "no": the sender may already have been answered, so wait for the next sync.
+    const answered = await deps.hasAnsweredSince(sender, since).catch(() => undefined);
+    if (answered === undefined) return { ...base, outcome: "skip", reason: "lookup-failed", rule: ruleName };
+    if (answered) return { ...base, outcome: "skip", reason: "answered-already", rule: ruleName };
   }
 
   let body = renderText(bodyTemplate, rule, email, bodyLanguage);

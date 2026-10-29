@@ -75,11 +75,15 @@ export class Delegation {
 
   /**
    * Called by a send handler right before it sends or queues: spends the use. Does nothing for a call no grant approved.
-   * `bundle` is the account the mail goes out through, `recipients` every To, Cc and Bcc address it will really use.
+   * `bundle` is the account the mail goes out through, `recipients` every To, Cc and Bcc address it will really use, and
+   * `source` (a forward) the account the forwarded message is read from.
    */
-  async claim(args: Record<string, unknown>, tool: string, bundle: AccountBundle, recipients: readonly string[]): Promise<void> {
+  async claim(args: Record<string, unknown>, tool: string, bundle: AccountBundle, recipients: readonly string[], source?: AccountBundle): Promise<void> {
     if (!this.delegated.delete(args)) return;
     const refuse = (text: string) => new McpError(ErrorCode.InvalidRequest, `${text} Do not retry unless the user asks for it.`);
+    if (source && source.account.slug !== bundle.account.slug) {
+      throw refuse(`${tool} was not run: a delegation grant covers only a message of its own account, not one of ${source.account.address}. Ask the user to approve it.`);
+    }
     if (this.deps.taint.current()) {
       throw refuse(`${tool} was not run: a message read in this session looks like an attempt to steer an AI, so a delegation grant cannot stand in for the user. Ask the user whether ${tool} is really wanted.`);
     }
@@ -117,7 +121,10 @@ export class Delegation {
         const emailId = optionalString(args, "emailId");
         if (!emailId) return undefined;
         const { bundle: read } = this.deps.resolveAccountForEmailId(emailId);
-        return { bundle: sendingAs(optionalString(args, "from"), read), recipients: [...list("to"), ...list("cc"), ...list("bcc")] };
+        const sending = sendingAs(optionalString(args, "from"), read);
+        // A forward hands the message's content to the recipients: only a message of the grant's own account may go.
+        if (sending.account.slug !== read.account.slug) return undefined;
+        return { bundle: sending, recipients: [...list("to"), ...list("cc"), ...list("bcc")] };
       }
       case "reply_to_email":
       case "reply_all_email": {
@@ -148,7 +155,8 @@ export class Delegation {
 
 const activeGrant = (grant: Grant, now: Date) => grantStatus(grant, now) === "active";
 
-// list_grants: what the person has delegated, read-only. There is deliberately no tool that makes, changes or revokes a grant.
+// list_grants: what the person has delegated, read-only. There is deliberately no MCP tool that makes, changes or revokes a grant
+// (a model with file or shell access is outside what grants protect against).
 export async function handleDelegationTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   switch (name) {
     case "list_grants": {

@@ -67,7 +67,7 @@ function hiddenTexts(html: string): string[] {
     const start = (tag.index ?? 0) + tag[0].length;
     const close = lower.indexOf(`</${name}`, start);
     const end = close === -1 ? Math.min(html.length, start + MAX_BLOCK_LENGTH) : Math.min(close, start + MAX_BLOCK_LENGTH);
-    found.push(html.slice(start, end).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+    found.push(html.slice(start, end).replace(/<[^>]*>/g, " ").replace(/[ \t\n\r\f]+/g, " ").trim());
   }
   return found;
 }
@@ -108,8 +108,23 @@ function hostOf(url: string): string {
   }
 }
 
+// Control and invisible characters that padding or splitting a word can use to slip past a pattern.
+const HIDDEN_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/g;
+const NEEDS_NORMALISING = /[^\t\n\r\x20-\x7e]|[ \t]{2}/;
+const normalised = (text: string): string => text.normalize("NFKC").replace(/[ \t]{2,}/g, " ");
+
+// The text with the hidden characters taken out and with them turned into spaces, each in NFKC form: a word split by one
+// reads whole in the first, two words run together by one stay apart in the second, and look-alike forms (fullwidth
+// letters, no-break spaces) read as plain ones, and runs of spaces count as one. Plain text with single spaces is matched as it is. Only the
+// instruction patterns run on these, and they are bounded, so the cost stays linear.
+function normalisedVariants(text: string): string[] {
+  if (!NEEDS_NORMALISING.test(text)) return [text];
+  const variants = new Set([normalised(text), normalised(text.replace(HIDDEN_CHARS, "")), normalised(text.replace(HIDDEN_CHARS, " "))]);
+  return [...variants];
+}
+
 function matchesInstruction(text: string): string | undefined {
-  for (const [pattern, reason] of INSTRUCTION_PATTERNS) if (pattern.test(text)) return reason;
+  for (const variant of normalisedVariants(text)) for (const [pattern, reason] of INSTRUCTION_PATTERNS) if (pattern.test(variant)) return reason;
   return undefined;
 }
 
@@ -220,8 +235,6 @@ const SCAN_WINDOW = 100_000;
 const SCAN_BUDGET = 2_000_000;
 const UNSCANNED_REASON = "oversized-unscanned: part of this text is longer than the scan limit and was not checked for instructions to an AI.";
 const TEXT_KEYS = ["text", "preview", "snippet", "sentence", "body", "attachmentText", "subject"] as const;
-// Control and invisible characters that padding or splitting a word can use to slip past a pattern.
-const HIDDEN_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/g;
 
 export interface OversizeScan {
   budget: number;
@@ -246,14 +259,6 @@ function boundedText(parts: string[], scan: OversizeScan): { text: string; parti
   return { text: kept.join("\n"), partial };
 }
 
-// The text as it is, with the hidden characters taken out and with them turned into spaces: a word split by one reads
-// whole in the second, two words run together by one stay apart in the third.
-function normalisedVariants(text: string): string[] {
-  HIDDEN_CHARS.lastIndex = 0;
-  if (!HIDDEN_CHARS.test(text)) return [text];
-  return [text, text.replace(HIDDEN_CHARS, ""), text.replace(HIDDEN_CHARS, " ")];
-}
-
 // Walks a tool result and marks every message-like node (an id and some text: a body, a preview, an attachment's text)
 // that reads like an instruction to an AI. The session is tainted by it and the node gets a `risk` note. Only the
 // instruction patterns are used here: a list of previews would be too noisy with the weaker signals. Returns whether
@@ -272,10 +277,8 @@ export function annotateHighRisk(value: unknown, taint: MailTaint, depth = 0, sc
     const id = ID_KEYS.map((key) => node[key]).find((candidate): candidate is string => typeof candidate === "string");
     if ((id && bounded.text) || bounded.partial) {
       const subject = typeof node.subject === "string" ? node.subject : undefined;
-      const assessment = (scan ? normalisedVariants(bounded.text) : [bounded.text])
-        .map((text) => assessMail({ subject, text }))
-        .find((candidate) => candidate.level === "high");
-      const flagged = assessment ?? (bounded.partial ? { level: "high" as const, reasons: [UNSCANNED_REASON] } : undefined);
+      const assessed = assessMail({ subject, text: bounded.text });
+      const flagged = assessed.level === "high" ? assessed : (bounded.partial ? { level: "high" as const, reasons: [UNSCANNED_REASON] } : undefined);
       if (flagged) {
         node.risk = flagged;
         taint.mark(id ?? "oversized-unscanned", flagged);
@@ -312,8 +315,8 @@ export function withRiskScan<R, T extends { content: unknown[]; structuredConten
         if (!big) return [part];
         // Not walked, so look at both ends and say so rather than let it pass.
         const { text: ends } = boundedText([item.text], { budget: SCAN_BUDGET });
-        const assessment = normalisedVariants(ends).map((text) => assessMail({ text })).find((candidate) => candidate.level === "high");
-        const flagged = assessment ?? { level: "high" as const, reasons: [UNSCANNED_REASON] };
+        const assessment = assessMail({ text: ends });
+        const flagged = assessment.level === "high" ? assessment : { level: "high" as const, reasons: [UNSCANNED_REASON] };
         taint.mark("oversized-unscanned", flagged);
         changed = true;
         return [part, { type: "text", text: JSON.stringify({ risk: flagged }) }];

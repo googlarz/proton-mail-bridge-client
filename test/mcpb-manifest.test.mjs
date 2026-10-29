@@ -74,3 +74,27 @@ test("defaults reproduce the behaviour of an untouched install", () => {
     assert.notEqual(userConfig[key].required, true);
   }
 });
+
+test("the approval, delegation, OCR, attachment-index and embeddings settings are exposed and default to off", () => {
+  const wired = {
+    PROTONMAIL_APPROVAL: "approval",
+    PROTONMAIL_APPROVAL_TIMEOUT_SECONDS: "approval_timeout_seconds",
+    PROTONMAIL_DELEGATION: "delegation",
+    PROTONMAIL_OCR_COMMAND: "ocr_command",
+    PROTONMAIL_INDEX_ATTACHMENTS: "index_attachments",
+    PROTONMAIL_EMBEDDINGS_URL: "embeddings_url",
+    PROTONMAIL_EMBEDDINGS_MODEL: "embeddings_model",
+    PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE: "embeddings_allow_remote",
+  };
+  for (const [name, key] of Object.entries(wired)) {
+    assert.equal(env[name], `\${user_config.${key}}`, name);
+    assert.notEqual(userConfig[key].required, true, key);
+  }
+  assert.equal(userConfig.approval.default, "off");
+  assert.equal(userConfig.delegation.default, "off");
+  assert.equal(userConfig.approval_timeout_seconds.type, "number");
+  assert.equal(userConfig.approval_timeout_seconds.default, 120);
+  assert.equal(userConfig.index_attachments.default, false);
+  assert.equal(userConfig.embeddings_allow_remote.default, false);
+  for (const key of ["ocr_command", "embeddings_url", "embeddings_model"]) assert.equal(userConfig[key].default, undefined, `${key}: empty must mean unset`);
+});

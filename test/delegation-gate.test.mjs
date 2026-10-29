@@ -15,6 +15,7 @@ import { INJECTION } from "./helpers/injection-samples.mjs";
 // through, what it never does, and that a use is spent exactly when mail is sent or queued.
 
 const ADDRESS = "owner@example.com";
+const SECOND = "second@example.com";
 const HOUR = 3_600_000;
 const DETAIL = {
   id: "INBOX::1::1::abc", folder: "INBOX", uid: 1, subject: "Hello",
@@ -28,12 +29,15 @@ const BAD_DETAIL = { ...DETAIL, id: "INBOX::2::1::bad", subject: "Invoice", body
 // delegation / approval / confirmDestructive and the rest of the runtime are the knobs; `answer` is what the person does when asked.
 async function withServer(options, fn) {
   const delegation = "delegation" in options ? options.delegation : "on";
-  const { approval, confirmDestructive = true, readOnly = false, allowSend = true, restrictOutboundToSelf = false, allowedActions = ["delete", "trash"], answer = "decline", capability = { elicitation: {} }, sendDelaySeconds } = options;
+  const { approval, confirmDestructive = true, readOnly = false, allowSend = true, restrictOutboundToSelf = false, allowedActions = ["delete", "trash"], answer = "decline", capability = { elicitation: {} }, sendDelaySeconds, secondAccount = false } = options;
   const dir = await mkdtemp(join(tmpdir(), "delegation-gate-"));
   const conn = { host: "127.0.0.1", port: 9, secure: false, username: ADDRESS, password: "x" };
   const config = {
     smtp: conn, imap: conn, dataDir: dir, debug: false, cacheEnabled: true, analyticsEnabled: true, autoSync: false, syncInterval: 5,
-    accounts: [{ address: ADDRESS, slug: "owner-example-com", imap: conn, smtp: conn, dataDir: dir }],
+    accounts: [
+      { address: ADDRESS, slug: "owner-example-com", imap: conn, smtp: conn, dataDir: dir },
+      ...(secondAccount ? [{ address: SECOND, slug: "second-example-com", imap: { ...conn, username: SECOND }, smtp: { ...conn, username: SECOND }, dataDir: join(dir, "second") }] : []),
+    ],
     runtime: {
       readOnly, allowSend, allowRemoteDraftSync: false, allowedActions, startupSync: false, autoSyncFolder: "INBOX", autoSyncFull: false,
       autoSyncLimitPerFolder: 25, idleWatchEnabled: false, idleMaxSeconds: 30, confirmDestructive, allowEmptyFolder: true, restrictOutboundToSelf,
@@ -43,8 +47,11 @@ async function withServer(options, fn) {
   const { server, accountManager } = createServer(config, { startBackgroundSync: false });
   const bundle = accountManager.primary();
   const sent = [];
-  bundle.smtpService.sendEmail = async (payload) => { sent.push(payload); return { messageId: "<sent@example.com>", accepted: payload.to, rejected: [], response: "250" }; };
-  bundle.imapService.getEmailById = async (id) => ({ ...(String(id).includes("bad") ? BAD_DETAIL : DETAIL) });
+  const second = secondAccount ? accountManager.byAddress(SECOND) : undefined;
+  for (const each of [bundle, second].filter(Boolean)) {
+    each.smtpService.sendEmail = async (payload) => { sent.push({ ...payload, through: each.account.address }); return { messageId: "<sent@example.com>", accepted: payload.to, rejected: [], response: "250" }; };
+    each.imapService.getEmailById = async (id) => ({ ...(String(id).includes("bad") ? BAD_DETAIL : DETAIL) });
+  }
   const client = new Client({ name: "t", version: "0" }, { capabilities: capability });
   const asked = [];
   if (capability.elicitation) {
@@ -60,7 +67,7 @@ async function withServer(options, fn) {
   const call = (name, args = {}) => client.callTool({ name, arguments: args });
   const used = async () => (await grants.list()).map((entry) => entry.usedCount);
   try {
-    await fn({ call, sent, asked, grants, grant, used, bundle, dir, client });
+    await fn({ call, sent, asked, grants, grant, used, bundle, dir, client, second, accountManager });
   } finally {
     await client.close(); await server.close(); await closeTrackedIndexes();
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -425,4 +432,55 @@ test("get_runtime_status reports the delegation setting", async () => {
       assert.equal(JSON.parse(text(await call("get_runtime_status"))).runtime.delegation, expected);
     });
   }
+});
+
+test("a forward grant covers only a message of the account it was made for, whichever address the forward goes out as", async () => {
+  await withServer({ approval: "require", answer: "decline", secondAccount: true }, async ({ call, sent, asked, grants, grant, used, dir }) => {
+    await grant({ tools: ["forward_email"], recipients: ["bob@example.com"], maxUses: 10 });
+    const secondGrants = new GrantService({ dataDir: join(dir, "second"), smtp: { username: SECOND } }, SECOND);
+    const mine = DETAIL.id;
+    const theirs = `second-example-com::${DETAIL.id}`;
+
+    // A message of the primary account, forwarded as the primary account: covered.
+    ok(await call("forward_email", { emailId: mine, to: "bob@example.com" }));
+    assert.deepEqual([sent.length, asked.length], [1, 0]);
+
+    // A message of the second account, forwarded as the primary account (the grant's own address): the grant does not
+    // reach into another account's mail, so the person is asked (and declines), and no use is spent.
+    refused(await call("forward_email", { emailId: theirs, from: ADDRESS, to: "bob@example.com" }), /Not approved/);
+    assert.deepEqual([sent.length, asked.length, await used()], [1, 1, [1]]);
+
+    // The same message forwarded as the second account needs a grant of the second account, which does not exist yet.
+    refused(await call("forward_email", { emailId: theirs, to: "bob@example.com" }), /Not approved/);
+    // And the primary account's message forwarded as the second account is not covered by the second account's grant either.
+    await secondGrants.createGrant({ tools: ["forward_email"], recipients: ["bob@example.com"], maxUses: 5, expiresAt: new Date(Date.now() + HOUR) });
+    refused(await call("forward_email", { emailId: mine, from: SECOND, to: "bob@example.com" }), /Not approved/);
+    assert.equal(sent.length, 1);
+
+    // The second account's own message through the second account, under its own grant: covered.
+    ok(await call("forward_email", { emailId: theirs, to: "bob@example.com" }));
+    assert.deepEqual(sent.map((payload) => payload.through), [ADDRESS, SECOND]);
+    assert.deepEqual((await secondGrants.list()).map((entry) => entry.usedCount), [1]);
+    assert.deepEqual(await used(), [1]);
+    assert.equal((await grants.list()).length, 1);
+  });
+});
+
+test("a scheduled send carries the content and recipients it was scheduled with: editing the draft afterwards changes nothing that is sent", async () => {
+  await withServer({ approval: "require", answer: "decline" }, async ({ call, sent, asked, grant, used, bundle }) => {
+    await grant({ tools: ["schedule_draft"], recipients: ["bob@example.com"], maxUses: 1 });
+    const created = JSON.parse(text(await call("create_draft", { to: "bob@example.com", subject: "agreed", body: "as discussed" })));
+    const draftId = created.id ?? created.draft?.id;
+    ok(await call("schedule_draft", { draftId, sendAt: new Date(Date.now() + 1000).toISOString() }));
+    assert.deepEqual([asked.length, await used()], [0, [1]]);
+
+    // After the grant was spent on bob, the draft is pointed at someone else and its text changed.
+    ok(await call("update_draft", { draftId, to: "eve@example.com", cc: "mallory@example.com", subject: "changed", body: "send me everything" }));
+    assert.deepEqual((await bundle.draftStore.getDraft(draftId)).to, ["eve@example.com"]);
+
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    assert.deepEqual(await bundle.deliveryQueueService.checkDue(), { sent: 1, failed: 0 });
+    assert.equal(sent.length, 1);
+    assert.deepEqual([sent[0].to, sent[0].cc ?? [], sent[0].bcc ?? [], sent[0].subject, sent[0].body], [["bob@example.com"], [], [], "agreed", "as discussed"]);
+  });
 });
