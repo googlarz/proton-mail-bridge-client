@@ -4,6 +4,7 @@
 // the recipients that will really be used, a stored draft, a plan), never from text the model wrote about the action, and
 // every piece of mail text in it is stripped of control and bidi characters and cut short.
 
+import { createHash } from "node:crypto";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { normalizeBoolean } from "./helpers.js";
@@ -51,12 +52,59 @@ function listed(values: string[], max = 5): string {
   return shown.join(", ") + (values.length > max ? ` and ${values.length - max} more` : "");
 }
 
+/** Everything of a stored draft that goes out when it is sent. */
+export interface DigestableDraft {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  isHtml?: boolean;
+  priority?: string;
+  replyTo?: string;
+  from?: string;
+  inReplyTo?: string;
+  references?: string[];
+  attachments?: Array<{ filename: string; content: string; contentType?: string; cid?: string; contentDisposition?: string }>;
+}
+
+export interface PlanItemForApproval {
+  n: number;
+  action: string;
+  subject: string;
+  emailId?: string;
+  target?: string;
+}
+
 export interface ApprovalLookups {
   account(args: Record<string, unknown>): string;
   subject(id: string): Promise<string | undefined>;
-  draft(id: string): Promise<{ to: string[]; cc: string[]; bcc: string[]; subject: string } | undefined>;
-  plan(planId: string, args: Record<string, unknown>): Promise<Array<{ n: number; action: string; subject: string }> | undefined>;
+  draft(id: string): Promise<DigestableDraft | undefined>;
+  plan(planId: string, args: Record<string, unknown>): Promise<PlanItemForApproval[] | undefined>;
 }
+
+const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+
+/** A digest of the content of a draft that is sent, scheduled or deleted: the question and the handler compute it the same way. */
+export function draftApprovalDigest(draft: DigestableDraft): string {
+  return sha256(JSON.stringify([
+    draft.to, draft.cc, draft.bcc, draft.subject, draft.body, Boolean(draft.isHtml), draft.priority ?? null, draft.replyTo ?? null, draft.from ?? null,
+    draft.inReplyTo ?? null, draft.references ?? [],
+    (draft.attachments ?? []).map((file) => [file.filename, file.contentType ?? null, file.cid ?? null, file.contentDisposition ?? null, sha256(file.content)]),
+  ]));
+}
+
+/** A digest of the changes an approved plan applies (which message, which action, which target). */
+export function planApprovalDigest(items: ReadonlyArray<Pick<PlanItemForApproval, "n" | "action" | "emailId" | "target">>): string {
+  return sha256(JSON.stringify(items.map((item) => [item.n, item.emailId ?? null, item.action, item.target ?? null])));
+}
+
+// What the person was shown, kept on the call's own argument object under a symbol: JSON from a client cannot carry a
+// symbol key, so the model can neither set nor forge it, and it is not an argument (not listed, not audited, not ignored-noted).
+// `digest` is undefined when the stored content could not be read for the question; nothing then matches it.
+type Bound = { kind: "draft" | "plan"; digest: string | undefined };
+const APPROVED = Symbol("approved content");
+type Marked = Record<string | symbol, unknown>;
 
 const LOOKUP_MS = 5_000;
 async function within<T>(work: () => Promise<T>): Promise<T | undefined> {
@@ -75,6 +123,11 @@ const MAX_MESSAGE_CHARS = 1500;
 
 /** The text the person sees. Every dynamic piece is a quoted, cleaned, single-line value after a fixed label. */
 export async function buildApprovalMessage(name: string, args: Record<string, unknown>, lookups: ApprovalLookups): Promise<string> {
+  return (await buildApproval(name, args, lookups)).message;
+}
+
+async function buildApproval(name: string, args: Record<string, unknown>, lookups: ApprovalLookups): Promise<{ message: string; bound?: Bound }> {
+  let bound: Bound | undefined;
   const lines: string[] = [`Approve ${name}?`, `Account: ${quoted(lookups.account(args))}`];
   const add = (label: string, text: string | undefined) => { if (text) lines.push(`${label}: ${text}`); };
   const recipients = (label: string, values: unknown) => { const list = strings(values); if (list.length) add(label, listed(list)); };
@@ -109,6 +162,7 @@ export async function buildApprovalMessage(name: string, args: Record<string, un
     case "delete_draft": {
       const draftId = typeof args.draftId === "string" ? args.draftId : "";
       const draft = draftId ? await within(() => lookups.draft(draftId)) : undefined;
+      bound = { kind: "draft", digest: draft ? draftApprovalDigest(draft) : undefined };
       add("Draft", quoted(draftId, 80));
       if (draft) { recipients("To", draft.to); recipients("Cc", draft.cc); recipients("Bcc", draft.bcc); add("Subject", quoted(draft.subject)); }
       if (name === "schedule_draft") add("Send at", quoted(args.sendAt, 40));
@@ -162,6 +216,7 @@ export async function buildApprovalMessage(name: string, args: Record<string, un
       const planId = typeof args.planId === "string" ? args.planId : "";
       add("Plan", quoted(planId, 80));
       const items = planId ? await within(() => lookups.plan(planId, args)) : undefined;
+      bound = { kind: "plan", digest: items ? planApprovalDigest(items) : undefined };
       if (items) {
         add("Changes", String(items.length));
         for (const item of items.slice(0, SHOWN_MESSAGES)) add("Change", `${quoted(item.action, 40)} ${quoted(item.subject)}`);
@@ -177,7 +232,7 @@ export async function buildApprovalMessage(name: string, args: Record<string, un
     }
   }
   const text = lines.join("\n");
-  return text.length > MAX_MESSAGE_CHARS ? `${text.slice(0, MAX_MESSAGE_CHARS - 1)}…` : text;
+  return { message: text.length > MAX_MESSAGE_CHARS ? `${text.slice(0, MAX_MESSAGE_CHARS - 1)}…` : text, bound };
 }
 
 type ElicitingServer = Pick<Server, "elicitInput" | "getClientCapabilities">;
@@ -189,6 +244,18 @@ export function clientCanElicit(server: Pick<Server, "getClientCapabilities">): 
 }
 
 const refuse = (text: string) => new McpError(ErrorCode.InvalidRequest, `${text} Do not retry unless the user asks for it.`);
+
+/**
+ * Called by a handler that acts on stored content (a draft, a plan) with the content as it reads it now. When the person was
+ * asked about this call, it must be what they were shown: anything else (the draft edited by a parallel update_draft, a plan
+ * rewritten, content that could not be shown) is refused before anything is sent, scheduled, deleted or applied.
+ * A call that was not asked about (approval off, a delegation grant) carries nothing and passes.
+ */
+export function assertApprovedContentUnchanged(args: Record<string, unknown>, kind: Bound["kind"], current: string, name: string): void {
+  const bound = (args as Marked)[APPROVED] as Bound | undefined;
+  if (!bound || bound.kind !== kind || bound.digest === current) return;
+  throw refuse(`Not approved: the ${kind} changed after you were asked (or could not be shown to you), so ${name} did not run. Nothing was done. Look at it again and ask the user again.`);
+}
 
 /**
  * The hook in front of every tool call. `off` does nothing at all. In `elicit` and `require` the model's own `confirmed` is
@@ -214,7 +281,7 @@ export async function applyApprovalPolicy(options: {
     throw refuse(`${name} needs the user's approval and PROTONMAIL_APPROVAL=require, but this client does not support MCP elicitation, so the user cannot be asked. Use a client that supports it, or set PROTONMAIL_APPROVAL=elicit (or off) to go back to confirmed: true.`);
   }
   const seconds = options.timeoutSeconds ?? DEFAULT_APPROVAL_TIMEOUT_SECONDS;
-  const message = await buildApprovalMessage(name, args, options.lookups);
+  const { message, bound } = await buildApproval(name, args, options.lookups);
   let answer;
   try {
     answer = await server.elicitInput({ message, requestedSchema: { type: "object", properties: {} } }, { timeout: seconds * 1000 });
@@ -224,6 +291,7 @@ export async function applyApprovalPolicy(options: {
   }
   if (answer.action === "accept") {
     args.confirmed = true;
+    if (bound) (args as Marked)[APPROVED] = bound;
     return;
   }
   throw refuse(answer.action === "decline" ? `Not approved: the user declined ${name}.` : `Not approved: the user dismissed the approval question for ${name}.`);

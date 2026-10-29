@@ -87,8 +87,7 @@ function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLoo
     },
     draft: async (id) => {
       const { bundle, rest } = ctx.resolveAccountForDraftId(id);
-      const draft = await bundle.draftStore.getDraft(rest);
-      return { to: draft.to, cc: draft.cc, bcc: draft.bcc, subject: draft.subject };
+      return bundle.draftStore.getDraft(rest);
     },
     plan: async (planId, args) => {
       const plan = await (ctx.resolveAccountArg(args) ?? ctx.primaryBundle).triagePlanService.get(planId);
