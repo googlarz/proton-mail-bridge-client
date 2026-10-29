@@ -3,6 +3,7 @@
 import { execFile } from "node:child_process";
 import { accessSync, constants as fsConstants, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { homedir, release as osRelease } from "node:os";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -199,7 +200,7 @@ function printHelp(): void {
       "  draft-send <id>        Send a saved draft",
       "  draft-delete <id>      Delete a saved draft",
       "  draft-thread-reply <id> Create a reply draft for a thread",
-      "  grant-create           Give the assistant a narrow, expiring permission to send (--tools --recipients --expires --uses --note)",
+      "  grant-create           Give the assistant a narrow, expiring permission to send (--tools --recipients --expires --uses --note); asks you to confirm at a terminal",
       "  grant-list             List the delegation grants in force (--all, --account)",
       "  grant-revoke <id>      Revoke a delegation grant",
       "  tools                  List every MCP tool exposed by the server",
@@ -2167,7 +2168,45 @@ const grantLine = (grant: Grant, now: Date): string =>
     JSON.stringify(grant.note),
   ].join(" | ");
 
-async function runGrantCreate(parsed: ParsedCliArgs): Promise<void> {
+// A grant is made or revoked only by a person at a terminal: both stdin and stdout must be one, the whole grant is shown, and
+// a phrase that names its recipient count (or id) is typed back. There is no flag, variable or argument that answers for the
+// person, so a model that can run shell commands is stopped here (one that can write grants.json directly is not; see README).
+export const isInteractiveTerminal = (input: { isTTY?: boolean } | undefined = process.stdin, output: { isTTY?: boolean } | undefined = process.stdout): boolean =>
+  Boolean(input?.isTTY && output?.isTTY);
+export const grantCreatePhrase = (recipientCount: number): string => `grant ${recipientCount} recipient${recipientCount === 1 ? "" : "s"}`;
+export const grantRevokePhrase = (id: string): string => `revoke ${id}`;
+
+export interface GrantTerminal {
+  isInteractive(): boolean;
+  /** Shows the text and returns the line the person typed ("" when the input ended). */
+  ask(text: string): Promise<string>;
+  write(text: string): void;
+}
+
+const grantTerminal: GrantTerminal = {
+  isInteractive: () => isInteractiveTerminal(),
+  ask: (text) => {
+    const lines = createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise<string>((resolve) => {
+      lines.once("close", () => resolve(""));
+      lines.question(text, resolve);
+    }).finally(() => lines.close());
+  },
+  write: (text) => void process.stdout.write(text),
+};
+
+function requireTerminal(terminal: GrantTerminal, what: string): void {
+  if (!terminal.isInteractive()) {
+    throw new Error(`${what} needs an interactive terminal (stdin and stdout) and a person to confirm it; it cannot be run from a script or by the assistant. Nothing was changed.`);
+  }
+}
+
+async function confirmAtTerminal(terminal: GrantTerminal, summary: string, phrase: string): Promise<void> {
+  const answer = await terminal.ask(`${summary}\nTo confirm, type exactly: ${phrase}\n> `);
+  if (answer.trim() !== phrase) throw new Error("Not confirmed. Nothing was changed.");
+}
+
+export async function runGrantCreate(parsed: ParsedCliArgs, terminal: GrantTerminal = grantTerminal): Promise<void> {
   const [{ account, grants }] = grantStores(parsed, { single: true });
   const split = (key: string) => (getStringFlag(parsed.flags, key) ?? "").split(/[,\s]+/).filter(Boolean);
   const tools = split("tools");
@@ -2177,18 +2216,40 @@ async function runGrantCreate(parsed: ParsedCliArgs): Promise<void> {
   if (recipients.length === 0) throw new CliUsageError("--recipients is required: exact addresses and/or @domain entries (comma-separated).");
   if (!expires) throw new CliUsageError(`--expires is required (30m, 12h, 7d or a timestamp; at most ${MAX_GRANT_DAYS} days).`);
   const maxUses = parseIntegerFlag(parsed.flags, "uses", 1, `a whole number from 1 to ${MAX_GRANT_USES}`) ?? 1;
+  const input = { note: getTextFlag(parsed.flags, "note"), tools, recipients, maxUses, expiresAt: parseGrantExpiry(expires) };
+  let plan: ReturnType<GrantService["planGrant"]>;
+  try {
+    plan = grants.planGrant(input);
+  } catch (error) {
+    if (error instanceof InvalidArgumentError) throw new CliUsageError(error.message);
+    throw error;
+  }
+  requireTerminal(terminal, "grant-create");
+  await confirmAtTerminal(
+    terminal,
+    [
+      `New grant for ${account.address}:`,
+      `  tools:      ${plan.tools.join(", ")}`,
+      `  recipients: ${plan.recipients.join(", ")} (every To, Cc and Bcc must match)`,
+      `  uses:       ${plan.maxUses}`,
+      `  expires:    ${plan.expiresAt.toISOString()}`,
+      `  note:       ${JSON.stringify(plan.note)}`,
+      "With PROTONMAIL_DELEGATION=on the assistant can then send these without asking you again.",
+    ].join("\n"),
+    grantCreatePhrase(plan.recipients.length),
+  );
   let grant: Grant;
   try {
-    grant = await grants.createGrant({ note: getTextFlag(parsed.flags, "note"), tools, recipients, maxUses, expiresAt: parseGrantExpiry(expires) });
+    grant = await grants.createGrant({ ...input, expiresAt: plan.expiresAt });
   } catch (error) {
     if (error instanceof InvalidArgumentError) throw new CliUsageError(error.message);
     throw error;
   }
   if (isTruthyFlag(parsed.flags.json)) {
-    process.stdout.write(json(grant));
+    terminal.write(json(grant));
     return;
   }
-  process.stdout.write(
+  terminal.write(
     [
       `Grant ${grant.id} created for ${account.address}.`,
       `  tools:      ${grant.tools.join(", ")}`,
@@ -2216,13 +2277,16 @@ async function runGrantList(parsed: ParsedCliArgs): Promise<void> {
   process.stdout.write(shown.length === 0 ? `No ${all ? "" : "active "}grants.\n` : `${shown.map((grant) => grantLine(grant, now)).join("\n")}\n`);
 }
 
-async function runGrantRevoke(parsed: ParsedCliArgs): Promise<void> {
+export async function runGrantRevoke(parsed: ParsedCliArgs, terminal: GrantTerminal = grantTerminal): Promise<void> {
   const id = parsed.positionals[0];
   if (!id) throw new CliUsageError("grant-revoke requires a grant id (see grant-list).");
+  requireTerminal(terminal, "grant-revoke");
   for (const { account, grants } of grantStores(parsed, { single: false })) {
+    const grant = (await grants.list()).find((candidate) => candidate.id === id);
+    if (!grant) continue;
+    await confirmAtTerminal(terminal, `Revoke this grant for ${account.address}:\n  ${grantLine(grant, new Date())}`, grantRevokePhrase(grant.id));
     const result = await grants.revokeGrant(id);
-    if (!result.found) continue;
-    process.stdout.write(isTruthyFlag(parsed.flags.json) ? json({ id, account: account.address, revoked: true, alreadyRevoked: result.alreadyRevoked }) : `${result.alreadyRevoked ? "Already revoked" : "Revoked"}: ${id} (${account.address})\n`);
+    terminal.write(isTruthyFlag(parsed.flags.json) ? json({ id, account: account.address, revoked: true, alreadyRevoked: result.alreadyRevoked }) : `${result.alreadyRevoked ? "Already revoked" : "Revoked"}: ${id} (${account.address})\n`);
     return;
   }
   throw new Error(`No grant ${JSON.stringify(id.slice(0, 40))} found.`);

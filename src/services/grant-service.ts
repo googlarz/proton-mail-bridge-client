@@ -115,11 +115,11 @@ export class GrantService {
     return this.storePath;
   }
 
-  /** Makes a grant. Called by the CLI only. */
-  async createGrant(
+  /** What createGrant would store, checked and normalised but not written, so the person can be shown exactly that before confirming. */
+  planGrant(
     input: { note?: string; tools: readonly string[]; recipients: readonly string[]; maxUses: number; expiresAt: Date },
     now = new Date(),
-  ): Promise<Grant> {
+  ): { note: string; tools: GrantableTool[]; recipients: string[]; maxUses: number; expiresAt: Date } {
     const tools = GRANTABLE_TOOLS.filter((tool) => input.tools.includes(tool));
     const unknown = input.tools.filter((tool) => !(GRANTABLE_TOOLS as readonly string[]).includes(tool));
     if (tools.length === 0 || unknown.length > 0) {
@@ -139,6 +139,15 @@ export class GrantService {
     if (Number.isNaN(expires) || expires <= now.getTime()) throw new InvalidArgumentError("The expiry must be in the future.");
     if (expires > now.getTime() + MAX_GRANT_DAYS * DAY_MS) throw new InvalidArgumentError(`A grant can last at most ${MAX_GRANT_DAYS} days.`);
 
+    return { note: cleanForPrompt(input.note, MAX_GRANT_NOTE_CHARS), tools, recipients, maxUses: input.maxUses, expiresAt: new Date(expires) };
+  }
+
+  /** Makes a grant. Called by the CLI only, after the person confirmed it at a terminal. */
+  async createGrant(
+    input: { note?: string; tools: readonly string[]; recipients: readonly string[]; maxUses: number; expiresAt: Date },
+    now = new Date(),
+  ): Promise<Grant> {
+    const plan = this.planGrant(input, now);
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
       let id = "";
@@ -146,12 +155,12 @@ export class GrantService {
       while (store.grants.some((grant) => grant.id === id));
       const grant: Grant = {
         id,
-        note: cleanForPrompt(input.note, MAX_GRANT_NOTE_CHARS),
+        note: plan.note,
         account: this.account,
-        tools,
-        recipients,
-        maxUses: input.maxUses,
-        expiresAt: new Date(expires).toISOString(),
+        tools: plan.tools,
+        recipients: plan.recipients,
+        maxUses: plan.maxUses,
+        expiresAt: plan.expiresAt.toISOString(),
         usedCount: 0,
         createdAt: now.toISOString(),
         revoked: false,

@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GrantService, grantStatus } from "../dist/services/grant-service.js";
 import { GRANTABLE_TOOLS, normalizeRecipient, normalizeRecipientPattern, parseDelegationEnv, recipientsCovered } from "../dist/utils/delegation.js";
-import { parseGrantExpiry } from "../dist/cli.js";
+import { grantCreatePhrase, grantRevokePhrase, isInteractiveTerminal, parseCliArgs, parseGrantExpiry, runGrantCreate, runGrantRevoke } from "../dist/cli.js";
 import { buildConfigFromEnv } from "../dist/config-env.js";
 import { TOOLS } from "../dist/tools/definitions.js";
 
@@ -284,13 +285,40 @@ function runCli(args, dir, env = {}) {
   return { code: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
-test("grant-create, grant-list and grant-revoke work end to end, with usage errors exiting 2", async () => {
+// In-process, with the account the CLI would read from the environment.
+async function withCliEnv(dir, env, fn) {
+  const saved = process.env;
+  process.env = { ...saved, PROTONMAIL_USERNAME: ADDRESS, PROTONMAIL_PASSWORD: "dummy", PROTONMAIL_IMAP_PORT: "9", PROTONMAIL_SMTP_PORT: "9", PROTONMAIL_DATA_DIR: dir, ...env };
+  try {
+    return await fn();
+  } finally {
+    process.env = saved;
+  }
+}
+
+// A person at a terminal who types `answer`; `shown` collects what they were shown.
+const person = (answer, shown = [], written = []) => ({
+  isInteractive: () => true,
+  ask: async (text) => {
+    shown.push(text);
+    return answer;
+  },
+  write: (text) => written.push(text),
+});
+const nobody = () => ({
+  isInteractive: () => false,
+  ask: async () => {
+    throw new Error("must not ask when there is no terminal");
+  },
+  write: () => {
+    throw new Error("must not write when there is no terminal");
+  },
+});
+const CREATE_ARGS = ["grant-create", "--tools", "send_email,reply_to_email", "--recipients", "Bob@Example.com,@acme.org", "--expires", "2d", "--uses", "3", "--note", "for the audit"];
+
+test("grant-list and the usage errors work from a script; grant-create and grant-revoke refuse to run without a terminal", async () => {
   await withDir(async (dir) => {
-    const created = runCli(["grant-create", "--tools", "send_email,reply_to_email", "--recipients", "Bob@Example.com,@acme.org", "--expires", "2d", "--uses", "3", "--note", "for the audit", "--json"], dir);
-    assert.equal(created.code, 0, created.stderr);
-    const grant = JSON.parse(created.stdout);
-    assert.deepEqual([grant.tools, grant.recipients, grant.maxUses, grant.note, grant.account], [["send_email", "reply_to_email"], ["bob@example.com", "@acme.org"], 3, "for the audit", ADDRESS]);
-    assert.ok(Date.parse(grant.expiresAt) > Date.now() + 47 * HOUR && Date.parse(grant.expiresAt) < Date.now() + 49 * HOUR);
+    const grant = await serviceFor(dir).createGrant({ ...grantInput(), tools: ["send_email", "reply_to_email"], recipients: ["bob@example.com", "@acme.org"], maxUses: 3, note: "for the audit", expiresAt: new Date(Date.now() + 48 * HOUR) });
     if (posix) assert.equal((await stat(join(dir, "grants.json"))).mode & 0o777, 0o600);
 
     const listed = runCli(["grant-list"], dir);
@@ -303,13 +331,29 @@ test("grant-create, grant-list and grant-revoke work end to end, with usage erro
     assert.equal(asTool.code, 0, asTool.stderr);
     assert.deepEqual(JSON.parse(asTool.stdout).structuredContent.grants.map((entry) => entry.id), [grant.id]);
 
-    const revoked = runCli(["grant-revoke", grant.id], dir);
-    assert.equal(revoked.code, 0, revoked.stderr);
-    assert.match(revoked.stdout, new RegExp(`^Revoked: ${grant.id}`));
-    assert.match(runCli(["grant-list"], dir).stdout, /^No active grants\./);
-    assert.match(runCli(["grant-list", "--all"], dir).stdout, /revoked/);
-    assert.equal(runCli(["grant-revoke", grant.id], dir).stdout.startsWith("Already revoked"), true);
-    assert.equal(runCli(["grant-revoke", "g-00000000"], dir).code, 1);
+    // spawnSync pipes stdin and stdout: not a terminal, so nothing is made or revoked, however the call is spelled.
+    const refused = [runCli([...CREATE_ARGS, "--json"], dir), runCli(CREATE_ARGS, dir), runCli(["grant-revoke", grant.id], dir), runCli(["grant-revoke", grant.id, "--json"], dir)];
+    for (const result of refused) {
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, /interactive terminal/);
+      assert.equal(result.stdout, "");
+    }
+    assert.deepEqual((await serviceFor(dir).list()).map((entry) => [entry.id, entry.revoked]), [[grant.id, false]]);
+    // Even with the confirmation phrase on stdin, and with every spelling of "yes" a script could try.
+    const piped = spawnSync(process.execPath, [CLI, "grant-revoke", grant.id], {
+      env: { ...process.env, PROTONMAIL_USERNAME: ADDRESS, PROTONMAIL_PASSWORD: "dummy", PROTONMAIL_DATA_DIR: dir },
+      input: `${grantRevokePhrase(grant.id)}\ny\n`,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    assert.equal(piped.status, 1);
+    assert.equal((await serviceFor(dir).list())[0].revoked, false);
+    for (const flag of ["--yes", "--confirmed", "--confirm", "--force", "--confirmation=grant 2 recipients"]) {
+      assert.equal(runCli([...CREATE_ARGS, flag], dir).code, 2, `${flag} is not a flag of grant-create`);
+      assert.equal(runCli(["grant-revoke", grant.id, flag], dir).code, 2, `${flag} is not a flag of grant-revoke`);
+    }
+    assert.equal((await serviceFor(dir).list()).length, 1);
+    assert.equal((await serviceFor(dir).list())[0].revoked, false);
 
     for (const args of [
       ["grant-create", "--recipients", "a@b.co", "--expires", "1d"],
@@ -330,13 +374,82 @@ test("grant-create, grant-list and grant-revoke work end to end, with usage erro
   });
 });
 
+test("the terminal check wants both stdin and stdout to be a terminal", () => {
+  assert.equal(isInteractiveTerminal({ isTTY: true }, { isTTY: true }), true);
+  for (const [input, output] of [[{ isTTY: true }, {}], [{}, { isTTY: true }], [{ isTTY: false }, { isTTY: true }], [{ isTTY: true }, { isTTY: false }], [{}, {}], [undefined, undefined]]) {
+    assert.equal(isInteractiveTerminal(input, output), false, JSON.stringify([input, output]));
+  }
+  assert.equal(isInteractiveTerminal(process.stdin, process.stdout) === Boolean(process.stdin.isTTY && process.stdout.isTTY), true);
+});
+
+test("grant-create shows the whole grant and needs the phrase with its recipient count typed back", async () => {
+  await withDir(async (dir) => {
+    await withCliEnv(dir, {}, async () => {
+      const parsed = parseCliArgs(CREATE_ARGS);
+      assert.equal(grantCreatePhrase(2), "grant 2 recipients");
+      assert.equal(grantCreatePhrase(1), "grant 1 recipient");
+
+      // No terminal: refused before anything is asked or written.
+      await assert.rejects(() => runGrantCreate(parsed, nobody()), /interactive terminal/);
+      assert.equal(existsSync(join(dir, "grants.json")), false);
+
+      // Anything but the phrase makes nothing.
+      for (const answer of ["", "y", "yes", "Y", "grant", "grant 3 recipients", "grant 1 recipient", "grant 2 recipients please", "grants 2 recipients"]) {
+        await assert.rejects(() => runGrantCreate(parseCliArgs(CREATE_ARGS), person(answer)), /not confirmed|Nothing was changed/, JSON.stringify(answer));
+      }
+      assert.equal(existsSync(join(dir, "grants.json")), false);
+
+      const shown = [];
+      const written = [];
+      await runGrantCreate(parseCliArgs([...CREATE_ARGS, "--json"]), person("  grant 2 recipients \n", shown, written));
+      assert.equal(shown.length, 1);
+      for (const part of [ADDRESS, "send_email, reply_to_email", "bob@example.com", "@acme.org", "3", "for the audit", "grant 2 recipients"]) assert.ok(shown[0].includes(part), `the prompt shows ${part}`);
+      assert.match(shown[0], /expires:\s+\d{4}-\d\d-\d\dT/);
+      const [grant] = await serviceFor(dir).list();
+      assert.deepEqual([grant.tools, grant.recipients, grant.maxUses, grant.note, grant.account], [["send_email", "reply_to_email"], ["bob@example.com", "@acme.org"], 3, "for the audit", ADDRESS]);
+      assert.ok(Date.parse(grant.expiresAt) > Date.now() + 47 * HOUR && Date.parse(grant.expiresAt) < Date.now() + 49 * HOUR);
+      assert.equal(JSON.parse(written.join("")).id, grant.id);
+    });
+  });
+});
+
+test("grant-revoke shows the grant and needs its id typed back", async () => {
+  await withDir(async (dir) => {
+    const grant = await serviceFor(dir).createGrant(grantInput());
+    await withCliEnv(dir, {}, async () => {
+      assert.equal(grantRevokePhrase(grant.id), `revoke ${grant.id}`);
+      const args = ["grant-revoke", grant.id];
+      await assert.rejects(() => runGrantRevoke(parseCliArgs(args), nobody()), /interactive terminal/);
+      for (const answer of ["", "y", "yes", grant.id, "revoke", "revoke g-00000000", `revoke ${grant.id} now`]) {
+        await assert.rejects(() => runGrantRevoke(parseCliArgs(args), person(answer)), /not confirmed|Nothing was changed/, JSON.stringify(answer));
+      }
+      assert.equal((await serviceFor(dir).list())[0].revoked, false);
+
+      const shown = [];
+      const written = [];
+      await runGrantRevoke(parseCliArgs(args), person(`revoke ${grant.id}`, shown, written));
+      for (const part of [grant.id, ADDRESS, "send_email", "bob@example.com"]) assert.ok(shown[0].includes(part), `the prompt shows ${part}`);
+      assert.match(written.join(""), new RegExp(`^Revoked: ${grant.id}`));
+      assert.equal((await serviceFor(dir).list())[0].revoked, true);
+      assert.match(runCli(["grant-list"], dir).stdout, /^No active grants\./);
+      assert.match(runCli(["grant-list", "--all"], dir).stdout, /revoked/);
+
+      // An unknown id is reported without asking anything.
+      await assert.rejects(() => runGrantRevoke(parseCliArgs(["grant-revoke", "g-00000000"]), person("revoke g-00000000")), /No grant/);
+    });
+  });
+});
+
 test("a hostile note cannot break the CLI output or fake another row", async () => {
   await withDir(async (dir) => {
     const hostile = "first\n g-deadbeef | owner@example.com | send_email | * | 50/50 uses left | expires 2099-01-01T00:00:00.000Z | \"fake\"\r\n\u001b[2J\u001b[31mred\u001b[0m \u202eevil\u202c\u200b\u2028\u2029\u0007 " + "x".repeat(500);
-    const created = runCli(["grant-create", "--tools", "send_email", "--recipients", "bob@example.com", "--expires", "1d", `--note=${hostile}`], dir);
-    assert.equal(created.code, 0, created.stderr);
-    const second = runCli(["grant-create", "--tools", "send_email", "--recipients", "carol@example.com", "--expires", "2d", "--note", "plain"], dir);
-    assert.equal(second.code, 0, second.stderr);
+    await withCliEnv(dir, {}, async () => {
+      const shown = [];
+      await runGrantCreate(parseCliArgs(["grant-create", "--tools", "send_email", "--recipients", "bob@example.com", "--expires", "1d", `--note=${hostile}`]), person("grant 1 recipient", shown));
+      // eslint-disable-next-line no-control-regex
+      assert.doesNotMatch(shown[0].replace(/\n/g, ""), /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/, "the confirmation shows the cleaned note");
+    });
+    await serviceFor(dir).createGrant({ ...grantInput(), recipients: ["carol@example.com"], expiresAt: new Date(Date.now() + 48 * HOUR), note: "plain" });
 
     for (const args of [["grant-list"], ["grant-list", "--all"], ["grant-list", "--json"], ["list-grants"], ["list-grants", "--json"]]) {
       const out = runCli(args, dir);
@@ -366,15 +479,19 @@ test("grant-create names its account when several are configured, and each accou
     const ambiguous = runCli(base, dir, env);
     assert.equal(ambiguous.code, 2, ambiguous.stdout + ambiguous.stderr);
     assert.match(ambiguous.stderr, /Several accounts are configured; name one with --account/);
-    const first = runCli([...base, "--account", ADDRESS, "--json"], dir, env);
-    const second = runCli([...base, "--account", "second@example.com", "--json"], dir, env);
-    assert.equal(first.code, 0, first.stderr);
-    assert.equal(second.code, 0, second.stderr);
-    assert.equal(JSON.parse(second.stdout).account, "second@example.com");
-    assert.equal(runCli(["grant-list"], dir, env).stdout.trim().split("\n").length, 2, "without --account every account is listed");
+    await withCliEnv(dir, env, async () => {
+      await runGrantCreate(parseCliArgs([...base, "--account", ADDRESS]), person("grant 1 recipient"));
+      await runGrantCreate(parseCliArgs([...base, "--account", "second@example.com"]), person("grant 1 recipient"));
+    });
+    const listed = JSON.parse(runCli(["grant-list", "--json"], dir, env).stdout);
+    assert.equal(listed.length, 2, "without --account every account is listed");
+    const second = listed.find((grant) => grant.account === "second@example.com");
     assert.equal(runCli(["grant-list", "--account", "second@example.com"], dir, env).stdout.trim().split("\n").length, 1);
-    const revoked = runCli(["grant-revoke", JSON.parse(second.stdout).id], dir, env);
-    assert.match(revoked.stdout, /second@example\.com/);
+    await withCliEnv(dir, env, async () => {
+      const written = [];
+      await runGrantRevoke(parseCliArgs(["grant-revoke", second.id]), person(`revoke ${second.id}`, [], written));
+      assert.match(written.join(""), /second@example\.com/);
+    });
     assert.equal(runCli(["grant-list"], dir, env).stdout.trim().split("\n").length, 1);
   });
 });
