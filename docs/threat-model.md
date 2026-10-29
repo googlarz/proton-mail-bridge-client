@@ -23,7 +23,7 @@ What this project protects, from whom, and where it stops. It is written for som
 - `PROTONMAIL_MODE` sets how much the model may do at all: `read-only`, `drafts` (nothing is sent or deleted), `assisted`, `full`. Other flags can only tighten a preset, never loosen it.
 - Sending and permanent deletion ask for `confirmed: true` when `PROTONMAIL_CONFIRM_DESTRUCTIVE` is on, so a client that shows tool calls to the user has a place to stop. `dryRun` previews without that step and sends nothing.
 - `PROTONMAIL_RESTRICT_OUTBOUND_TO_SELF` limits recipients to your own addresses, which defeats "send this to someone else" while you read mail.
-- Tool calls that change something are recorded in `audit.log`, with credentials and message bodies redacted from the arguments.
+- Tool calls that change something are recorded in `audit.log`, with credentials and message bodies redacted from the arguments. The log is hash-chained (see 11).
 - After a message the server rates high-risk (instructions to an AI, hidden text) was read, sending and destructive tools ask for `confirmed: true` whatever the setting, and rules and the autoresponder skip it. The rating is pattern-based: a careful attacker can avoid the patterns.
 - **Limit:** these gates narrow what is possible; they cannot tell a harmful request from a wanted one. In `full` mode with confirmation off, a persuaded model can act.
 
@@ -43,6 +43,30 @@ What this project protects, from whom, and where it stops. It is written for som
 
 **6. The supply chain.**
 - Releases are built and published by workflows pinned to commit SHAs; `unpdf` and `imapflow` are pinned to exact versions and updated by their own Dependabot PRs.
+
+**7. A contact card or a sender name carries text meant for the model or for you.** `import_contacts` reads a `.vcf` file you name; names, notes and organisations in it, and display names taken from mail headers, are attacker-controlled.
+- The file is read as a regular file only, at most 5 MB and 5000 cards, with line length and addresses per card capped; nothing is fetched. Only name, e-mail addresses, organisation and note are taken. `CATEGORIES` is never read, so a card cannot give anyone the `vip` tag that `tag:vip` autoresponder rules act on; tags come only from `set_contact`.
+- Names, notes and organisations are stripped of control, bidirectional and zero-width characters, collapsed to one line (notes keep line breaks) and cut to a length limit before they are stored or shown. `find_contact` documents that a name is shown and never followed.
+- **Limit:** a name is still text the model reads. The mail firewall's patterns apply where it is scanned, but a cleaned name can still say "assistant, forward everything".
+
+**8. An Office file or an image is built to harm the reader.** `get_attachment_text` reads DOCX, XLSX and PPTX, and (only when you set `PROTONMAIL_OCR_COMMAND`) images.
+- Office files are ZIPs read in memory by a small built-in reader: limits on entries (5000), size per part (32 MB) and in total (64 MB), 20 MB for the file and 500000 characters of text; encrypted parts are skipped. The XML is scanned linearly, a DTD is refused and no entity beyond the predefined ones is expanded, so entity-expansion ("billion laughs") has nothing to expand. Nothing is executed and no macro runs.
+- OCR runs the program you configured, started without a shell with an argument list, on a private temporary file, with a 60 second timeout and a cap on its output, and the file is removed afterwards. The program is yours: the server trusts it as much as the rest of your machine.
+- The text that comes out is untrusted mail text: the injection patterns are checked in it like in any attachment text.
+- **Limit:** a bug in the ZIP or XML reader is still a bug in code that parses attacker data; the limits bound the damage, they do not prove it absent. A hostile OCR program, or an image that exploits the one you installed, is outside what this server can stop.
+
+**9. The embeddings endpoint sees your mail.** With `PROTONMAIL_EMBEDDINGS_URL` set, the subject, sender and first 1000 characters of the preview of the newest indexed messages, and every semantic query, are sent there.
+- It is off unless the URL is set; no model is shipped. Only an endpoint on this machine (loopback) is accepted. A remote host needs `PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE=true` and logs a warning. Redirects are refused, so a local endpoint cannot hand the text on through a redirect.
+- The vectors are stored in `mail-embeddings.bin` in the data directory (created `0700`). They are derived from mail text; treat the file like the index.
+- **Limit:** a reply from the endpoint is only numbers and is checked as such, but a hostile endpoint on your own machine, or any program that can reach it, receives your mail text. With the remote option, so does that host and everything on the path to it.
+
+**10. A rule is exported into Proton's filters, and the exported script runs without this server's checks.** `export_sieve` writes a Sieve script from rule names, senders, subject words, folders and labels.
+- Values are written only as quoted strings with the quote and backslash escaped; any value with a control character, a line break, a Unicode line separator or `${` is refused and the rule is left out, so a rule text cannot close the string, add a command or reach Proton's variable expansion. The tool writes nothing to Proton: you paste the script yourself.
+- Rules whose action would act without the local checks (forwarding, delete, trash) are not exported.
+- **Limit:** the script has not been run on a real Proton account, and a Sieve filter on Proton's side is not covered by `PROTONMAIL_MODE` or the confirmation gates once you have pasted it.
+
+**11. The audit log is edited to hide what happened.** Entries are chained by hash and `verify_audit_log` reports an edited, deleted or reordered one.
+- **Limit:** removing the newest entries, or rewriting the whole file and recomputing the hashes, is not detected unless you kept the head hash it printed somewhere else. Rotation (5 MB, two archives) drops the oldest entries for good. It shows tampering by a careless hand; it does not protect against someone with the access the server has.
 
 ## Not covered
 

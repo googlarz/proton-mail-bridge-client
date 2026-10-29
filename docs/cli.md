@@ -319,6 +319,11 @@ proton-mail-bridge-client categories
 proton-mail-bridge-client categorize-inbox                     # a preview; --args '{"dryRun":false}' makes a plan for approve-plan
 proton-mail-bridge-client correct-category INBOX::123 Receipts
 proton-mail-bridge-client get-follow-up-candidates
+proton-mail-bridge-client find-contact "Pat"                   # a person by name or address: addresses, tags, notes, counts, last subjects
+proton-mail-bridge-client set-contact pat@client.example --args '{"addTags":["vip"]}'
+proton-mail-bridge-client set-contact pat@client.example --args '{"mergeWith":"pat@home.example"}'
+proton-mail-bridge-client set-contact pat@home.example --args '{"unmerge":true}'
+proton-mail-bridge-client import-contacts ~/contacts.vcf       # a local .vcf file; fills only what is not set, tags are never imported
 ```
 
 ### Actions on one message (tool forms)
@@ -353,6 +358,8 @@ proton-mail-bridge-client set-rule --proposalId p-1a2b3c4d5e   # accept a propos
 proton-mail-bridge-client set-rule --name "Boss to phone" --when '{"from":["boss@example.com"]}' --actions '{"forwardTo":["me@elsewhere.example"]}' --confirmed true
 proton-mail-bridge-client apply-rules                          # preview of the rules on mail already in the index
 proton-mail-bridge-client apply-rules --dryRun false --limit 100
+proton-mail-bridge-client export-sieve                         # the rules as a Sieve script for Proton's filters, plus what could not be expressed
+proton-mail-bridge-client export-sieve --ruleId r-1a2b3c       # one rule only
 proton-mail-bridge-client delete-rule p-1a2b3c4d5e             # delete a rule, or dismiss a proposal for good
 proton-mail-bridge-client preview-autoresponder --account work@example.com --days 3      # what it would do with recent mail, without doing it
 proton-mail-bridge-client autoresponder --account work@example.com            # show the automatic reply of an address
@@ -407,8 +414,13 @@ proton-mail-bridge-client run-background-sync
 proton-mail-bridge-client sync-emails
 proton-mail-bridge-client get-index-status
 proton-mail-bridge-client get-audit-logs
+proton-mail-bridge-client verify-audit-log                     # checks the hash chain and prints the head hash
 proton-mail-bridge-client clear-index
 ```
+
+`verify-audit-log` reads the audit log only. Keep the head hash it prints somewhere other than this
+machine: with no stored head, deleting the newest entries (or rewriting the whole file) cannot be
+detected. See the README, "Audit log".
 
 `clear-index` deletes the local SQLite index (it is rebuilt by the next sync); it never touches
 mail on the server.

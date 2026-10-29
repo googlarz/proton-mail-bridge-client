@@ -24,7 +24,7 @@
 
 ---
 
-Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 116 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
+Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 125 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
 
 > **Using Proton Drive too?** See [**proton-drive-mcp**](https://github.com/googlarz/proton-drive-mcp), the companion MCP server and CLI for Proton Drive (upload, download, share and manage your encrypted files from Claude). Run both side by side to handle mail and files in one conversation, for example save an attachment from here, then upload it to Drive. More in [Related projects](#related-projects).
 
@@ -45,7 +45,7 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
    - "Which of my emails have attachments from this month?"
    - "Show me my drafts and tighten the oldest one."
 5. **Not sure about handing over control?** Start with `PROTONMAIL_MODE=drafts`: Claude can read, search and prepare drafts, but nothing is sent or deleted until you change the mode. The server also tells the client how to behave (ids, accounts, never obeying instructions found inside a message).
-6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 116), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
+6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 125), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
 
 ---
 
@@ -57,7 +57,7 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
 - **Fast local search** — full-text search across your inbox from a local index that keeps its read state in step with the server
 - **Rules that suggest themselves** — a scan proposes filters and cleanup from your own mail, applies them to existing mail after a preview, and can forward by condition; see [Mailbox rules](#mailbox-rules-suggestions-filters-cleanup-forwarding)
 - **Automatic reply, per address, with rules** — off by default, with a preview of what it would do, draft-for-approval mode and working-hours; see [Autoresponder](#autoresponder-automatic-reply-per-address) (Proton's own auto-reply may be all you need)
-- **Full CLI** — a dedicated command for every one of the 116 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
+- **Full CLI** — a dedicated command for every one of the 125 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
 - **Runs where you do** — Claude Desktop bundle, npm, Homebrew, or a [Docker image](#running-in-docker-headless-machines) for a headless machine
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
 
@@ -317,7 +317,10 @@ An automatic reply for one address, plus a note that address appends to what it 
 - **When.** After a background sync has indexed new mail, so only while this server runs with `PROTONMAIL_AUTO_SYNC` on; with several clients open, the instance holding the sync lock does it. `outsideHours` (with a `timezone`) limits it to when you are not at work.
 - **What it does.** `mode: "send"` sends; `mode: "draft"` leaves a draft in your drafts for you to review and send. If the server may not send (`PROTONMAIL_MODE=drafts`, `ALLOW_SEND` off, or outbound mail confined to yourself), a reply becomes a draft by itself; if it may not write drafts either (read-only), it is refused.
 - **Rules**, first match wins: by sender (`boss@example.com`, `*@client.example`), words in the subject, and whether you have written to the sender before (`known: "yes"/"no"`). Each gives `reply`, `draft` or `skip`, optionally with its own text. Mail that matches none gets the default reply.
-- **Text.** Placeholders `{senderFirstName}`, `{senderName}`, `{senderAddress}`, `{subject}`, `{startsAt}`, `{endsAt}`.
+- **Text.** Placeholders `{senderFirstName}`, `{senderName}`, `{senderAddress}`, `{subject}`, `{startsAt}`, `{endsAt}`, `{returnDate}`, `{backupContact}`. `returnDate` and `backupContact` are plain text you set once (`returnDate` may be a date such as `2027-01-04`, written out in the reply's language); nobody is written to at the backup contact.
+- **Language.** `bodies` and `subjects` map a language code (`en`, `pl`, `de`) to a text. If the message answered is detected to be in one of those languages, that text is used and dates are written in it; anything else, or a language with no text, gets `body` / `subject`. Detection is a word-list guess on the subject and the start of the message, so a short or mixed-language message may be taken for the wrong language or none.
+- **Draft in your style.** In draft mode, if a style profile exists (`get_style_profile`), the draft opens and closes with your usual greeting and closing for that language instead of a fixed text. Sent replies use the text as written.
+- **VIP rules.** A rule's `from` accepts `tag:vip` (or any tag you set with `set_contact`), so a rule can treat people you tagged differently. The tag is looked up by the sender address in the message header.
 - **Safety headers.** `Auto-Submitted: auto-replied`, `Precedence: bulk`, `X-Auto-Response-Suppress: All`; the reply threads under the message it answers.
 - **Control.** Switching it on needs `confirmed: true` when `PROTONMAIL_CONFIRM_DESTRUCTIVE` is on and the server can send. Switching it off is always allowed, in every mode.
 
@@ -331,6 +334,8 @@ set_autoresponder  account=work@example.com  enabled=true  confirmed=true
                           {"known":"no","subjectContains":["unsubscribe"],"action":"skip"}]
 get_autoresponder  account=work@example.com                      # state, counts, who wrote, why mail was skipped, the log
 ```
+
+For a reply in the sender's language add `bodies={"pl":"Dzień dobry {senderFirstName}, wracam {returnDate}.","de":"Guten Tag {senderFirstName}, ich bin ab {returnDate} zurück."}` and `returnDate=2027-01-04`. `preview_autoresponder` shows, for each message, the language it detected, where the text came from (`textFrom`: rule, language or default), whether a draft would be `styled`, and the text itself.
 
 `outgoingNote` is appended, after the signature, to every mail sent from that address while the rule is active (a send with `appendSignature: false` opts out). On the command line: `set-autoresponder`, `autoresponder` and `preview-autoresponder`. The rule, the log and the memory of who was answered live in `autoresponder.json` in the account's data directory; every account (every address Bridge exposes) has its own.
 
@@ -364,7 +369,29 @@ A local ledger of what you promised and what was promised to you. `find_commitme
 
 ## Search by meaning (several wordings)
 
-`search_indexed_emails` takes `queries`: several wordings of one question, up to 8. Claude supplies the variants (synonyms, other languages: `["deposit", "kaucja", "Kaution", "rental agreement"]`), the server searches each in the local index and fuses the results, so a message found by several wordings ranks first and every hit says which wordings found it (`matchedBy`). There is no model and no download: the meaning comes from the model you already use. What it cannot find is mail that uses none of the words tried.
+`search_indexed_emails` takes `queries`: several wordings of one question, up to 8. Claude supplies the variants (synonyms, other languages: `["deposit", "kaucja", "Kaution", "rental agreement"]`), the server searches each in the local index and fuses the results, so a message found by several wordings ranks first and every hit says which wordings found it (`matchedBy`). By default there is no model and no download: the meaning comes from the model you already use. What it cannot find is mail that uses none of the words tried.
+
+**Optional: search by meaning with vectors.** Set `PROTONMAIL_EMBEDDINGS_URL` to an embedding endpoint **you run**, and `search_indexed_emails` gains `mode`: `lexical` (words), `semantic` (vectors) or `hybrid` (both, fused). Unset, which is the default, none of this runs and nothing is built. No model is shipped or downloaded.
+
+- **Endpoint.** Ollama (`http://127.0.0.1:11434/api/embed`) or anything OpenAI-compatible (a URL ending `/v1/embeddings`). `PROTONMAIL_EMBEDDINGS_MODEL` names the model (default `nomic-embed-text`).
+- **Privacy.** The text of each indexed message that gets a vector (subject, sender and the first 1000 characters of its preview), and each semantic query, is sent to that endpoint. Only a host on this machine (loopback) is accepted. A remote host is refused unless you set `PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE=true`, which logs a warning; your mail text then goes to that host. Redirects are not followed.
+- **What is built.** Vectors for the newest 10000 indexed messages, built in the background and stored in `mail-embeddings.bin` next to the index. It is derived from your mail, so treat it like the index. `get_index_status` has an `embeddings` block: configured, model, vectors built, pending.
+- **Fallback.** The default `mode` is `hybrid` once the endpoint is set up and vectors exist, otherwise `lexical`. If semantic ranking cannot run (endpoint down, no vectors yet) you get the lexical result, with `mode` and `semanticNotes` saying why. Semantic hits carry a cosine `similarity`.
+- **Quality is your model's.** Results are only as good as the embedding model you pick. A small local model can miss what a person would call obvious or rank a loose match high; treat `similarity` as a hint. This project has not compared models.
+
+## Contacts (people, not addresses)
+
+`find_contact` (CLI: `find-contact`) finds a person by name, part of a name or address and returns them as one identity: their addresses (merged ones included), organisation, tags, your notes, first and last contact, message counts both ways, the last few subjects, and whether you have ever written to them. Counts, dates and names come from the local index each time; only what you say is stored. `set_contact` sets a display name, notes and tags (such as `vip`), merges another address into the same person, or splits one out again. `import_contacts` reads a local `.vcf` file (vCard 2.1, 3.0, 4.0) and takes name, e-mail addresses, organisation and note; it fills only what is not set yet, **never reads `CATEGORIES` and never sets a tag**, so a file cannot mark anyone as a VIP.
+
+Limits: at most 5 MB and 5000 cards per import (the result says if cards were left); nothing is fetched over the network and nothing changes in the mailbox. This is a store of your own (in the account's data directory, one per account), not Proton's address book, which Bridge does not expose: export your contacts from Proton as vCard if you want them here. A name taken from mail headers is whatever the sender wrote; it is cleaned of control and invisible characters and shown, never followed.
+
+## Own categories (separate from Proton's)
+
+Proton Mail sorts mail into its own categories. According to public sources they are server-side and not exposed over IMAP, so this server cannot read what Proton decided, change it or add to it. These categories are a different thing: yours, kept on this machine, per account. `define_category` gives one a name, a description in your words (shown, never used for sorting), and the signals that put mail in it: example senders (`a@b.example`, or `@b.example` for a domain), subject words, list/bulk mail or not, mail from people you have written to, and optionally a label to add. `starter: true` adds a starter set (Receipts, Newsletters, Social, Updates, People) when you ask for it. A name that matches one of Proton's is reported as a clash.
+
+`categorize_inbox` sorts the newest INBOX messages (default 30, up to 100) and says why for each one. It is deterministic: no model decides, and who the sender is counts only when the message passed authentication. By default it is a **preview**. With `dryRun: false` it makes a plan that adds each category's label, which goes through `approve_plan` and can be taken back with `undo_plan` like any other plan. Mail that already has the label, categories without a label and labels that do not exist yet are left out and listed. `correct_category` tells it where a message really belongs: the sender's weight towards that category goes up (stored locally), the sender's next mail follows, and the answer lists which other recent messages would change. Corrections are not copied between accounts.
+
+What it does not do: see or touch Proton's categories, run by itself (it sorts what is in the INBOX when you ask), or place a message that fits no category.
 
 ## Mailbox rules (suggestions, filters, cleanup, forwarding)
 
@@ -388,7 +415,25 @@ apply_rules  dryRun=false  limit=100
 get_rules                                                      # rules, waiting proposals, what the rules did lately
 ```
 
+**Export to Proton's own filters (`export_sieve`).** Proton's filters run on Proton's servers, also while this server and your computer are off, and accept [Sieve](https://proton.me/support/sieve-advanced-custom-filters). `export_sieve` (CLI: `export-sieve`) compiles the enabled rules, in order, to one script you paste into a new Sieve filter in Proton's settings. It changes nothing and sends nothing.
+
+- **Checked against** Proton's Sieve page and the public source of Proton's web client (read 2026-10-29): the extensions, the `address` / `header` / `exists` tests and the `fileinto`, `addflag` and `stop` actions the script uses, and the names `archive`, folders and labels are given by.
+- **Assumed, not verified:** that a custom folder is named by its path without `Folders/`, a label by its name without `Labels/`, and that `exists "X-Attached"` means an attachment (taken from Proton's web client). **The script has not been run on a real Proton account.** Paste it into the filter editor, which checks the syntax, and try it on a test message before you rely on it. The folders and labels it names must already exist.
+- **Not exported, each listed in `unsupported` with its reason:** rules on a folder other than INBOX or on age (`olderThanDays`), since Proton filters run once, as mail arrives; anything that trashes or deletes (here those run only on request, after a preview); `forwardTo` (Proton's Sieve documents no redirect, and a forward on Proton's side would skip this server's send checks); switched-off rules; rules whose only condition is `unread`. A condition that cannot be expressed keeps the whole rule out, because dropping it would widen what the rule matches; an action that cannot be expressed is left out of an otherwise exported rule.
+- **Behaviour differs:** the script acts on every new message, which on Proton may include mail it puts in Spam (the local rules never touch it), and your existing Proton filters run as well. Locally the first matching rule that moves a message decides where it goes; the script guards later moves the same way. A rule name, folder or label containing a control character or `${` is kept out, since Proton's Sieve can read `${` as a variable.
+
 The scan and `apply_rules` work from the local index (by default INBOX and Sent; run `sync_emails` for other folders), so check that it is fresh. Rules, proposals and the log live in `rules.json` in the account's data directory; each account has its own.
+
+## Audit log (tamper-evident)
+
+Tool calls that change something are recorded in `audit.log` in the data directory, with credentials and message bodies redacted. Each entry carries a sequence number and the SHA-256 hash of the entry before it, so `verify_audit_log` (CLI: `verify-audit-log`) can tell that an entry was **edited, deleted from the middle or reordered**. It returns `ok`, how many entries it checked, the first broken `seq` with the reason, and the head hash. Entries written before the chain existed have no hash and are counted as `legacyEntries`, not checked.
+
+What it does not catch:
+
+- **Cut-off newest entries, or a rewritten file.** If the newest entries are removed, what is left is still a valid chain. If someone who can write the file recomputes every hash after their change, the chain is valid too. Only a **head hash kept somewhere else** catches these: note the one `verify_audit_log` returns and compare it later. This server does not store one for you. So this is evidence against a careless edit, not a defence against someone with the same access as the server.
+- **Rotation.** The log rotates at 5 MB into `audit.log.1` and `audit.log.2`, and the oldest is dropped. Verification reads all three files and reports `rotatedBeforeSeq` when older entries have been rotated away; that is not treated as tampering, but entries before it can no longer be checked, and a head hash saved before the rotation drops out of the log cannot be found in it.
+
+`verify_audit_log` only reads.
 
 ## Multi-account support (v2.1.0+)
 
@@ -529,7 +574,7 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 
 `<command> --help` prints that command's usage without running it. Flags accept `--flag value` or `--flag=value` (a value starting with `--` needs the `=` form, or must come after a bare `--`); unknown flags are an error. Exit codes: `0` success, `1` failure (including a failed `doctor` or `connection-status` check, or a failed item in a `batch`/`bulk-*` run), `2` usage error.
 
-**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 116 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
+**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 125 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
 
 ---
 
@@ -551,7 +596,7 @@ A mode is a floor: the individual flags below can make things stricter (`PROTONM
 All flags work in both the MCP server and CLI:
 
 ```bash
-PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 116 — saves context window
+PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 125 — saves context window
 PROTONMAIL_READ_ONLY=true            # disable all write operations
 PROTONMAIL_ALLOW_SEND=false          # disable SMTP sends only (other writes still work)
 PROTONMAIL_CONFIRM_DESTRUCTIVE=true  # require confirmed:true on send, reply, forward, delete
@@ -595,7 +640,7 @@ PROTONMAIL_PASSWORD_COMMAND='pass proton/password'
 PROTONMAIL_DATA_DIR="$HOME/.proton-mail-bridge-client"
 
 # Tools
-PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 100
+PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 125
 
 # Safety
 PROTONMAIL_READ_ONLY='false'
@@ -632,6 +677,13 @@ PROTONMAIL_SHORTEN_LINKS='false'     # true = long tracking links in Markdown bo
 PROTONMAIL_MAX_INLINE_KB='40'         # in KB (older name PROTONMAIL_MAX_INLINE_BYTES still works, also in KB): largest attachment get_attachment_content returns inline as base64
 PROTONMAIL_PDF_MAX_MB='10'            # largest PDF get_attachment_text extracts text from (1-100 MB); bigger ones are refused with a message
 PROTONMAIL_PDF_MAX_PAGES='50'         # pages get_attachment_text reads from a PDF (1-2000); a longer PDF is cut off with a note saying how many pages are missing
+PROTONMAIL_OCR_COMMAND=''             # optional: a program run as '<command> <image file> stdout' (tesseract's convention) so get_attachment_text can read images and PDF pages without a text layer. Started without a shell, 60 s limit; unset, such images and scans fail
+PROTONMAIL_INDEX_ATTACHMENTS='false'  # true: text of PDF, DOCX, XLSX and PPTX attachments is added to the local index so search finds it (bounded, no OCR); more disk, slower sync
+
+# Semantic search (optional; nothing runs unless the URL is set)
+PROTONMAIL_EMBEDDINGS_URL=''          # http://127.0.0.1:11434/api/embed (Ollama) or an OpenAI-compatible .../v1/embeddings; mail text is sent there
+PROTONMAIL_EMBEDDINGS_MODEL='nomic-embed-text'
+PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE='false'  # true: accept an endpoint on another machine (your mail text goes to that host)
 
 # Tuning and diagnostics
 PROTONMAIL_OP_DELAY_MS='0'            # minimum gap in ms between IMAP mailbox operations (0-5000); raise it to be gentler on a slow Bridge. 0 = no throttling
@@ -685,7 +737,7 @@ With several accounts or a signature, the server sends from whichever `from` the
 `get_email_stats` · `get_email_analytics` · `get_contacts` · `get_volume_trends` · `folder_stats` · `top_senders`
 
 ### Diagnostics
-`get_connection_status` · `get_runtime_status` · `run_doctor` · `get_audit_logs` · `run_background_sync` · `wait_for_mailbox_changes` · `sync_emails` · `get_index_status` · `clear_cache` · `clear_index` · `get_logs`
+`get_connection_status` · `get_runtime_status` · `run_doctor` · `get_audit_logs` · `verify_audit_log` · `run_background_sync` · `wait_for_mailbox_changes` · `sync_emails` · `get_index_status` · `clear_cache` · `clear_index` · `get_logs`
 
 ### Unsubscribe & trust
 `get_unsubscribe_info` · `unsubscribe_sender` — `get_email_by_id` also returns a `security` block (DKIM/SPF/DMARC, encryption, spam score)
@@ -696,10 +748,15 @@ With several accounts or a signature, the server sends from whichever `from` the
 ### Templates
 `create_template` · `list_templates` · `get_template` · `delete_template` · `render_template` — `{{variable}}` substitution, render then pass the result to `send_email`
 
+### Contacts & categories
+`find_contact` · `set_contact` · `import_contacts` · `define_category` · `list_categories` · `categorize_inbox` · `correct_category` — see [Contacts](#contacts-people-not-addresses) and [Own categories](#own-categories-separate-from-protons)
+
 ### Import/export & attachments
 `export_email` · `import_email` · `get_attachment_text` · `get_emails_by_ids`
 
 `get_attachment_text` reads text-like attachments and PDFs. A PDF comes back page by page, each page headed `--- Page N of M ---`, and the result has a `pdf` field with `totalPages`, `extractedPages`, `omittedPages` and `truncated`. It is limited by `PROTONMAIL_PDF_MAX_MB` (default 10) and `PROTONMAIL_PDF_MAX_PAGES` (default 50); past the page limit the text ends with a line saying how many pages were left out. A password-protected PDF, a damaged file and a scan without a text layer each fail with a short explanation. The PDF is read in memory with [unpdf](https://github.com/unjs/unpdf) (pure JavaScript, no native module): nothing is written to disk, nothing is downloaded, and a document that takes longer than 30 seconds is stopped.
+
+It also reads **Word, Excel and PowerPoint files** (`.docx`, `.xlsx`, `.pptx`): a DOCX as its text, an XLSX as each sheet's name followed by its cells row by row, a PPTX slide by slide. They are opened in memory by a small built-in reader (no Office, no macros run, nothing written to disk). Limits: files up to 20 MB, the text cut at 500000 characters, and a ZIP with too many or too large parts is refused. Not supported: the old binary `.doc`, `.xls` and `.ppt`, password-protected files, and files with a DTD declaration; they are not read. Text inside images or embedded objects is not read either. With `PROTONMAIL_OCR_COMMAND` set (for example `tesseract`), an image, and up to 10 pages of a PDF that has no text layer, are read by that program instead of failing; it is run without a shell, with a 60 second limit, on images up to 20 MB. OCR is off unless you set it, and its output is only as good as the program's. With `PROTONMAIL_INDEX_ATTACHMENTS=true` the text of PDF and Office attachments (up to 8000 characters per attachment and 32000 per message, the first 20 pages of a PDF, no OCR) is added to the local index when a message is synced, so `search_indexed_emails` finds words that appear only in an attachment; an attachment that cannot be read is skipped.
 
 ---
 
@@ -774,7 +831,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - Defaults are bounded: `search_emails`/`search_indexed_emails` return 50 (pass `limit` for more), `list_drafts` 20, `list_scheduled_sends` 50 newest first. Each reports `hasMore`; page with `offset`.
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_KB`.
-- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 116: about 7k tokens of tool definitions instead of about 21k (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 125: about 7k tokens of tool definitions instead of about 21k (measured with 116 tools, before the nine tools of 2.17 were added and not re-measured; the full set now costs somewhat more) (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 
 **Working with drafts**
