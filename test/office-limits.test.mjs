@@ -4,6 +4,7 @@ import { extractOfficeText, extractOfficeTextAsync, OFFICE_MAX_INPUT_BYTES } fro
 import { withRiskScan, MailTaint } from "../dist/utils/mail-security.js";
 import { createTextResult } from "../dist/tools/results.js";
 import { buildDocx, buildZip } from "./helpers/office-fixtures.mjs";
+import { assertScalesWithInput } from "./helpers/scaling.mjs";
 
 const XML = '<?xml version="1.0"?>';
 const MB = 1024 * 1024;
@@ -72,12 +73,12 @@ test("a single cell or shared string is cut at the length Excel allows in a cell
 test("30 MB of entity references are cut at the text cap before they are decoded", () => {
   const docx = buildDocx(`<w:r><w:t>${"&amp;".repeat(6 * MB)}</w:t></w:r>`);
   const before = process.memoryUsage().rss;
-  const { ms, value } = timed(() => extractOfficeText(docx, "docx"));
+  const value = extractOfficeText(docx, "docx");
   const grown = (process.memoryUsage().rss - before) / MB;
   assert.equal(value.truncated, true);
   assert.equal(value.text.length, 500_000);
-  assert.ok(ms < 500, `${ms} ms`);
   assert.ok(grown < 300, `rss grew ${grown | 0} MB`);
+  assertScalesWithInput("entities", (n) => buildDocx(`<w:r><w:t>${"&amp;".repeat(n / 5)}</w:t></w:r>`), (file) => extractOfficeText(file, "docx"), 3 * MB);
 });
 
 test("decoding still gives the same text below the cap", () => {

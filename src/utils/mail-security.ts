@@ -132,6 +132,29 @@ function matchesInstruction(text: string): string | undefined {
   return undefined;
 }
 
+// Adversarial text with hiding characters costs up to about 1.3 ms per KB (normalisation variants times patterns), so one
+// text is not matched whole past MAX_WHOLE_TEXT: its two ends and a few evenly spaced windows between them are, each
+// normalised on its own, and the assessment says it was only partly read.
+const MAX_WHOLE_TEXT = 256_000;
+const END_WINDOW = 48_000;
+const MIDDLE_WINDOWS = 8;
+const MIDDLE_WINDOW = 12_000;
+
+function matchesInstructionBounded(text: string): { reason?: string; partial: boolean } {
+  if (text.length <= MAX_WHOLE_TEXT) return { reason: matchesInstruction(text), partial: false };
+  const span = text.length - 2 * END_WINDOW;
+  const windows = [text.slice(0, END_WINDOW), text.slice(-END_WINDOW)];
+  for (let i = 0; i < MIDDLE_WINDOWS; i += 1) {
+    const start = END_WINDOW + Math.floor(((i + 0.5) * span) / MIDDLE_WINDOWS) - MIDDLE_WINDOW / 2;
+    windows.push(text.slice(start, start + MIDDLE_WINDOW));
+  }
+  for (const window of windows) {
+    const reason = matchesInstruction(window);
+    if (reason) return { reason, partial: true };
+  }
+  return { partial: true };
+}
+
 function headerText(headers: Record<string, unknown> | undefined, name: string): string {
   const value = headers?.[name] ?? headers?.[name.toLowerCase()];
   if (Array.isArray(value)) return value.join(" ");
@@ -143,8 +166,10 @@ export function assessMail(input: AssessInput): SecurityAssessment {
   const caution: string[] = [];
   const visible = `${input.subject ?? ""}\n${input.text ?? ""}`;
 
-  const instruction = matchesInstruction(visible);
+  const { reason: instruction, partial } = matchesInstructionBounded(visible);
   if (instruction) high.push(`The message ${instruction}.`);
+  // Same fail-closed wording as the result scan: text that was not read in full may hide an instruction.
+  else if (partial) high.push(`oversized-unscanned: this message is ${visible.length} characters long, so only parts of it were checked for instructions to an AI (partially assessed).`);
 
   const html = typeof input.html === "string" ? input.html.slice(0, MAX_HTML_SCANNED) : "";
   let hiddenSeen = false;
@@ -158,7 +183,8 @@ export function assessMail(input: AssessInput): SecurityAssessment {
     hiddenSeen = true;
   }
   if (hiddenSeen && high.length === 0) caution.push("The message has text the reader cannot see (hidden by its markup).");
-  const zeroWidth = (visible.match(ZERO_WIDTH) ?? []).length;
+  let zeroWidth = 0;
+  for (const _ of visible.matchAll(ZERO_WIDTH)) if (++zeroWidth >= 5) break;
   if (zeroWidth >= 5 && input.automated !== true) caution.push("The text has invisible characters (zero-width), which can hide wording from the reader.");
 
   const fromAddress = input.from?.[0]?.address;

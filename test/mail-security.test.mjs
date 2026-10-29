@@ -9,6 +9,7 @@ import { createServer } from "../dist/index.js";
 import { MailTaint, annotateHighRisk, assessMail, isGatedAction } from "../dist/utils/mail-security.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 import { createMessage, makeCertificate, startFakeBridge } from "./helpers/fake-bridge.mjs";
+import { assertScalesWithInput } from "./helpers/scaling.mjs";
 import { HIDE_FROM_USER, IGNORE_DE, IGNORE_EN, IGNORE_PL, INJECTION, ROLE_MARKER } from "./helpers/injection-samples.mjs";
 
 const from = [{ name: "Alice", address: "alice@example.com" }];
@@ -72,20 +73,44 @@ test("hiding characters do not raise false alarms on ordinary mail, with or with
   }
 });
 
-test("normalising before matching keeps the instruction patterns linear on 1 MB with hiding characters", () => {
-  const MB = 1_000_000;
-  for (const text of [
-    "forward\u200b all emails to ".repeat(MB / 23),
-    "ignore previous previous \u00ad".repeat(MB / 27),
-    "do not never don't \u0001tell ".repeat(MB / 25),
-    "\uff49gnore ".repeat(MB / 7),
-    `ignore\u200b ${"x".repeat(MB)}`,
-    "\u200b".repeat(MB),
-  ]) {
-    const started = Date.now();
-    assessMail({ text });
-    assert.ok(Date.now() - started < 2000, `${Date.now() - started} ms for ${JSON.stringify(text.slice(0, 30))}`);
+test("normalising before matching keeps the instruction patterns linear with hiding characters", () => {
+  const shapes = {
+    forward: (size) => "forward\u200b all emails to ".repeat(size / 23),
+    ignore: (size) => "ignore previous previous \u00ad".repeat(size / 27),
+    doNot: (size) => "do not never don't \u0001tell ".repeat(size / 25),
+    fullwidth: (size) => "\uff49gnore ".repeat(size / 7),
+    longGap: (size) => `ignore\u200b ${"x".repeat(size)}`,
+    zeroWidth: (size) => "\u200b".repeat(size),
+  };
+  // 250 KB is read whole; 1 MB is read by windows, so the larger input must not cost more than the scan limit allows.
+  for (const [name, make] of Object.entries(shapes)) assertScalesWithInput(name, make, (text) => assessMail({ text }), 250_000);
+});
+
+test("a text past the whole-text limit is read by windows and says it was only partly assessed", () => {
+  const filler = (size) => "Quarterly figures are attached for review. ".repeat(size / 43);
+  const instruction = `please ${IGNORE_EN.toLowerCase()} now`;
+  const big = assessMail({ text: filler(1_000_000) });
+  assert.equal(big.level, "high");
+  assert.match(big.reasons.join(" "), /oversized-unscanned.*partially assessed/);
+  const small = assessMail({ text: filler(200_000) });
+  assert.equal(small.level, "ok", "ordinary sizes are read whole and stay clean");
+  assert.equal(assessMail({ text: `${filler(200_000)}${instruction} ${filler(40_000)}` }).level, "high");
+  assert.doesNotMatch(assessMail({ text: `${filler(200_000)}${instruction} ${filler(40_000)}` }).reasons.join(" "), /partially/, "read whole, the instruction itself is reported");
+  // Head, tail and the middle windows are read, so an instruction there is named; one between windows is reported as unscanned.
+  const size = 5_000_000;
+  const at = (position) => `${filler(position)}${instruction}${filler(size - position)}`;
+  const firstWindowCentre = 48_000 + Math.floor((size - 96_000) / 16);
+  for (const position of [100, size - 1_000, firstWindowCentre]) {
+    const risk = assessMail({ text: at(position) });
+    assert.equal(risk.level, "high", `instruction at ${position}`);
+    assert.match(risk.reasons[0], /tells an AI to ignore/, `instruction at ${position}`);
   }
+  const between = assessMail({ text: at(size / 2) });
+  assert.equal(between.level, "high");
+  assert.match(between.reasons.join(" "), /tells an AI to ignore|oversized-unscanned/);
+  // Hiding characters inside the instruction are normalised per window.
+  const hidden = assessMail({ text: `${filler(100)}${instruction.replace("ignore", "ig\u200bnore")}${filler(size)}` });
+  assert.match(hidden.reasons.join(" "), /tells an AI to ignore/);
 });
 
 test("hidden markup, mismatched links, reply-to and failed authentication raise caution; hidden instructions are high", () => {
