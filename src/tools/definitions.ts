@@ -1793,8 +1793,19 @@ export const TOOLS = [
       properties: {
         account: ACCOUNT_FILTER_PROPERTY,
         sinceCursor: { type: "string", description: "The nextCursor of an earlier call: return only events after it. Omit for the newest events." },
-        types: { type: "array", items: { type: "string" }, description: "Only these event types, or whole groups: mail.new, mail.new_overflow, snooze.woke, snooze.failed, reply_reminder.due, send.sent, send.failed, rule.acted, autoresponder.replied, autoresponder.drafted, autoresponder.failed, plan.applied, plan.undone; \"mail\", \"snooze\", \"send\", \"autoresponder\" or \"plan\" match every type in the group." },
+        types: { type: "array", items: { type: "string" }, description: "Only these event types, or whole groups: mail.new, mail.new_overflow, snooze.woke, snooze.failed, reply_reminder.due, send.sent, send.failed, rule.acted, autoresponder.replied, autoresponder.drafted, autoresponder.failed, plan.applied, plan.undone, delegation.used; \"mail\", \"snooze\", \"send\", \"autoresponder\" or \"plan\" match every type in the group." },
         limit: { type: "integer", description: "At most this many events (1-200, default 50).", minimum: 1, maximum: 200, default: 50 },
+      },
+    },
+  },
+  {
+    name: "list_grants",
+    description: "The delegation grants in force: narrow, expiring permissions the user made with the CLI (grant-create) for sending to named recipients. Read-only: you cannot create, change or revoke a grant, only the user can. With PROTONMAIL_DELEGATION=on, send_email, reply_to_email, reply_all_email, forward_email, send_draft and schedule_draft go out without asking again when a grant lists the tool and covers EVERY To, Cc and Bcc recipient (an exact address or a whole @domain); each such send uses up one of the grant's uses. A grant never overrides the confirmation required after a suspicious message was read, read-only mode, the outbound allow-list or any other setting. Returns each grant's id, note, account, tools, recipients, remainingUses and expiresAt; delegation: \"off\" means this server ignores grants.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: ACCOUNT_FILTER_PROPERTY,
       },
     },
   },

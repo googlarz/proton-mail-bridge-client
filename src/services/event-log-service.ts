@@ -26,6 +26,7 @@ export const EVENT_TYPES = [
   "autoresponder.failed",
   "plan.applied",
   "plan.undone",
+  "delegation.used",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 

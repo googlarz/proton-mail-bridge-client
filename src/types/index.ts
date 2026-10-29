@@ -558,6 +558,8 @@ export interface ProtonRuntimeConfig {
   /** PROTONMAIL_APPROVAL: who may confirm a gated action. Unset is "off": the model's `confirmed: true` counts. */
   approval?: "off" | "elicit" | "require";
   approvalTimeoutSeconds?: number;
+  /** PROTONMAIL_DELEGATION: whether a delegation grant (made with the CLI) can stand in for the approval of a send it covers. Unset is "off". */
+  delegation?: "off" | "on";
   /** The PROTONMAIL_MODE preset the flags below started from, when one was set. */
   mode?: SafetyMode;
   readOnly: boolean;

@@ -49,9 +49,10 @@ import { handleCategoryTool } from "./tools/categories.js";
 import { EventsNotifier, eventsResourceText, handleEventsTool } from "./tools/events.js";
 import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
+import { handleDelegationTool } from "./tools/delegation.js";
 import { handleContactTool } from "./tools/contacts.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
-import { applyApprovalPolicy, type ApprovalLookups } from "./utils/approval.js";
+import { applyApprovalPolicy, clientCanElicit, type ApprovalLookups } from "./utils/approval.js";
 import { buildEmailResourceUri, buildEventsResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
 export { mailboxChangedSinceCheckpoint } from "./tools/index-refresh.js";
@@ -395,16 +396,20 @@ export function createServer(
     logger.debug("Handling tool call", "MCPServer", { name, argKeys: Object.keys(args || {}) });
 
     try {
+      // PROTONMAIL_DELEGATION=on: a grant that covers every recipient of this send stands in for the person's answer.
+      const delegated = await ctx.delegation.approve(name, args, { declared: declaredArguments(name), approval: config.runtime.approval ?? "off", canElicit: clientCanElicit(server) });
       // PROTONMAIL_APPROVAL: the person is asked through the client, and `confirmed` from the model counts for nothing.
-      await applyApprovalPolicy({
-        mode: config.runtime.approval ?? "off",
-        server,
-        name,
-        args,
-        declared: declaredArguments(name),
-        lookups: approvalLookups(ctx),
-        timeoutSeconds: config.runtime.approvalTimeoutSeconds,
-      });
+      if (!delegated) {
+        await applyApprovalPolicy({
+          mode: config.runtime.approval ?? "off",
+          server,
+          name,
+          args,
+          declared: declaredArguments(name),
+          lookups: approvalLookups(ctx),
+          timeoutSeconds: config.runtime.approvalTimeoutSeconds,
+        });
+      }
       // After a high-risk message was read, tools that reach outside ask for an explicit confirmation, whatever the
       // confirmation setting says; a preview or a switch-off changes nothing and passes.
       const tainted = ctx.taint.current();
@@ -431,6 +436,9 @@ export function createServer(
 
         case "get_events":
           return await handleEventsTool(name, args, ctx);
+
+        case "list_grants":
+          return await handleDelegationTool(name, args, ctx);
 
         case "get_style_profile":
           return await handleStyleTool(name, args, ctx);

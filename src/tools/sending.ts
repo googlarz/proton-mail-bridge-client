@@ -108,6 +108,7 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
       const sendSmtp = sendBundle ? sendBundle.smtpService : smtpService;
       const sendImap = sendBundle ? sendBundle.imapService : imapService;
 
+      await ctx.delegation.claim(args, name, effectiveSendBundle, [...to, ...(cc ?? []), ...(bcc ?? [])]);
       if (undoWindowSeconds > 0) {
         // The undo-send queue now goes through the resolved account's OWN
         // deliveryQueueService (same routing as the immediate-send path above),
@@ -360,6 +361,7 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           appendSignature: false,
       };
       const undoWindowreply = resolveUndoWindowSeconds(args);
+      await ctx.delegation.claim(args, name, sendBundleForReply, [...to, ...cc, ...extraBcc]);
       if (undoWindowreply > 0) {
         return queueUndoSend(sendBundleForReply, replyPayload, undoWindowreply, name, args, { repliedTo: prefixedIdFor(readBundleReply, detail.id), to, cc });
       }
@@ -461,6 +463,7 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           appendSignature: false,
       };
       const undoWindowreplyAll = resolveUndoWindowSeconds(args);
+      await ctx.delegation.claim(args, name, sendBundleForRa, [...toRa, ...ccRa, ...extraBccRa]);
       if (undoWindowreplyAll > 0) {
         return queueUndoSend(sendBundleForRa, replyAllPayload, undoWindowreplyAll, name, args, { repliedTo: prefixedIdFor(readBundleRa, detailRa.id), to: toRa, cc: ccRa });
       }
@@ -680,6 +683,7 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           appendSignature: false,
       };
       const undoWindowforward = resolveUndoWindowSeconds(args);
+      await ctx.delegation.claim(args, name, sendBundleForFwd, [...to, ...cc, ...bcc]);
       if (undoWindowforward > 0) {
         return queueUndoSend(sendBundleForFwd, forwardPayload, undoWindowforward, name, args, { forwardedMessage: prefixedIdFor(readBundleFwd, detail.id), to, cc });
       }
