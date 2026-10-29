@@ -276,24 +276,62 @@ test("reading opens a folder read-only (EXAMINE), and only a change opens it rea
   });
 });
 
-test("notify keeps running after a failed connection, announces the problem once and the recovery when Bridge comes back", needsOpenssl, async () => {
+// Spawns `notify` and guarantees the child is gone afterwards, even when an assertion throws or the test times out.
+async function withNotifyChild(bridge, dir, run) {
   const { spawn } = await import("node:child_process");
-  const bridge = await startFakeBridge({ mode: "starttls", certificate, accounts: { "owner@example.com": "right" }, folders: mailbox() });
-  const dir = await mkdtemp(join(tmpdir(), "fake-bridge-notify-"));
   const env = { ...process.env, PROTONMAIL_USERNAME: "owner@example.com", PROTONMAIL_PASSWORD: "wrong", PROTONMAIL_IMAP_PORT: String(bridge.port), PROTONMAIL_SMTP_PORT: "9", PROTONMAIL_DATA_DIR: dir, PROTONMAIL_IDLE_WATCH: "false", PROTONMAIL_AUTO_SYNC: "false" };
   const child = spawn(process.execPath, ["dist/cli.js", "notify", "--timeout", "1"], { env });
-  let out = "";
-  let exited = false;
-  child.stdout.on("data", (chunk) => { out += chunk; });
-  child.on("exit", () => { exited = true; });
+  const state = { out: "", err: "", exit: undefined };
+  const exited = new Promise((resolve) => child.on("exit", (code, signal) => { state.exit = { code, signal }; resolve(); }));
+  child.stdout.on("data", (chunk) => { state.out += chunk; });
+  child.stderr.on("data", (chunk) => { state.err += chunk; });
   try {
-    await new Promise((resolve) => setTimeout(resolve, 3500));
-    assert.match(out, /"event":"problem"/, "the problem is announced");
-    assert.equal(exited, false, "and the daemon is still running, waiting to try again");
+    await run(child, state, exited);
   } finally {
-    child.kill("SIGINT");
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    if (state.exit === undefined) {
+      child.kill("SIGTERM");
+      const grace = setTimeout(() => child.kill("SIGKILL"), 1000);
+      await exited;
+      clearTimeout(grace);
+    }
+    assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" }, "the notify child is gone");
+  }
+}
+
+test("notify keeps running after a failed connection, announces the problem once and the recovery when Bridge comes back", needsOpenssl, async () => {
+  const bridge = await startFakeBridge({ mode: "starttls", certificate, accounts: { "owner@example.com": "right" }, folders: mailbox() });
+  const dir = await mkdtemp(join(tmpdir(), "fake-bridge-notify-"));
+  try {
+    await withNotifyChild(bridge, dir, async (_child, state) => {
+      await new Promise((resolve) => setTimeout(resolve, 3500));
+      assert.match(state.out, /"event":"problem"/, "the problem is announced");
+      assert.equal(state.exit, undefined, "and the daemon is still running, waiting to try again");
+    });
+  } finally {
     await bridge.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  test(`notify exits promptly on ${signal} while waiting to retry a failed connection`, needsOpenssl, async () => {
+    const bridge = await startFakeBridge({ mode: "starttls", certificate, accounts: { "owner@example.com": "right" }, folders: mailbox() });
+    const dir = await mkdtemp(join(tmpdir(), "fake-bridge-notify-"));
+    try {
+      await withNotifyChild(bridge, dir, async (child, state, exited) => {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        assert.match(state.out, /"event":"problem"/, "the daemon is in its retry wait");
+        const sentAt = Date.now();
+        child.kill(signal);
+        await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2000))]);
+        assert.ok(state.exit, `exited within 2 s of ${signal}`);
+        assert.ok(Date.now() - sentAt < 2000);
+        assert.equal(state.exit.code, 0);
+        assert.match(state.err, /\[notify\] Stopped\./);
+      });
+    } finally {
+      await bridge.close();
+      await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+}
