@@ -83,6 +83,10 @@ export async function handleTemplateAndReminderTool(name: string, args: Record<s
           enabled,
           subject: optionalString(args, "subject"),
           body: optionalString(args, "body"),
+          subjects: args.subjects,
+          bodies: args.bodies,
+          returnDate: optionalString(args, "returnDate"),
+          backupContact: optionalString(args, "backupContact"),
           startsAt: optionalString(args, "startsAt"),
           endsAt: optionalString(args, "endsAt"),
           replyEveryDays: optionalInteger(args.replyEveryDays, 1, 90),
@@ -98,7 +102,8 @@ export async function handleTemplateAndReminderTool(name: string, args: Record<s
       const sync = target.backgroundSyncService.getStatus();
       const warnings: string[] = [];
       if (rule.enabled && !sync.enabled) warnings.push("Background sync is off (PROTONMAIL_AUTO_SYNC), so nothing is answered until it runs.");
-      if (rule.enabled && !rule.body && !rule.rules?.some((candidate) => candidate.body)) warnings.push("There is no reply text; only the outgoing note is active.");
+      if (rule.enabled && !rule.body && !rule.bodies && !rule.rules?.some((candidate) => candidate.body)) warnings.push("There is no reply text; only the outgoing note is active.");
+      if (rule.enabled && !rule.body && rule.bodies) warnings.push(`There is no default body, so only mail in ${Object.keys(rule.bodies).join(", ")} (or matching a rule with its own text) gets a reply.`);
       if (rule.enabled && !deps.canSend) warnings.push("This server may not send mail, so matching mail gets a draft for you to review instead of a reply.");
       return createTextResult({ account: target.account.address, rule, ...(warnings.length ? { warnings } : {}) });
     }
@@ -140,7 +145,9 @@ export async function handleTemplateAndReminderTool(name: string, args: Record<s
           would: decision.outcome,
           reason: decision.reason,
           rule: decision.rule,
-          ...(decision.reply ? { replySubject: decision.reply.subject, replyBody: decision.reply.body.slice(0, 300) } : {}),
+          ...(decision.reply
+            ? { language: decision.language ?? "unknown", textFrom: decision.textFrom, styled: decision.styled === true, replySubject: decision.reply.subject, replyBody: decision.reply.body.slice(0, 300) }
+            : {}),
         })),
       });
     }

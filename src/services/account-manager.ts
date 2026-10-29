@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { AccountConfig, ProtonMailConfig } from "../types/index.js";
 import { logger as defaultLogger, type Logger } from "../utils/logger.js";
 import { SimpleIMAPService } from "./simple-imap-service.js";
@@ -15,6 +16,7 @@ import { RulesService } from "./rules-service.js";
 import { TriagePlanService } from "./triage-plan-service.js";
 import { CommitmentService } from "./commitment-service.js";
 import { runRulesOnNewMail } from "../tools/rules-runner.js";
+import { readCached as readStyleProfile } from "../tools/style.js";
 import { ensureMailboxWriteAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 
 // One account's complete, self-contained service stack — identical in shape to what
@@ -138,6 +140,7 @@ function buildAccountBundle(
       isKnownContact: async (address) => (await localIndexService.search({ from: account.address, to: address, limit: 1 })).emails.length > 0,
       hasAnsweredSince: async (address, sinceIso) =>
         (await localIndexService.search({ from: account.address, to: address, dateFrom: sinceIso, limit: 1 })).emails.length > 0,
+      styleProfile: () => readStyleProfile(join(config.dataDir, "style-profile.json")),
     };
   };
   // Replies and drafts are made after a sync has indexed new mail.
