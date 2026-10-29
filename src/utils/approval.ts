@@ -10,6 +10,8 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { FORWARD_DAILY_LIMIT, type EffectiveRule } from "../services/rules-service.js";
+import type { AutoresponderRule } from "../services/autoresponder-service.js";
 import { normalizeBoolean } from "./helpers.js";
 import { isGatedAction } from "./mail-security.js";
 
@@ -97,6 +99,16 @@ export interface ApprovalLookups {
   vcard(path: string): Promise<{ cards: number; digest: string } | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
   plan(planId: string, args: Record<string, unknown>): Promise<PlanItemForApproval[] | undefined>;
+  /** The automatic reply as it would be after the call: the stored one with the call's changes applied. */
+  autoresponder(args: Record<string, unknown>): Promise<AutoresponderRule | undefined>;
+  /** The rule set_rule would store, and where it comes from (a proposal, a stored rule, or the call itself). */
+  rule(args: Record<string, unknown>): Promise<{ effective: EffectiveRule; from?: { kind: "proposal" | "existing rule"; id: string } } | undefined>;
+  /** What a real apply_rules would touch, counted per rule by a dry run of the planning step. */
+  applyPlan(args: Record<string, unknown>): Promise<{ rules: Array<{ name: string; actions: unknown; matches: number }>; total: number; limit: number } | undefined>;
+  /** Messages in the folder that match the call's filter, from the local index; no count when the index has nothing for the folder. */
+  matches(name: string, args: Record<string, unknown>): Promise<{ count?: number; subjects: string[] } | undefined>;
+  unsubscribe(emailId: string): Promise<{ mailto?: string; host?: string } | undefined>;
+  invite(emailId: string): Promise<{ organizer?: string; summary?: string } | undefined>;
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -117,10 +129,21 @@ export function planApprovalDigest(items: ReadonlyArray<Pick<PlanItemForApproval
   return sha256(JSON.stringify(items.map((item) => [item.n, item.emailId ?? null, item.action, item.target ?? null])));
 }
 
+const stable = (value: unknown) => JSON.stringify(value, (_, inner) => (isRecord(inner) ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => a.localeCompare(b))) : inner));
+
+/** A digest of an automatic reply as it is stored (not when it was written or switched on). */
+export function autoresponderApprovalDigest(rule: AutoresponderRule): string {
+  const { updatedAt: _updated, activatedAt: _activated, ...rest } = rule;
+  return sha256(stable(rest));
+}
+
+/** A digest of the rule set_rule stores: its name, whether it is on, its conditions and its actions. */
+export const ruleApprovalDigest = (rule: EffectiveRule): string => sha256(stable(rule));
+
 // What the person was shown, kept on the call's own argument object under a symbol: JSON from a client cannot carry a
 // symbol key, so the model can neither set nor forge it, and it is not an argument (not listed, not audited, not ignored-noted).
 // `digest` is undefined when the stored content could not be read for the question; nothing then matches it.
-type Bound = { kind: "draft" | "plan" | "vcard"; digest: string | undefined };
+type Bound = { kind: "draft" | "plan" | "vcard" | "autoresponder" | "rule"; digest: string | undefined };
 const APPROVED = Symbol("approved content");
 type Marked = Record<string | symbol, unknown>;
 
@@ -138,6 +161,63 @@ async function within<T>(work: () => Promise<T>): Promise<T | undefined> {
 
 const SHOWN_MESSAGES = 3;
 const MAX_MESSAGE_CHARS = 1500;
+// These carry a block (the reply text, a rule's conditions and actions) that the person needs to read in full.
+const LONG_QUESTIONS = new Set(["set_autoresponder", "set_rule", "apply_rules"]);
+const MAX_LONG_MESSAGE_CHARS = 2500;
+
+function whenText(when: unknown): string {
+  if (!isRecord(when)) return "no condition";
+  const parts: string[] = [];
+  if (strings(when.from).length) parts.push(`from ${listed(strings(when.from), 3)}`);
+  if (strings(when.subjectContains).length) parts.push(`subject contains ${listed(strings(when.subjectContains), 3)}`);
+  parts.push(`in ${quoted(when.folder ?? "INBOX", 60)}`);
+  if (when.olderThanDays !== undefined) parts.push(`older than ${quoted(when.olderThanDays, 10)} days`);
+  if (when.hasAttachment !== undefined) parts.push(when.hasAttachment === true ? "with an attachment" : "without an attachment");
+  if (when.automated !== undefined) parts.push(when.automated === true ? "list and automatic mail only" : "mail from people only");
+  if (when.unread === true) parts.push("unread only");
+  return parts.join("; ");
+}
+function actionsText(actions: unknown): string {
+  if (!isRecord(actions)) return "nothing";
+  const parts: string[] = [];
+  if (strings(actions.forwardTo).length) parts.push(`forward to ${listed(strings(actions.forwardTo), 3)}`);
+  if (actions.label !== undefined) parts.push(`label ${quoted(actions.label, 40)}`);
+  if (actions.markRead === true) parts.push("mark read");
+  if (actions.moveTo !== undefined) parts.push(`move to ${quoted(actions.moveTo, 60)}`);
+  if (actions.archive === true) parts.push("archive");
+  if (actions.trash === true) parts.push("move to Trash");
+  if (actions.delete === true) parts.push("delete for good");
+  return parts.length ? parts.join("; ") : "nothing";
+}
+
+/** Whether the automatic reply would also go to someone who is not in the user's contacts (never written to). */
+function answersStrangers(rule: AutoresponderRule): string {
+  if (!rule.enabled) return "no (switched off)";
+  const rules = rule.rules ?? [];
+  if (!rule.body && !rule.bodies && !rules.some((candidate) => candidate.action !== "skip" && candidate.body)) return "no (there is no reply text)";
+  let conditional = false;
+  for (const candidate of rules) {
+    if (candidate.known === "yes") continue;
+    if (!candidate.from?.length && !candidate.subjectContains?.length) return candidate.action !== "skip" ? "yes" : conditional ? "only mail matching a rule" : "no";
+    if (candidate.action !== "skip") conditional = true;
+  }
+  return "yes";
+}
+
+function matchText(match: unknown): string {
+  if (!isRecord(match)) return "none";
+  const parts: string[] = [];
+  if (match.from !== undefined) parts.push(`from ${quoted(match.from, 60)}`);
+  if (match.subject !== undefined) parts.push(`subject contains ${quoted(match.subject, 60)}`);
+  if (match.text !== undefined) parts.push(`text contains ${quoted(match.text, 60)}`);
+  if (match.since !== undefined) parts.push(`since ${quoted(match.since, 40)}`);
+  if (match.before !== undefined) parts.push(`before ${quoted(match.before, 40)}`);
+  if (match.isRead !== undefined) parts.push(normalizeBoolean(match.isRead, false) ? "read" : "unread");
+  if (match.isStarred !== undefined) parts.push(normalizeBoolean(match.isStarred, false) ? "starred" : "not starred");
+  if (match.sizeLarger !== undefined) parts.push(`larger than ${quoted(match.sizeLarger, 12)} bytes`);
+  if (match.sizeSmaller !== undefined) parts.push(`smaller than ${quoted(match.sizeSmaller, 12)} bytes`);
+  return parts.length ? parts.join("; ") : "none (every message in the folder)";
+}
 
 /** The text the person sees. Every dynamic piece is a quoted, cleaned, single-line value after a fixed label. */
 export async function buildApprovalMessage(name: string, args: Record<string, unknown>, lookups: ApprovalLookups): Promise<string> {
@@ -158,6 +238,12 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     add("Messages", String(ids.length));
     for (const id of ids.slice(0, SHOWN_MESSAGES)) await message("Message", id);
   };
+  // How many messages a filter or a folder covers, from the local index, which may lag behind the mailbox.
+  const counted = async () => {
+    const found = await within(() => lookups.matches(name, args));
+    add("Messages matched", found?.count === undefined ? "count unknown (the local index has nothing for this folder)" : `${found.count} (local index, may be out of date)`);
+    if (found?.subjects.length) add("First subjects (untrusted mail text)", found.subjects.map((subject) => quoted(subject, 60)).join(", "));
+  };
 
   switch (name) {
     case "send_email":
@@ -166,7 +252,8 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       if (Array.isArray(args.attachments) && args.attachments.length) add("Attachments", String(args.attachments.length));
       break;
     case "send_test_email":
-      recipients("To", args.to);
+      recipients("To", args.to); add("Send as", typeof args.from === "string" ? quoted(args.from, 80) : undefined);
+      if (typeof args.customMessage === "string" && args.customMessage) add("Message", quoted(args.customMessage, 100));
       break;
     case "reply_to_email":
     case "reply_all_email": {
@@ -200,10 +287,22 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       if (name === "schedule_draft") add("Send at", quoted(args.sendAt, 40));
       break;
     }
-    case "respond_to_invite":
+    case "respond_to_invite": {
       await message("Invitation", args.emailId); add("Response", quoted(args.response, 40));
+      const invite = typeof args.emailId === "string" ? await within(() => lookups.invite(args.emailId as string)) : undefined;
+      if (invite) { add("Organiser (from the invitation, untrusted)", invite.organizer ? quoted(invite.organizer, 80) : "unknown"); add("Event (from the invitation, untrusted)", invite.summary ? quoted(invite.summary, 80) : undefined); }
+      else add("Organiser", "unknown (the invitation could not be read)");
       break;
-    case "unsubscribe_sender":
+    }
+    case "unsubscribe_sender": {
+      await message("Message", args.emailId);
+      const info = typeof args.emailId === "string" ? await within(() => lookups.unsubscribe(args.emailId as string)) : undefined;
+      add("Unsubscribe by", !info ? "unknown (the message could not be read)"
+        : info.mailto ? `mail to ${quoted(info.mailto, 80)} (from the message, untrusted)`
+        : info.host ? `a link on ${quoted(info.host, 80)}, which this server does not open (from the message, untrusted)`
+        : "nothing: the message has no List-Unsubscribe header");
+      break;
+    }
     case "delete_email":
       await message("Message", args.emailId);
       break;
@@ -213,7 +312,9 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     case "bulk_delete":
     case "batch_email_action": {
       const ids = strings(args.emailIds);
-      if (ids.length) await messages(ids); else add("Messages", "chosen by a filter");
+      if (ids.length) await messages(ids);
+      else if (name === "bulk_delete" && isRecord(args.match)) { add("Folder", quoted(args.folder, 80)); add("Filter", matchText(args.match)); await counted(); }
+      else add("Messages", "chosen by a filter");
       if (name === "batch_email_action") add("Action", quoted(args.action, 40)); else add("Permanently", normalizeBoolean(args.permanent, false) ? "yes" : "no");
       break;
     }
@@ -221,10 +322,10 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       await message("Thread of", args.threadId); add("Action", quoted(args.action, 40));
       break;
     case "empty_folder":
-      add("Empty folder", quoted(args.folder, 80));
+      add("Empty folder", quoted(args.folder, 80)); await counted();
       break;
     case "delete_folder":
-      add("Delete folder", quoted(args.path, 80));
+      add("Delete folder", quoted(args.path, 80)); await counted();
       break;
     case "delete_label":
       add("Delete label", quoted(args.name, 80));
@@ -233,17 +334,53 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       add("Delete template", quoted(args.id, 80));
       break;
     case "set_rule": {
-      const forwardTo = isRecord(args.actions) ? strings(args.actions.forwardTo) : [];
-      add("Rule", typeof args.name === "string" ? quoted(args.name, 80) : typeof args.id === "string" ? quoted(args.id, 80) : typeof args.proposalId === "string" ? quoted(args.proposalId, 80) : undefined);
-      if (forwardTo.length) add("Forwards mail to", listed(forwardTo)); else add("Effect", "may forward mail to another address (taken from the stored rule or proposal)");
+      const found = await within(() => lookups.rule(args));
+      bound = { kind: "rule", digest: found ? ruleApprovalDigest(found.effective) : undefined };
+      if (!found) {
+        add("Rule", typeof args.name === "string" ? quoted(args.name, 80) : typeof args.id === "string" ? quoted(args.id, 80) : typeof args.proposalId === "string" ? quoted(args.proposalId, 80) : undefined);
+        add("Effect", "may forward mail to another address (the stored rule or proposal could not be read)");
+        break;
+      }
+      const { effective } = found;
+      add("Rule", effective.name ? quoted(effective.name, 80) : "unnamed");
+      if (found.from) add("From", `${found.from.kind} ${quoted(found.from.id, 80)}`);
+      add("When", whenText(effective.when)); add("Actions", actionsText(effective.actions));
+      if (isRecord(effective.actions) && strings(effective.actions.forwardTo).length) add("Forwarding", `at most ${FORWARD_DAILY_LIMIT} messages a day; it sends them by itself without asking each time, only mail that arrives after it is switched on`);
+      add("Switched on", effective.enabled ? "yes" : "no");
       break;
     }
-    case "set_autoresponder":
-      add("Effect", args.enabled === false ? "changes the automatic reply" : "switches on or changes the automatic reply, which sends mail by itself");
+    case "set_autoresponder": {
+      const rule = await within(() => lookups.autoresponder(args));
+      bound = { kind: "autoresponder", digest: rule ? autoresponderApprovalDigest(rule) : undefined };
+      if (!rule) { add("Effect", "changes the automatic reply, which can send mail by itself (the result could not be worked out)"); break; }
+      add("Automatic reply", rule.enabled ? "on" : "off"); add("Mode", rule.mode ?? "send");
+      add("Answers people outside your contacts", answersStrangers(rule));
+      add("Reply subject", quoted(rule.subject, 120)); add("Reply text", rule.body ? quoted(rule.body, 300) : "none");
+      for (const [language, text] of Object.entries(rule.bodies ?? {}).slice(0, 5)) add(`Text in ${cleanForPrompt(language, 10)}`, quoted(text, 100));
+      if (rule.startsAt || rule.endsAt) add("Window", `from ${rule.startsAt ? quoted(rule.startsAt, 40) : "now"} to ${rule.endsAt ? quoted(rule.endsAt, 40) : "no end"}${rule.timezone ? ` (${quoted(rule.timezone, 40)})` : ""}`);
+      if (rule.outsideHours) add("Only outside hours", `days ${strings(rule.outsideHours.days).join(",")}, ${quoted(rule.outsideHours.from, 10)} to ${quoted(rule.outsideHours.to, 10)}`);
+      add("Limits", `each sender at most once in ${rule.replyEveryDays} days; at most ${rule.dailyLimit ?? 50} a day`);
+      if (rule.outgoingNote) add("Note added to every mail sent", quoted(rule.outgoingNote, 100));
+      const matchRules = rule.rules ?? [];
+      if (matchRules.length) add("Rules", String(matchRules.length));
+      matchRules.slice(0, 5).forEach((candidate, index) => {
+        const parts: string[] = [candidate.action];
+        if (candidate.from?.length) parts.push(`from ${listed(candidate.from, 3)}`);
+        if (candidate.subjectContains?.length) parts.push(`subject contains ${listed(candidate.subjectContains, 3)}`);
+        if (candidate.known) parts.push(candidate.known === "yes" ? "people you have written to" : "people you have not written to");
+        add(`Rule ${index + 1}`, `${quoted(candidate.name ?? "", 40)} ${parts.join(", ")}`);
+      });
       break;
-    case "apply_rules":
-      add("Rule", typeof args.ruleId === "string" ? quoted(args.ruleId, 80) : "all enabled rules"); add("Effect", "applies them to the mailbox now");
+    }
+    case "apply_rules": {
+      add("Rule", typeof args.ruleId === "string" ? quoted(args.ruleId, 80) : "all enabled rules");
+      const plan = await within(() => lookups.applyPlan(args));
+      if (!plan) { add("Effect", "applies them to the mailbox now (the matches could not be counted)"); break; }
+      add("Messages matched", String(plan.total));
+      if (plan.total > plan.limit) add("This run covers", `the first ${plan.limit}`);
+      for (const [index, rule] of plan.rules.slice(0, 5).entries()) add(`Rule ${index + 1}`, `${quoted(rule.name, 40)} matches ${rule.matches} messages: ${actionsText(rule.actions)}`);
       break;
+    }
     case "set_contact": {
       const clearable = (label: string, value: unknown) => { if (value !== undefined) add(label, value === null || value === "" ? "cleared" : quoted(value, 80)); };
       add("Address", quoted(args.address, 80)); clearable("Display name", args.displayName);
@@ -280,7 +417,8 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     }
   }
   const text = lines.join("\n");
-  return { message: text.length > MAX_MESSAGE_CHARS ? `${text.slice(0, MAX_MESSAGE_CHARS - 1)}…` : text, bound };
+  const cap = LONG_QUESTIONS.has(name) ? MAX_LONG_MESSAGE_CHARS : MAX_MESSAGE_CHARS;
+  return { message: text.length > cap ? `${text.slice(0, cap - 1)}…` : text, bound };
 }
 
 type ElicitingServer = Pick<Server, "elicitInput" | "getClientCapabilities">;

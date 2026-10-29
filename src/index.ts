@@ -27,6 +27,7 @@ import {
   InvalidArgumentError,
   withAccountPrefix,
   normalizeBoolean,
+  optionalInteger,
   parseEmails,
 } from "./utils/helpers.js";
 import { AccountManager, type AccountBundle } from "./services/account-manager.js";
@@ -34,17 +35,19 @@ import { PACKAGE_VERSION } from "./package-info.js";
 import { createToolContext } from "./tools/context.js";
 import { handleAttachmentTool } from "./tools/attachments.js";
 import { handleFolderTool } from "./tools/folders.js";
-import { handleRuleTool } from "./tools/rules.js";
+import { handleRuleTool, planApplyRules, rulePatch } from "./tools/rules.js";
 import { handleSendingTool } from "./tools/sending.js";
 import { handleDraftTool } from "./tools/drafts.js";
 import { handleReadingTool } from "./tools/reading.js";
 import { handleDiagnosticTool } from "./tools/diagnostics.js";
 import { handleMessageActionTool } from "./tools/message-actions.js";
-import { handleTemplateAndReminderTool } from "./tools/templates-and-reminders.js";
+import { autoresponderPatch, handleTemplateAndReminderTool } from "./tools/templates-and-reminders.js";
 import { logger } from "./utils/logger.js";
 import { ToolResult, createTextResult } from "./tools/results.js";
 import { withIgnoredArgumentsNote, asObject, optionalAddressList, requireAddressList, requireString } from "./tools/args.js";
-import { addressValues, getReplyRecipients, uniqueAddresses } from "./tools/compose.js";
+import { addressValues, extractUnsubscribeInfo, getReplyRecipients, uniqueAddresses } from "./tools/compose.js";
+import { effectiveRule } from "./services/rules-service.js";
+import { parseInvite } from "./utils/ical-reply.js";
 import { handleBriefTool } from "./tools/brief.js";
 import { handleTriageTool } from "./tools/triage.js";
 import { handleCategoryTool } from "./tools/categories.js";
@@ -118,6 +121,61 @@ function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLoo
       const only = numbers(args.items);
       const exclude = new Set(numbers(args.exclude) ?? []);
       return plan?.items.filter((item) => (only ? only.includes(item.n) : true) && !exclude.has(item.n));
+    },
+    // The same merge the handler makes, without storing it.
+    autoresponder: async (args) => (ctx.resolveAccountArg(args) ?? ctx.primaryBundle).autoresponderService.previewSet(autoresponderPatch(args)),
+    rule: async (args) => {
+      const target = ctx.resolveAccountArg(args) ?? ctx.primaryBundle;
+      const proposalId = typeof args.proposalId === "string" ? args.proposalId : undefined;
+      const proposal = proposalId ? await target.rulesService.findProposal(proposalId) : undefined;
+      if (proposalId && !proposal) return undefined;
+      const patch = rulePatch(args, proposal);
+      const existing = patch.id ? (await target.rulesService.allRules()).find((rule) => rule.id === patch.id) : undefined;
+      if (patch.id && !existing) return undefined;
+      return { effective: effectiveRule(patch, existing), from: proposal ? { kind: "proposal" as const, id: proposal.id } : existing ? { kind: "existing rule" as const, id: existing.id } : undefined };
+    },
+    applyPlan: async (args) => {
+      const target = ctx.resolveAccountArg(args) ?? ctx.primaryBundle;
+      const { rules, plan } = await planApplyRules(target, typeof args.ruleId === "string" ? args.ruleId : undefined);
+      const limit = optionalInteger(args.limit, 1, 1000) ?? 200;
+      return {
+        rules: rules.map((rule) => ({ name: rule.name, actions: rule.actions, matches: plan.filter((change) => change.rules.some((entry) => entry.id === rule.id)).length })),
+        total: plan.length,
+        limit,
+      };
+    },
+    matches: async (name, args) => {
+      const { bundle, paths: [folder] } = ctx.resolveFolderTarget(args, requireString(args, name === "delete_folder" ? "path" : "folder"));
+      // Only a folder the index has synced has a count worth showing; an unknown folder is not "0 messages".
+      if (!(folder in (await bundle.localIndexService.getSyncCheckpointMap()))) return { subjects: [] };
+      const match: Record<string, unknown> = name === "bulk_delete" && args.match && typeof args.match === "object" ? (args.match as Record<string, unknown>) : {};
+      const text = (value: unknown) => (typeof value === "string" && value ? value : undefined);
+      const flag = (value: unknown) => (value === undefined || value === null ? undefined : normalizeBoolean(value, false));
+      const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+      const found = await bundle.localIndexService.search({
+        folder, limit: 1000, from: text(match.from), subject: text(match.subject), query: text(match.text), dateFrom: text(match.since), dateTo: text(match.before),
+        isRead: flag(match.isRead), isStarred: flag(match.isStarred), sizeLarger: number(match.sizeLarger), sizeSmaller: number(match.sizeSmaller),
+      });
+      return { count: found.total, subjects: found.emails.slice(0, 3).map((email) => email.subject) };
+    },
+    unsubscribe: async (emailId) => {
+      const { bundle, rest } = ctx.resolveAccountForEmailId(emailId);
+      const info = extractUnsubscribeInfo(await bundle.imapService.getEmailById(rest));
+      let host: string | undefined;
+      try { host = info.url ? new URL(info.url).host : undefined; } catch { /* not a URL: no host to show */ }
+      return { mailto: info.mailto, host };
+    },
+    invite: async (emailId) => {
+      const { bundle, rest } = ctx.resolveAccountForEmailId(emailId);
+      const detail = await bundle.imapService.getEmailById(rest);
+      for (const attachment of (detail.attachments ?? []).filter((entry) => entry.id && (entry.isCalendarInvite || entry.kind === "calendar" || /text\/calendar/i.test(entry.contentType ?? "") || /\.ics$/i.test(entry.filename ?? "")))) {
+        const content = await bundle.imapService.getAttachmentContent(rest, attachment.id as string, { includeBase64: true });
+        try {
+          const invite = parseInvite(Buffer.from(content.base64 ?? "", "base64").toString("utf8"));
+          return { organizer: invite.organizer.address, summary: invite.summary };
+        } catch { /* the next attachment */ }
+      }
+      return undefined;
     },
   };
 }
