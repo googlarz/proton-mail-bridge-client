@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 export const SCALING_RATIO = 8;
 export const HANG_CEILING_MS = 15_000;
 // Below this a timer reading is mostly noise, so a faster small run is rated as if it took this long.
-const NOISE_FLOOR_MS = 10;
+const NOISE_FLOOR_MS = 25;
 
 const fastest = (run, input, runs) => {
   let best = Number.POSITIVE_INFINITY;

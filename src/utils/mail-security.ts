@@ -135,7 +135,7 @@ function matchesInstruction(text: string): string | undefined {
 // Adversarial text with hiding characters costs up to about 1.3 ms per KB (normalisation variants times patterns), so one
 // text is not matched whole past MAX_WHOLE_TEXT: its two ends and a few evenly spaced windows between them are, each
 // normalised on its own, and the assessment says it was only partly read.
-const MAX_WHOLE_TEXT = 256_000;
+const MAX_WHOLE_TEXT = 512_000;
 const END_WINDOW = 48_000;
 const MIDDLE_WINDOWS = 8;
 const MIDDLE_WINDOW = 12_000;
