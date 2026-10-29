@@ -588,6 +588,17 @@ export interface ProtonRuntimeConfig {
   // cancel_send until the window elapses. See DeliveryQueueService's own
   // caveat: this only fires while the server process stays alive.
   sendDelaySeconds: number;
+  /** Local embedding endpoint for semantic search over the index (PROTONMAIL_EMBEDDINGS_URL); absent = off. */
+  embeddings?: EmbeddingsConfig;
+}
+
+export interface EmbeddingsConfig {
+  url: string;
+  /** Request shape: Ollama's /api/embed or an OpenAI-compatible /v1/embeddings. */
+  api: "ollama" | "openai";
+  model: string;
+  /** PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE: a host other than this machine may receive mail text. */
+  allowRemote: boolean;
 }
 
 export interface BackgroundSyncStatus {

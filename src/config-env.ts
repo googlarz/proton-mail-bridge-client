@@ -9,7 +9,8 @@ import { isValidEmail, slugifyAccountAddress } from "./utils/helpers.js";
 import { parseListValues } from "./tools/args.js";
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { type EmailAction, type SafetyMode, type AccountConfig, type ProtonMailConfig } from "./types/index.js";
+import { type EmailAction, type SafetyMode, type AccountConfig, type ProtonMailConfig, type EmbeddingsConfig } from "./types/index.js";
+import { checkEmbeddingsEndpoint } from "./services/embedding-service.js";
 export const ALL_EMAIL_ACTIONS: EmailAction[] = [
   "mark_read",
   "mark_unread",
@@ -246,6 +247,21 @@ export function readAccountPassword(value: Record<string, unknown>, index: numbe
   return password;
 }
 
+// PROTONMAIL_EMBEDDINGS_URL turns on semantic search over the local index; unset, nothing about it runs. A host other
+// than this machine is refused unless PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE=true, since every indexed message's text goes there.
+export function parseEmbeddingsEnv(): EmbeddingsConfig | undefined {
+  const raw = process.env.PROTONMAIL_EMBEDDINGS_URL?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const allowRemote = parseBooleanEnv("PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE", false);
+  const { url, api } = checkEmbeddingsEndpoint(raw, allowRemote);
+  if (allowRemote && !isLocalBridgeHost(new URL(url).hostname.replace(/^\[|\]$/g, ""))) {
+    logger.warn("Semantic search sends mail text to an embedding endpoint on another host (PROTONMAIL_EMBEDDINGS_ALLOW_REMOTE).", "MCPServer", { url });
+  }
+  return { url, api, model: process.env.PROTONMAIL_EMBEDDINGS_MODEL?.trim() || "nomic-embed-text", allowRemote };
+}
+
 // The one configuration error the server can still answer: without a login it cannot reach Bridge, but it can
 // list its tools and say what is missing (registries and MCP clients start servers without credentials to
 // inspect them, and "Connection closed" tells nobody anything).
@@ -306,6 +322,7 @@ export function buildConfigFromEnv(): ProtonMailConfig {
   if (dataDir && !isAbsolute(dataDir)) {
     throw new Error("PROTONMAIL_DATA_DIR must be absolute, got: " + dataDir);
   }
+  const embeddings = parseEmbeddingsEnv();
 
   logger.setDebugMode(debug);
   if (isLocalBridgeHost(smtpHost)) {
@@ -372,6 +389,7 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       pdfMaxPages: parseIntegerEnv("PROTONMAIL_PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, 1, 2000),
       opDelayMs,
       sendDelaySeconds,
+      ...(embeddings ? { embeddings } : {}),
     },
   };
 }

@@ -1694,7 +1694,7 @@ export const TOOLS = [
   },
   {
     name: "get_index_status",
-    description: "Return metadata about the local SQLite email index: row count, last sync timestamp, index schema version, and per-folder coverage. Use to verify the index is fresh and complete before querying it with search_indexed_emails or get_threads. If the index is empty or stale, call sync_emails first.",
+    description: "Return metadata about the local SQLite email index: row count, last sync timestamp, index schema version, per-folder coverage, and the semantic-search embeddings (configured, model, vectors built, pending). Use to verify the index is fresh and complete before querying it with search_indexed_emails or get_threads. If the index is empty or stale, call sync_emails first.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: { account: ACCOUNT_FILTER_PROPERTY } },
   },
@@ -1709,6 +1709,7 @@ export const TOOLS = [
         queries: { type: "array", items: { type: "string" }, description: "Several wordings of the same question (synonyms, other languages, related terms), at most 8. Each is searched and the results are fused so a message found by several wordings ranks first; every hit lists `matchedBy`. Use this instead of query when you need meaning rather than exact words, for example [\"deposit\", \"kaucja\", \"Kaution\", \"rental agreement\"]." },
         account: { type: "string", description: "Account address or slug to search (see list_accounts). Omit to search ALL configured accounts; non-primary ids come back prefixed '<slug>::'." },
         query: { type: "string", description: "Free-text query across indexed metadata." },
+        mode: { type: "string", enum: ["lexical", "semantic", "hybrid"], description: "lexical matches words; semantic ranks by meaning with vectors from the local embedding endpoint (PROTONMAIL_EMBEDDINGS_URL); hybrid fuses both. Default: hybrid once that endpoint is set up and vectors exist, otherwise lexical. When semantic ranking cannot run the result is lexical, with mode and semanticNotes saying why; semantic hits carry similarity (cosine)." },
         folder: { type: "string", description: "Folder filter." },
         label: { type: "string", description: "Folder or label filter." },
         threadId: { type: "string", description: "Thread id filter." },

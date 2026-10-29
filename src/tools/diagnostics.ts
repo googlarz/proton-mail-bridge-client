@@ -6,6 +6,7 @@ import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateErro
 import { normalizeBoolean, normalizeLimit, optionalBoolean, optionalInteger } from "../utils/helpers.js";
 import { sanitizeRuntimeConfig, ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { healthProblems } from "../utils/health.js";
+import { embeddingsFor } from "../services/embedding-service.js";
 import { fileURLToPath } from "node:url";
 import { createTextResult } from "./results.js";
 import type { ToolContext } from "./context.js";
@@ -165,8 +166,11 @@ export async function handleDiagnosticTool(name: string, args: Record<string, un
       const statusBundle = resolveAccountArg(args) ?? primaryBundle;
       const indexStatus = await statusBundle.localIndexService.getStatus();
       const syncCfg = statusBundle.backgroundSyncService.getStatus();
+      const embeddings = embeddingsFor(statusBundle);
+      embeddings?.ensureBuilding();
       return createTextResult({
         ...indexStatus,
+        embeddings: embeddings ? await embeddings.status() : { configured: false },
         // What keeps this index current, so a stale/missing message can be explained:
         // only these folders are synced in the background, and IDLE watches just the first.
         backgroundSync: {
