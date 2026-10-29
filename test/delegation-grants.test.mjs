@@ -194,6 +194,28 @@ test("a store that was tampered with or damaged honours nothing it should not", 
   });
 });
 
+test("a stored grant whose lifetime exceeds the maximum, or whose creation time is unreadable, is not honoured", async () => {
+  await withDir(async (dir) => {
+    const good = await serviceFor(dir).createGrant(grantInput());
+    const file = join(dir, "grants.json");
+    const stored = JSON.parse(await readFile(file, "utf8"));
+    const template = stored.grants[0];
+    const created = Date.parse(template.createdAt);
+    const days = (n) => new Date(created + n * 24 * HOUR).toISOString();
+    stored.grants.push(
+      { ...template, id: "g-bbbbbbb1", expiresAt: "9999-12-31T00:00:00.000Z" },
+      { ...template, id: "g-bbbbbbb2", expiresAt: days(31) },
+      { ...template, id: "g-bbbbbbb3", expiresAt: days(30) },
+      { ...template, id: "g-bbbbbbb4", createdAt: undefined, expiresAt: days(1) },
+      { ...template, id: "g-bbbbbbb5", createdAt: "yesterday", expiresAt: days(1) },
+    );
+    await writeFile(file, JSON.stringify(stored));
+    const ids = (await serviceFor(dir).list()).map((grant) => grant.id).sort();
+    assert.deepEqual(ids, [good.id, "g-bbbbbbb3"].sort());
+    assert.equal((await serviceFor(dir).claim({ tool: "send_email", recipients: ["bob@example.com"] }))?.grant.id, good.id);
+  });
+});
+
 test("two server processes racing for the last use: the use is given once", async () => {
   await withDir(async (dir) => {
     const grants = serviceFor(dir);
