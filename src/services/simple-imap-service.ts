@@ -55,7 +55,7 @@ import { logger, type Logger } from "../utils/logger.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { tlsOptionsFor } from "../utils/tls.js";
 import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES, extractPdfText, formatPdfPages, looksLikePdf, PdfTextError } from "../utils/pdf-text.js";
-import { extractOfficeText, officeKind, OfficeTextError, type OfficeKind } from "../utils/office-text.js";
+import { extractOfficeTextAsync, officeKind, OfficeTextError, type OfficeKind } from "../utils/office-text.js";
 import { OCR_MAX_IMAGE_BYTES, OCR_MAX_PDF_PAGES, OcrError, ocrImageExtension, runOcr } from "../utils/ocr.js";
 import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./imap-errors.js";
 import { writeFileNoFollow } from "../utils/safe-write.js";
@@ -2000,7 +2000,7 @@ export class SimpleIMAPService {
   // limit (PROTONMAIL_PDF_MAX_MB) and page limit (PROTONMAIL_PDF_MAX_PAGES) and
   // go through unpdf, which is pure JavaScript (no native binding, no install
   // script). Only this tool extracts PDF text; getAttachmentContent's text field
-  // stays text/* only. DOCX, XLSX and PPTX are read in-process (office-text.ts).
+  // stays text/* only. DOCX, XLSX and PPTX are read in a worker thread (office-text.ts).
   // With PROTONMAIL_OCR_COMMAND set, images and PDF pages without text go through
   // that program; without it, both fail as before.
   async getAttachmentText(emailId: string, attachmentId: string): Promise<{
@@ -2019,7 +2019,7 @@ export class SimpleIMAPService {
     }
     const office = hasContent ? officeKind(attachment.content, contentType, attachment.filename) : undefined;
     if (office) {
-      return { emailId, attachment: attachmentSummary(attachment), ...this.extractOfficeAttachmentText(attachment, office, attachmentId) };
+      return { emailId, attachment: attachmentSummary(attachment), ...(await this.extractOfficeAttachmentText(attachment, office, attachmentId)) };
     }
     const ocrCommand = this.config.runtime?.ocrCommand;
     const imageExtension = ocrImageExtension(contentType);
@@ -2094,13 +2094,13 @@ export class SimpleIMAPService {
     }
   }
 
-  private extractOfficeAttachmentText(
+  private async extractOfficeAttachmentText(
     attachment: { content: Buffer },
     kind: OfficeKind,
     attachmentId: string,
-  ): { text: string; document: { format: OfficeKind; truncated: boolean } } {
+  ): Promise<{ text: string; document: { format: OfficeKind; truncated: boolean } }> {
     try {
-      const result = extractOfficeText(attachment.content, kind);
+      const result = await extractOfficeTextAsync(attachment.content, kind);
       const text = result.truncated ? `${result.text}\n\n--- Truncated: the document's text is longer than this ---` : result.text;
       return { text, document: { format: result.format, truncated: result.truncated } };
     } catch (error) {
@@ -2152,7 +2152,7 @@ export class SimpleIMAPService {
       try {
         const kind = officeKind(content, contentType, filename);
         if (kind) {
-          text = extractOfficeText(content, kind, { maxChars: room }).text;
+          text = (await extractOfficeTextAsync(content, kind, { maxChars: room })).text;
         } else if (looksLikePdf(content, contentType, filename) && content.length <= maxPdfBytes) {
           const pdf = await extractPdfText(content, { maxPages: INDEX_PDF_MAX_PAGES, timeoutMs: INDEX_PDF_TIMEOUT_MS });
           text = pdf.text

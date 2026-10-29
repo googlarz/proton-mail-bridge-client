@@ -347,9 +347,15 @@ export async function decide(
   // A lookup that throws is not an answer: a rule that depends on it cannot be judged, so it must not be skipped over.
   let knownFailed = false;
   let tagsFailed = false;
-  const known = needsKnown && deps.isKnownContact ? await deps.isKnownContact(sender).catch(() => ((knownFailed = true), false)) : undefined;
+  const known = needsKnown && deps.isKnownContact ? await deps.isKnownContact(sender).catch(() => {
+    knownFailed = true;
+    return false;
+  }) : undefined;
   const needsTags = rule.rules?.some((candidate) => candidate.from?.some((pattern) => pattern.trim().toLowerCase().startsWith("tag:"))) === true;
-  const tags = needsTags && deps.contactTags ? await deps.contactTags(sender).catch(() => ((tagsFailed = true), [] as string[])) : [];
+  const tags = needsTags && deps.contactTags ? await deps.contactTags(sender).catch(() => {
+    tagsFailed = true;
+    return [] as string[];
+  }) : [];
   for (const [index, candidate] of (rule.rules ?? []).entries()) {
     let unsure = false;
     if (candidate.from?.length && !candidate.from.some((pattern) => matchesAddress(pattern, sender, tags))) {
