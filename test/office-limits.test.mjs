@@ -119,7 +119,7 @@ test("the async extraction keeps the event loop running while a heavy file is pa
   const asyncMs = Date.now() - started;
   clearInterval(timer);
   // Windows timers tick every ~15.6 ms whatever the interval, so the count is rated against the time the async parse took, with room for that.
-  assert.ok(ticks >= Math.floor(asyncMs / 40), `${ticks} ticks in an async parse of ${asyncMs} ms (${direct.ms} ms direct)`);
+  assert.ok(ticks >= Math.max(1, Math.floor(asyncMs / 40)), `${ticks} ticks in an async parse of ${asyncMs} ms (${direct.ms} ms direct)`);
   assert.ok(longest < direct.ms / 2, `the loop stalled for ${longest} ms`);
 });
 

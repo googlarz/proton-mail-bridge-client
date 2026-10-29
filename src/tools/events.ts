@@ -213,22 +213,28 @@ export class EventsNotifier {
 
   private schedule(): void {
     if (this.timer || !this.subscribed) return;
-    this.timer = setTimeout(() => void this.fire(), this.options.debounceMs ?? 500);
-    this.timer.unref?.();
+    const timer = setTimeout(() => void this.fire(timer), this.options.debounceMs ?? 500);
+    timer.unref?.();
+    this.timer = timer;
   }
 
-  private async fire(): Promise<void> {
+  private async fire(timer: NodeJS.Timeout): Promise<void> {
     // The timer stays set while the files are looked at, so the check for other processes does not take this batch for theirs.
     const signature = await this.snapshot();
+    // After an unsubscribe (and perhaps a new subscribe) this timer is no longer the current one: leave the live one alone.
+    if (this.timer !== timer) return;
     this.timer = undefined;
     if (!this.subscribed) return;
     // The poll can see an append before its own listener runs (the file is synced first), and then both ask for a
     // notification: the second finds the files as the client was last told about them and stays quiet.
     if (signature === this.signature) return;
+    // Set before the send so a fire during a slow send stays quiet; put back if the send fails, so the batch is tried again.
+    const told = this.signature;
     this.signature = signature;
     try {
       await this.send(buildEventsResourceUri());
     } catch (error) {
+      if (this.signature === signature) this.signature = told;
       logger.warn("Could not notify the client of new events", "EventsNotifier", error);
     }
   }
@@ -244,7 +250,8 @@ export class EventsNotifier {
     const parts = await Promise.all(
       this.bundles.map(async (bundle) => {
         const info = await stat(bundle.eventLog.filePath).catch(() => undefined);
-        return info ? `${info.size}:${info.mtimeMs}` : "-";
+        // ino and ctime: a rotated or rewritten log of the same size can carry the same mtime on a file system with coarse timestamps.
+        return info ? `${info.size}:${info.mtimeMs}:${info.ino}:${info.ctimeMs}` : "-";
       }),
     );
     return parts.join("|");

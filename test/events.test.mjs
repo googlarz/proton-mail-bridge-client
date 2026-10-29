@@ -1,7 +1,7 @@
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { appendFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -510,6 +510,106 @@ test("one batch gives one notification even when the poll sees the file before t
       await until(() => notifier.timer !== undefined);
       mock.timers.tick(40);
       await until(() => sent.length === 3);
+      notifier.unsubscribe();
+    } finally {
+      mock.timers.reset();
+    }
+  });
+});
+
+// A notifier on a hand-made bundle with real timers and a listener the test calls itself.
+const lonelyNotifier = (file, send, options = { debounceMs: 10, pollMs: 60000 }) => {
+  let listener;
+  const onAppend = (fn) => {
+    listener = fn;
+    return () => {};
+  };
+  const bundle = { eventLog: { filePath: file, onAppend } };
+  const notifier = new EventsNotifier([bundle], send, options);
+  return { notifier, fire: () => listener([]) };
+};
+const settled = async (condition, message) => {
+  for (let i = 0; i < 400 && !condition(); i++) await sleep(5);
+  assert.ok(condition(), message);
+};
+
+test("a log replaced by another file of the same size and mtime is still noticed", async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, "events.jsonl");
+    const when = new Date("2026-01-01T00:00:00.000Z");
+    await writeFile(file, "aaaa\n");
+    await utimes(file, when, when);
+    const sent = [];
+    const { notifier, fire } = lonelyNotifier(file, async (uri) => void sent.push(uri));
+    notifier.subscribe();
+    await settled(() => notifier.signature !== "", "the subscription did not take its snapshot");
+    // A rotation on a file system with coarse timestamps: another file, same size, same mtime, other inode.
+    const rotated = join(dir, "rotated.jsonl");
+    await writeFile(rotated, "bbbb\n");
+    await utimes(rotated, when, when);
+    await rename(rotated, file);
+    const info = await stat(file);
+    assert.equal(info.size, 5);
+    assert.equal(info.mtime.getTime(), when.getTime());
+    fire();
+    await settled(() => sent.length === 1, "the replaced log was taken for 'nothing new'");
+    notifier.unsubscribe();
+  });
+});
+
+test("a notification that could not be sent is tried again by the next fire for the same files", async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, "events.jsonl");
+    await writeFile(file, "a\n");
+    let calls = 0;
+    const sent = [];
+    const send = async (uri) => {
+      calls += 1;
+      if (calls === 1) throw new Error("transport closed");
+      sent.push(uri);
+    };
+    const { notifier, fire } = lonelyNotifier(file, send);
+    notifier.subscribe();
+    await settled(() => notifier.signature !== "", "the subscription did not take its snapshot");
+    await appendFile(file, "b\n");
+    fire();
+    await settled(() => calls === 1 && notifier.timer === undefined, "the first send did not happen");
+    assert.equal(sent.length, 0);
+    fire();
+    await settled(() => sent.length === 1, "the batch was never retried after the failed send");
+    fire();
+    await settled(() => notifier.timer === undefined, "the third fire did not settle");
+    await sleep(30);
+    assert.equal(sent.length, 1, "a delivered batch is still announced once");
+    notifier.unsubscribe();
+  });
+});
+
+test("a fire from before an unsubscribe cannot clear or double-arm the timer of the new subscription", async () => {
+  await withDir(async (dir) => {
+    const file = join(dir, "events.jsonl");
+    await appendFile(file, "a\n");
+    const sent = [];
+    mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+    try {
+      const { notifier, fire } = lonelyNotifier(file, async (uri) => void sent.push(uri), { debounceMs: 40, pollMs: 40 });
+      notifier.subscribe();
+      fire();
+      mock.timers.tick(40); // the old fire starts and waits for the file system
+      notifier.unsubscribe();
+      notifier.subscribe();
+      fire();
+      const live = notifier.timer;
+      assert.ok(live, "the new subscription armed its timer");
+      for (let i = 0; i < 10; i++) await stat(file); // the old fire's look at the file has finished by now
+      for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(notifier.timer, live, "the stale fire cleared the timer of the new subscription");
+      assert.equal(sent.length, 0, "the stale fire announced for the new subscription");
+      fire();
+      assert.equal(notifier.timer, live, "a second timer was armed next to the live one");
+      mock.timers.tick(40);
+      for (let i = 0; i < 20000 && sent.length === 0; i++) await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(sent.length, 1);
       notifier.unsubscribe();
     } finally {
       mock.timers.reset();

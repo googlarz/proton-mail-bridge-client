@@ -91,7 +91,7 @@ test("a destination that stays locked gives a clear error naming it, keeps the o
       },
     }).then(() => undefined, (error) => error);
     assert.ok(failure, "the write fails");
-    assert.match(failure.message, /existing\.png: the file is open in another program or locked/);
+    assert.match(failure.message, /Could not replace .*existing\.png: it may be open in another program, read-only, or a directory \(EPERM\)/);
     assert.ok(!failure.message.includes(".tmp"), "the temp file is not named");
     assert.equal(failure.code, "EPERM");
     assert.equal(failure.cause.code, "EPERM");
