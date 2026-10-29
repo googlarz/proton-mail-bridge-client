@@ -1,8 +1,10 @@
 // Real human approval. `confirmed: true` is an argument, so the model can set it itself (a persuaded model, a message that
 // says "pass confirmed"). With PROTONMAIL_APPROVAL=elicit|require the SERVER asks the person through the client (MCP
-// elicitation) and only their answer counts. The question is built here from what the server knows (the account, the tool,
-// the recipients that will really be used, a stored draft, a plan), never from text the model wrote about the action, and
-// every piece of mail text in it is stripped of control and bidi characters and cut short.
+// elicitation) and only their answer counts. The question is built here from what the server knows or will act on (the
+// account, the tool, the recipients the mail will really go to - a reply's found the way the reply tool finds them, Reply-To
+// included - a stored draft, a plan, the call's own arguments), never from text the model wrote about the action, and every
+// piece of mail text in it is stripped of control and bidi characters and cut short. What is stored (a draft, a plan) is
+// bound to the answer: the handler refuses to act if it is no longer what the person was shown.
 
 import { createHash } from "node:crypto";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
@@ -47,6 +49,7 @@ export function cleanForPrompt(value: unknown, max = 120): string {
 }
 
 const quoted = (value: unknown, max?: number) => JSON.stringify(cleanForPrompt(value, max));
+const addressSet = (values: string[]) => [...new Set(values.map((value) => value.trim().toLowerCase()))].sort().join("\n");
 function listed(values: string[], max = 5): string {
   const shown = values.slice(0, max).map((value) => quoted(value, 80));
   return shown.join(", ") + (values.length > max ? ` and ${values.length - max} more` : "");
@@ -76,9 +79,19 @@ export interface PlanItemForApproval {
   target?: string;
 }
 
+/** Who a reply or a forward really goes to, found the way the tool finds them; `from` and `replyTo` are the original message's. */
+export interface SendTarget {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  from?: string[];
+  replyTo?: string[];
+}
+
 export interface ApprovalLookups {
   account(args: Record<string, unknown>): string;
   subject(id: string): Promise<string | undefined>;
+  target(name: string, args: Record<string, unknown>): Promise<SendTarget | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
   plan(planId: string, args: Record<string, unknown>): Promise<PlanItemForApproval[] | undefined>;
 }
@@ -151,12 +164,26 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       recipients("To", args.to);
       break;
     case "reply_to_email":
-    case "reply_all_email":
-      await message("Replying to", args.emailId); recipients("Extra Cc", args.cc); recipients("Extra Bcc", args.bcc);
+    case "reply_all_email": {
+      await message("Replying to", args.emailId);
+      const target = await within(() => lookups.target(name, args));
+      if (target) {
+        recipients("To", target.to); recipients("Cc", target.cc); recipients("Bcc", target.bcc);
+        // Where answers go can be somewhere else than where the mail came from.
+        if (target.replyTo?.length && addressSet(target.replyTo) !== addressSet(target.from ?? [])) add("Reply-To differs from sender", `Reply-To ${listed(target.replyTo)}, sender ${listed(target.from ?? [])}`);
+      } else {
+        add("To", "unknown (the message could not be read)"); recipients("Extra Cc", args.cc); recipients("Extra Bcc", args.bcc);
+      }
+      add("Send as", typeof args.from === "string" ? quoted(args.from, 80) : undefined);
       break;
-    case "forward_email":
-      await message("Forwarding", args.emailId); recipients("To", args.to); recipients("Cc", args.cc); recipients("Bcc", args.bcc);
+    }
+    case "forward_email": {
+      await message("Forwarding", args.emailId);
+      const target = await within(() => lookups.target(name, args));
+      recipients("To", target ? target.to : args.to); recipients("Cc", target ? target.cc : args.cc); recipients("Bcc", target ? target.bcc : args.bcc);
+      add("Send as", typeof args.from === "string" ? quoted(args.from, 80) : undefined);
       break;
+    }
     case "send_draft":
     case "schedule_draft":
     case "delete_draft": {

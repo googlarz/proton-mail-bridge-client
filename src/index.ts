@@ -27,6 +27,7 @@ import {
   InvalidArgumentError,
   withAccountPrefix,
   normalizeBoolean,
+  parseEmails,
 } from "./utils/helpers.js";
 import { AccountManager, type AccountBundle } from "./services/account-manager.js";
 import { PACKAGE_VERSION } from "./package-info.js";
@@ -42,7 +43,8 @@ import { handleMessageActionTool } from "./tools/message-actions.js";
 import { handleTemplateAndReminderTool } from "./tools/templates-and-reminders.js";
 import { logger } from "./utils/logger.js";
 import { ToolResult, createTextResult } from "./tools/results.js";
-import { withIgnoredArgumentsNote, asObject } from "./tools/args.js";
+import { withIgnoredArgumentsNote, asObject, optionalAddressList, requireAddressList, requireString } from "./tools/args.js";
+import { addressValues, getReplyRecipients, uniqueAddresses } from "./tools/compose.js";
 import { handleBriefTool } from "./tools/brief.js";
 import { handleTriageTool } from "./tools/triage.js";
 import { handleCategoryTool } from "./tools/categories.js";
@@ -84,6 +86,22 @@ function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLoo
     subject: async (id) => {
       const { bundle, rest } = ctx.resolveAccountForEmailId(id);
       return (await bundle.imapService.getEmailById(rest)).subject;
+    },
+    // The same steps the handlers take (getReplyRecipients, the extra Cc, uniqueAddresses), so the question and a dryRun agree.
+    target: async (name, args) => {
+      if (name === "forward_email") {
+        return { to: parseEmails(requireAddressList(args, "to")), cc: parseEmails(optionalAddressList(args, "cc")), bcc: parseEmails(optionalAddressList(args, "bcc")) };
+      }
+      const { bundle, rest } = ctx.resolveAccountForEmailId(requireString(args, "emailId"));
+      const detail = await bundle.imapService.getEmailById(rest);
+      const recipients = getReplyRecipients(detail, bundle.config.smtp.username, name === "reply_all_email" || normalizeBoolean(args.replyAll, false), ctx.allAccountAddresses());
+      return {
+        to: uniqueAddresses(recipients.to),
+        cc: uniqueAddresses([...recipients.cc, ...parseEmails(optionalAddressList(args, "cc"))]),
+        bcc: parseEmails(optionalAddressList(args, "bcc")),
+        from: addressValues(detail.from),
+        replyTo: addressValues(detail.replyTo),
+      };
     },
     draft: async (id) => {
       const { bundle, rest } = ctx.resolveAccountForDraftId(id);
