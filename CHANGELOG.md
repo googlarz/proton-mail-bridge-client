@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- **Tests only** (no change to the package): the injection samples of the mail-firewall tests are assembled from pieces, because written out in full they made a third-party agent-package scanner report this repository as prompt injection. A new test starts two server instances on one data directory (some desktop clients start a stdio server twice, anthropics/claude-ai-mcp#1156) and checks that a message is answered once and forwarded once. Dev dependency: biome 2.6.3.
+
 ## [2.16.1] — 2026-10-26
 
 - **Dependencies**: `npm audit` reported 6 known vulnerabilities in the production dependencies (high: `body-parser`, `zod`; moderate: `fast-uri`, `ip-address`, `mailparser`, `nodemailer`). The lockfile now holds fixed versions (no `package.json` change); `npm audit --omit=dev` finds none. CI audits at `high`, which is why the Dependabot PRs for these failed.
