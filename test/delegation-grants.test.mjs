@@ -505,3 +505,17 @@ test("expiry is read as a span from now or a timestamp, and nothing else", () =>
   assert.equal(parseGrantExpiry("2026-11-05", now).toISOString(), "2026-11-05T00:00:00.000Z");
   for (const bad of ["", "soon", "7", "7w", "-1d", "1.5d", "d7", "tomorrow", "12345d"]) assert.throws(() => parseGrantExpiry(bad, now), /--expires must be/, bad);
 });
+
+test("what is said about the boundary is true: grants hold against a model with only MCP tools, not against one that can write files or run a shell", async () => {
+  const description = TOOLS.find((tool) => tool.name === "list_grants").description;
+  assert.doesNotMatch(description, /you cannot create, change or revoke a grant, only the user can/);
+  assert.match(description, /no MCP tool/i);
+  assert.match(description, /not against .*(write files|shell)/i);
+  for (const file of ["../src/utils/delegation.ts", "../src/services/grant-service.ts", "../src/tools/delegation.ts"]) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /neither create nor widen|cannot grant itself anything/, file);
+  }
+  const header = (await readFile(new URL("../src/utils/delegation.ts", import.meta.url), "utf8")).split("\n").slice(0, 8).join("\n");
+  assert.match(header.replace(/\n\/\/ /g, " "), /only\s+MCP tools|MCP tools alone/i);
+  assert.match(header, /write files|shell/i);
+});

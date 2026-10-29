@@ -23,7 +23,7 @@ import { logger, type Logger } from "../utils/logger.js";
 // The delegation grants of one account: "this tool may send to these recipients, this many times, until this date",
 // kept next to the account's other local stores (owner-only, written atomically, every change under the file lock that
 // the other server processes on the data directory share). Only the CLI creates or revokes a grant: nothing here is
-// reachable from a tool. A use is spent in one locked step BEFORE the mail is sent (at most once: a send that then fails
+// reachable from an MCP tool. The file is not signed, so a model that can write files can still write a grant. A use is spent in one locked step BEFORE the mail is sent (at most once: a send that then fails
 // does not give it back, and a crash can never leave an extra one), the way a rule's forward is claimed.
 
 export interface Grant {

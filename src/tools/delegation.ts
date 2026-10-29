@@ -148,7 +148,8 @@ export class Delegation {
 
 const activeGrant = (grant: Grant, now: Date) => grantStatus(grant, now) === "active";
 
-// list_grants: what the person has delegated, read-only. There is deliberately no tool that makes, changes or revokes a grant.
+// list_grants: what the person has delegated, read-only. There is deliberately no MCP tool that makes, changes or revokes a grant
+// (a model with file or shell access is outside what grants protect against).
 export async function handleDelegationTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   switch (name) {
     case "list_grants": {

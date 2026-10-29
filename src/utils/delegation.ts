@@ -1,6 +1,8 @@
 // Scoped delegation: the rules that decide whether a grant covers a call. A grant is a narrow, expiring permission the
-// person creates with the CLI; the model can neither create nor widen one. Everything here is pure, so the same rules
-// serve the gate in front of a tool call, the claim just before the send, the store and the CLI.
+// person creates with the CLI at a terminal; no MCP tool can create or widen one. That holds against a model that has only
+// MCP tools, not against one that can also write files or run a shell (it can write grants.json itself): the store is not
+// signed. Everything here is pure, so the same rules serve the gate in front of a tool call, the claim just before the
+// send, the store and the CLI.
 
 /** The only tools a grant can cover: the ones that send mail to a recipient the person can name in advance. */
 export const GRANTABLE_TOOLS = ["send_email", "reply_to_email", "reply_all_email", "forward_email", "send_draft", "schedule_draft"] as const;

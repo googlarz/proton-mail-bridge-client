@@ -2132,7 +2132,7 @@ async function runDraftDelete(parsed: ParsedCliArgs): Promise<void> {
 }
 
 // Delegation grants are made and revoked here and nowhere else: they are read and written straight from the account's data
-// directory, never through an MCP tool, so a model cannot grant itself anything.
+// directory, never through an MCP tool, so a model that has only MCP tools cannot grant itself anything.
 function grantStores(parsed: ParsedCliArgs, options: { single: boolean }): Array<{ account: AccountConfig; grants: GrantService }> {
   const { accounts } = buildConfigFromEnv();
   const wanted = getStringFlag(parsed.flags, "account");
@@ -2170,7 +2170,7 @@ const grantLine = (grant: Grant, now: Date): string =>
 
 // A grant is made or revoked only by a person at a terminal: both stdin and stdout must be one, the whole grant is shown, and
 // a phrase that names its recipient count (or id) is typed back. There is no flag, variable or argument that answers for the
-// person, so a model that can run shell commands is stopped here (one that can write grants.json directly is not; see README).
+// person, so a model that can run shell commands is stopped here (one that can write grants.json itself is not: the file is not signed).
 export const isInteractiveTerminal = (input: { isTTY?: boolean } | undefined = process.stdin, output: { isTTY?: boolean } | undefined = process.stdout): boolean =>
   Boolean(input?.isTTY && output?.isTTY);
 export const grantCreatePhrase = (recipientCount: number): string => `grant ${recipientCount} recipient${recipientCount === 1 ? "" : "s"}`;
