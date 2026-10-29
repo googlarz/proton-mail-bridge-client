@@ -5,7 +5,7 @@ import { extname, isAbsolute, join } from "node:path";
 import type { AccountBundle } from "../services/account-manager.js";
 import type { ContactRecord } from "../services/contact-service.js";
 import type { EmailAddress, EmailSummary } from "../types/index.js";
-import { cleanContactText, normalizeContactAddress } from "../utils/contact-text.js";
+import { cleanContactText, lowerAscii, normalizeContactAddress } from "../utils/contact-text.js";
 import { InvalidArgumentError, isSelfAddress, normalizeBoolean, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
 import { assessMail } from "../utils/mail-security.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
@@ -72,7 +72,7 @@ interface PersonResult {
 async function findInAccount(bundle: AccountBundle, query: string, limit: number, ctx: ToolContext): Promise<PersonResult[]> {
   const index = bundle.localIndexService;
   const isOwn = (address: string | undefined) => Boolean(address) && bundle.ownAddresses.some((own) => isSelfAddress(address, own));
-  const lower = (entry: EmailAddress | undefined) => (entry?.address ?? "").trim().toLowerCase();
+  const lower = (entry: EmailAddress | undefined) => lowerAscii((entry?.address ?? "").trim());
   const records = await bundle.contactService.list();
   const recordByAddress = new Map<string, ContactRecord>();
   for (const record of records) for (const address of record.addresses) recordByAddress.set(address, record);

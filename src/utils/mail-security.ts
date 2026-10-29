@@ -183,7 +183,7 @@ export const TAINT_GATED_TOOLS = new Set([
   "send_email", "reply_to_email", "reply_all_email", "forward_email", "send_draft", "schedule_draft", "respond_to_invite",
   "unsubscribe_sender", "delete_email", "delete_thread", "bulk_delete", "empty_folder", "delete_folder", "set_rule", "set_autoresponder",
   // A vip tag changes the autoresponder text for that sender.
-  "set_contact",
+  "set_contact", "import_contacts",
 ]);
 
 // Tools that only act for some arguments: apply_rules runs its rules when dryRun is false (it previews otherwise), and the

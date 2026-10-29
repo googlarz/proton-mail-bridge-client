@@ -44,8 +44,9 @@ export interface ContactImportOutcome {
   added: number;
   updated: number;
   unchanged: number;
-  /** Addresses already belonging to another person in the store; left where they are. */
+  /** Addresses of a card that names a known person but are not that person's yet (or belong to another one); left out. A file never attaches an address to a person: merging is set_contact's mergeWith. First 20; `conflictCount` is the total. */
   conflicts: string[];
+  conflictCount: number;
   /** Cards not imported because the store is full. */
   overLimit: number;
 }
@@ -174,12 +175,12 @@ export class ContactService {
     });
   }
 
-  /** Adds the people of a vCard file. Fills only what is not set yet; an address that belongs to another person stays there. */
+  /** Adds the people of a vCard file. Fills only what is not set yet. A card that names a known person never adds an address to them: a file could otherwise give its own address that person's tags (vip changes the autoresponder). */
   async importCards(cards: ParsedVCard[]): Promise<ContactImportOutcome> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
       const now = new Date().toISOString();
-      const outcome: ContactImportOutcome = { added: 0, updated: 0, unchanged: 0, conflicts: [], overLimit: 0 };
+      const outcome: ContactImportOutcome = { added: 0, updated: 0, unchanged: 0, conflicts: [], conflictCount: 0, overLimit: 0 };
       // Thousands of cards against thousands of records: looked up in a map, not by scanning the store per address.
       const byAddress = new Map<string, ContactRecord>();
       for (const record of Object.values(store.items)) for (const address of record.addresses) byAddress.set(address, record);
@@ -193,8 +194,8 @@ export class ContactService {
         const record: ContactRecord = existing ?? { id: randomUUID(), addresses: [], createdAt: now, updatedAt: now };
         const before = JSON.stringify(record);
         card.emails.forEach((address, index) => {
-          const owner = owners[index];
-          if (owner && owner !== record) {
+          if (existing && owners[index] !== record) {
+            outcome.conflictCount += 1;
             if (outcome.conflicts.length < 20) outcome.conflicts.push(address);
           } else if (!record.addresses.includes(address) && record.addresses.length < MAX_ADDRESSES) {
             record.addresses.push(address);

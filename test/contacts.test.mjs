@@ -8,6 +8,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../dist/index.js";
 import { ContactService } from "../dist/services/contact-service.js";
+import { cleanContactText, normalizeContactAddress } from "../dist/utils/contact-text.js";
+import { TAINT_GATED_TOOLS } from "../dist/utils/mail-security.js";
 import { parseVcf } from "../dist/utils/vcard.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 import { IGNORE_EN } from "./helpers/injection-samples.mjs";
@@ -284,7 +286,9 @@ test("a hostile vCard file: too large, too many cards, a name that reads as an i
       const fifo = join(dirs[0], "pipe.vcf");
       execFileSync("mkfifo", [fifo]);
       assert.ok((await stat(fifo)).isFIFO());
-      const refused = await raw("import_contacts", { path: fifo });
+      const gate = await raw("import_contacts", { path: fifo });
+      assert.match(gate.content[0].text, /Confirmation required/, "import_contacts is gated after a flagged contact");
+      const refused = await raw("import_contacts", { path: fifo, confirmed: true });
       assert.equal(refused.isError, true);
       assert.match(refused.content[0].text, /not a regular file/);
     }
@@ -303,5 +307,70 @@ test("set_contact and import_contacts change nothing on a read-only server; find
     assert.equal((await raw("import_contacts", { path: file })).isError, true);
     assert.deepEqual(await accountManager.primary().contactService.list(), []);
     assert.equal((await call("find_contact", { query: "ann@acme.co.uk" })).contacts[0].messages.fromThem, 2);
+  });
+});
+
+async function withStore(fn) {
+  const dir = await mkdtemp(join(tmpdir(), "contact-store-"));
+  try {
+    await fn(new ContactService({ dataDir: dir, smtp: { username: "owner@example.com" } }));
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
+const tagChars = (text) => [...text].map((char) => String.fromCodePoint(0xe0000 + char.charCodeAt(0))).join("");
+
+test("an import never attaches a new address to a known person: it is a conflict and the person's tags stay theirs", async () => {
+  await withStore(async (store) => {
+    await store.update("ann@acme.example", { addTags: ["vip"] });
+    const outcome = await store.importCards([
+      { emails: ["ann@acme.example", "evil@attacker.example"], name: "Ann" },
+      { emails: ["other@attacker.example"] },
+    ]);
+    assert.deepEqual(await store.tagsFor("evil@attacker.example"), [], "the attacker's address does not get the vip tag");
+    assert.deepEqual((await store.list()).find((record) => record.tags?.includes("vip")).addresses, ["ann@acme.example"]);
+    assert.deepEqual(outcome.conflicts, ["evil@attacker.example"]);
+    assert.equal(outcome.conflictCount, 1);
+    assert.deepEqual(await store.tagsFor("other@attacker.example"), [], "an unknown card still becomes its own person, without tags");
+    // Merging stays an explicit set_contact action.
+    await store.update("ann@acme.example", { mergeWith: "evil@attacker.example" });
+    assert.deepEqual(await store.tagsFor("evil@attacker.example"), ["vip"]);
+  });
+});
+
+test("import_contacts is confirmation-gated after a high-risk message, and a card cannot set tags", async () => {
+  assert.ok(TAINT_GATED_TOOLS.has("import_contacts"));
+  assert.ok(TAINT_GATED_TOOLS.has("set_contact"));
+  await withStore(async (store) => {
+    const { cards } = parseVcf(["BEGIN:VCARD", "FN:Eve", "EMAIL:eve@x.example", "CATEGORIES:vip", "X-TAGS:vip", "TAGS:vip", "END:VCARD"].join("\r\n"));
+    await store.importCards(cards);
+    assert.deepEqual(await store.tagsFor("eve@x.example"), []);
+    assert.equal((await store.list())[0].tags, undefined);
+  });
+});
+
+test("cleanContactText removes invisible characters that can smuggle text or fill a name", () => {
+  assert.equal(cleanContactText(`Ann${tagChars(IGNORE_EN)}`, 100), "Ann", "Unicode tag characters (an ASCII smuggling channel) are dropped");
+  assert.equal(cleanContactText("A\u{E0100}n️n­aㅤ⠀ᅟᅠﾠ B", 100), "Anna B");
+  assert.equal(cleanContactText("Ann​ Lee‮", 100), "Ann Lee");
+  assert.equal(cleanContactText("Zoë Nowak, Müller", 100), "Zoë Nowak, Müller", "ordinary accents and umlauts stay");
+});
+
+test("a hidden instruction in a displayName is not stored", async () => {
+  await withStore(async (store) => {
+    await store.update("hid@x.example", { displayName: `Hidden${tagChars(IGNORE_EN)}`, addTags: ["client"] });
+    assert.equal((await store.list())[0].displayName, "Hidden");
+  });
+});
+
+test("addresses are lowercased as ASCII only: the Kelvin sign does not become k", async () => {
+  assert.equal(normalizeContactAddress("K@x.com"), "K@x.com", "kept as written, not folded into ASCII");
+  assert.equal(normalizeContactAddress("K@X.COM"), "k@x.com");
+  await withStore(async (store) => {
+    await store.update("k@x.com", { addTags: ["vip"] });
+    assert.deepEqual(await store.tagsFor("k@x.com"), ["vip"]);
+    assert.deepEqual(await store.tagsFor("K@x.com"), [], "the Kelvin-sign address does not receive the tags of k@x.com");
+    assert.deepEqual(await store.tagsFor("K@X.com"), ["vip"], "plain ASCII case still folds");
   });
 });
