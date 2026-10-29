@@ -42,7 +42,8 @@ test("an explicit destination is still replaced, owner-only, and no temp file is
     await writeFile(join(downloads, "x.txt"), "old", { mode: 0o644 });
     await writeFileNoFollow(join(downloads, "x.txt"), Buffer.from("fresh"));
     assert.equal(await readFile(join(downloads, "x.txt"), "utf8"), "fresh");
-    assert.equal(lstatSync(join(downloads, "x.txt")).mode & 0o777, 0o600);
+    // Windows has no Unix permission bits to check.
+    if (process.platform !== "win32") assert.equal(lstatSync(join(downloads, "x.txt")).mode & 0o777, 0o600);
     const { readdirSync } = await import("node:fs");
     assert.deepEqual(readdirSync(downloads), ["x.txt"]);
   });
