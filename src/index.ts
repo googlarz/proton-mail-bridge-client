@@ -46,6 +46,7 @@ import { handleTriageTool } from "./tools/triage.js";
 import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
+import { applyApprovalPolicy, type ApprovalLookups } from "./utils/approval.js";
 import { buildEmailResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
 export { mailboxChangedSinceCheckpoint } from "./tools/index-refresh.js";
@@ -65,6 +66,32 @@ export { withAudit } from "./tools/audit.js";
 function declaredArguments(name: string): ReadonlySet<string> {
   const properties = (TOOLS.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
   return new Set(Object.keys(properties ?? {}));
+}
+
+// What the approval question may say about a call, read from the server's own stores (never from the model's description).
+function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLookups {
+  return {
+    account: (args) => {
+      const id = [args.emailId, args.draftId, args.messageId, args.threadId, args.folder, args.path, Array.isArray(args.emailIds) ? args.emailIds[0] : undefined].find((value): value is string => typeof value === "string" && value !== "");
+      return (ctx.resolveAccountArg(args) ?? (id ? ctx.resolveAccountForEmailId(id).bundle : ctx.primaryBundle)).account.address;
+    },
+    subject: async (id) => {
+      const { bundle, rest } = ctx.resolveAccountForEmailId(id);
+      return (await bundle.imapService.getEmailById(rest)).subject;
+    },
+    draft: async (id) => {
+      const { bundle, rest } = ctx.resolveAccountForDraftId(id);
+      const draft = await bundle.draftStore.getDraft(rest);
+      return { to: draft.to, cc: draft.cc, bcc: draft.bcc, subject: draft.subject };
+    },
+    plan: async (planId, args) => {
+      const plan = await (ctx.resolveAccountArg(args) ?? ctx.primaryBundle).triagePlanService.get(planId);
+      const numbers = (value: unknown) => (Array.isArray(value) ? value.map(Number) : undefined);
+      const only = numbers(args.items);
+      const exclude = new Set(numbers(args.exclude) ?? []);
+      return plan?.items.filter((item) => (only ? only.includes(item.n) : true) && !exclude.has(item.n));
+    },
+  };
 }
 
 function buildServerInstructions(exposed: ReadonlySet<string>): string {
@@ -342,6 +369,16 @@ export function createServer(
     logger.debug("Handling tool call", "MCPServer", { name, argKeys: Object.keys(args || {}) });
 
     try {
+      // PROTONMAIL_APPROVAL: the person is asked through the client, and `confirmed` from the model counts for nothing.
+      await applyApprovalPolicy({
+        mode: config.runtime.approval ?? "off",
+        server,
+        name,
+        args,
+        declared: declaredArguments(name),
+        lookups: approvalLookups(ctx),
+        timeoutSeconds: config.runtime.approvalTimeoutSeconds,
+      });
       // After a high-risk message was read, tools that reach outside ask for an explicit confirmation, whatever the
       // confirmation setting says; a preview or a switch-off changes nothing and passes.
       const tainted = ctx.taint.current();

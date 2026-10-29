@@ -3,6 +3,7 @@
 import { DEFAULT_PDF_MAX_MB, DEFAULT_PDF_MAX_PAGES } from "./utils/pdf-text.js";
 import { isLocalBridgeHost, parseHostList } from "./utils/tls.js";
 import { logger } from "./utils/logger.js";
+import { DEFAULT_APPROVAL_TIMEOUT_SECONDS, parseApprovalEnv } from "./utils/approval.js";
 import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { isValidEmail, slugifyAccountAddress } from "./utils/helpers.js";
@@ -360,6 +361,8 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       idleWatchEnabled,
       idleMaxSeconds,
       confirmDestructive,
+      approval: parseApprovalEnv("PROTONMAIL_APPROVAL"),
+      approvalTimeoutSeconds: parseIntegerEnv("PROTONMAIL_APPROVAL_TIMEOUT_SECONDS", DEFAULT_APPROVAL_TIMEOUT_SECONDS, 1, 3600),
       allowEmptyFolder,
       restrictOutboundToSelf,
       allowFileDownloadDir,
