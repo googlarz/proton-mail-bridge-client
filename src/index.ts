@@ -43,6 +43,7 @@ import { ToolResult, createTextResult } from "./tools/results.js";
 import { withIgnoredArgumentsNote, asObject } from "./tools/args.js";
 import { handleBriefTool } from "./tools/brief.js";
 import { handleTriageTool } from "./tools/triage.js";
+import { handleCategoryTool } from "./tools/categories.js";
 import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
@@ -378,6 +379,12 @@ export function createServer(
         case "approve_plan":
         case "undo_plan":
           return await handleTriageTool(name, args, ctx);
+
+        case "define_category":
+        case "list_categories":
+        case "categorize_inbox":
+        case "correct_category":
+          return await handleCategoryTool(name, args, ctx);
 
         case "get_emails":
         case "get_email_by_id":

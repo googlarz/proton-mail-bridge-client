@@ -21,7 +21,8 @@ export interface PlanItem {
   /** Folder for move, label name for label. */
   target?: string;
   reason: string;
-  source: "client" | "scan";
+  /** category: a label from categorize_inbox. */
+  source: "client" | "scan" | "category";
   /** Whether the message was already read / already carried the label when the plan was made: undo must not invent state. */
   wasRead?: boolean;
   hadLabel?: boolean;
