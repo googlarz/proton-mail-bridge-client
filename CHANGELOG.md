@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.17.1] — 2026-10-30
+
+### Fixed
+
+- **`notify` daemon exits on SIGTERM and SIGINT in any state**, prints `Stopped.` once and ignores a second signal. Before, a SIGTERM during start-up or while waiting could be ignored and leave the process running.
+- **Event notifications**: the notifier now notices a replaced or rotated `events.jsonl` (inode and change time are part of its snapshot), retries after a failed send instead of dropping the event, and ignores a timer that fired after it was stopped.
+- **Windows**: the error after the locked-rename retries gives the cause (file held open by another program) instead of a bare `EPERM`.
+
 ## [2.17.0] — 2026-10-29
 
 Eleven new tools (127 in all).
