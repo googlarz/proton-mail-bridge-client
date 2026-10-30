@@ -1,7 +1,7 @@
 import { maybeRefreshLocalIndex } from "./index-refresh.js";
 import { type AccountBundle } from "../services/account-manager.js";
 import { type BatchActionResult, type BatchActionEntry, type BulkMatchCriteria, type BulkOperationResult } from "../types/index.js";
-import { bulkFolderOfIds, ensureBulkBatchSize, getBulkMaxBatchSize, groupEmailIdsByAccount, BulkExcludedEmailId, getBulkNotFoundEmailIds, withBulkNotFound, prefixBulkResult, prefixNotFound, mergeBulkResults } from "./bulk.js";
+import { bulkFolderOfIds, ensureBulkBatchSize, ensureBulkExpectedCount, getBulkExpectedCount, getBulkMaxBatchSize, groupEmailIdsByAccount, BulkExcludedEmailId, getBulkNotFoundEmailIds, withBulkNotFound, prefixBulkResult, prefixNotFound, mergeBulkResults } from "./bulk.js";
 import { buildEmailResourceUri, emailSource, threadSource } from "./resources.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { ensureMoveTargetAllowed, isMissingTargetFolderError, applyBatchEmailAction, emailSourceFromActionResult } from "./actions.js";
@@ -330,6 +330,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const targetFolder = requireString(args, "targetFolder");
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
+      const expectedCount = getBulkExpectedCount(args);
 
       // emailIds can span multiple configured accounts (a "<slug>::"
       // prefix names one; a plain id is the primary's) — group them so
@@ -385,6 +386,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         });
       }
       ensureBulkBatchSize(totalUids, max);
+      ensureBulkExpectedCount(totalUids, expectedCount, dryRun);
 
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
@@ -418,6 +420,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const explicitFolder = folderOwner ? folderOwner.paths[0] : undefined;
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
+      const expectedCount = getBulkExpectedCount(args);
 
       // emailIds can span multiple configured accounts — group them so
       // each account's ids resolve/run against that account's own
@@ -474,6 +477,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         });
       }
       ensureBulkBatchSize(totalUids, max);
+      ensureBulkExpectedCount(totalUids, expectedCount, dryRun);
 
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
@@ -505,6 +509,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const explicitFolder = folderOwner ? folderOwner.paths[0] : undefined;
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
+      const expectedCount = getBulkExpectedCount(args);
 
       // emailIds can span multiple configured accounts — group them so
       // each account's ids resolve/run against that account's own
@@ -556,6 +561,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         });
       }
       ensureBulkBatchSize(totalUids, max);
+      ensureBulkExpectedCount(totalUids, expectedCount, dryRun);
 
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
@@ -586,6 +592,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const explicitFolder = folderOwner ? folderOwner.paths[0] : undefined;
       const max = getBulkMaxBatchSize(args);
       const dryRun = normalizeBoolean(args.dryRun, false);
+      const expectedCount = getBulkExpectedCount(args);
 
       // emailIds can span multiple configured accounts — group them so
       // each account's ids resolve/run against that account's own
@@ -637,6 +644,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         });
       }
       ensureBulkBatchSize(totalUids, max);
+      ensureBulkExpectedCount(totalUids, expectedCount, dryRun);
 
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {

@@ -18,6 +18,26 @@ export function ensureBulkBatchSize(uidsLength: number, max: number): void {
   }
 }
 
+// An optional guard against a filter that matches more than intended: the caller previews with dryRun, reads the
+// count and passes it back. Strict on purpose: a string or a fractional number is an error, not a guess.
+export function getBulkExpectedCount(args: Record<string, unknown>): number | undefined {
+  const value = args.expectedCount;
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new McpError(ErrorCode.InvalidParams, "expectedCount must be a non-negative integer.");
+  }
+  return value;
+}
+
+// A dryRun only previews, so it never throws here; the count it reports is the number to pass back.
+export function ensureBulkExpectedCount(actual: number, expected: number | undefined, dryRun: boolean): void {
+  if (expected === undefined || dryRun || actual === expected) return;
+  throw new McpError(
+    ErrorCode.InvalidParams,
+    "matched " + actual + " messages, expected " + expected + "; nothing was changed. Run dryRun again.",
+  );
+}
+
 export interface BulkExcludedEmailId {
   emailId: string;
   error: string;

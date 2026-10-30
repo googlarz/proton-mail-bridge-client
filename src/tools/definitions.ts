@@ -1371,7 +1371,7 @@ export const TOOLS = [
   },
   {
     name: "bulk_move",
-    description: "Move multiple emails to a target folder in one IMAP pass. Accepts either explicit emailIds[] or a match criteria object (XOR). Supports dryRun to preview. For single-message moves use move_email.",
+    description: "Move multiple emails to a target folder in one IMAP pass. Accepts either explicit emailIds[] or a match criteria object (XOR). Supports dryRun to preview. For single-message moves use move_email. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1382,6 +1382,7 @@ export const TOOLS = [
         folder: { type: "string", description: "Source folder (required when using match)." },
         targetFolder: { type: "string", description: "Destination folder." },
         dryRun: { type: "boolean", description: "Preview without moving.", default: false },
+        expectedCount: { type: "integer", minimum: 0, description: "Number of messages you expect this call to act on (the count a dryRun reported). If the real count differs the call is refused before anything changes. Ignored by dryRun." },
         maxBatchSize: { type: "number", description: "Maximum number of messages to process. Defaults to 500. Use to prevent runaway operations." },
       },
       required: ["targetFolder"],
@@ -1389,7 +1390,7 @@ export const TOOLS = [
   },
   {
     name: "bulk_delete",
-    description: "Delete multiple emails by explicit ID list or by search criteria (from/subject/date/flags). Prefer empty_folder to clear an entire folder. Prefer delete_email for a single message. Prefer batch_email_action when the same set of IDs needs a mix of actions, not just deletion. Use when you have specific IDs to delete or want to filter by sender, subject, or date range. Accepts emailIds[] OR match criteria (XOR). permanent:true permanently expunges; false moves to Trash. Use dryRun to preview.",
+    description: "Delete multiple emails by explicit ID list or by search criteria (from/subject/date/flags). Prefer empty_folder to clear an entire folder. Prefer delete_email for a single message. Prefer batch_email_action when the same set of IDs needs a mix of actions, not just deletion. Use when you have specific IDs to delete or want to filter by sender, subject, or date range. Accepts emailIds[] OR match criteria (XOR). permanent:true permanently expunges; false moves to Trash. Use dryRun to preview. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -1401,13 +1402,14 @@ export const TOOLS = [
         permanent: { type: "boolean", description: "Permanently expunge (irreversible). False = move to Trash.", default: false },
         dryRun: { type: "boolean", default: false },
         confirmed: { type: "boolean", description: "Required when permanent:true and PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
+        expectedCount: { type: "integer", minimum: 0, description: "Number of messages you expect this call to act on (the count a dryRun reported). If the real count differs the call is refused before anything changes. Ignored by dryRun." },
         maxBatchSize: { type: "number", description: "Maximum number of messages to process. Defaults to 500. Use to prevent runaway operations." },
       },
     },
   },
   {
     name: "bulk_update_flags",
-    description: "Add or remove IMAP flags on multiple messages simultaneously. Prefer update_message_flags for a single message when you need per-flag server verification. Use when the same flag change (e.g. \\\\Seen, \\\\Flagged) should apply to several messages. Accepts emailIds[] OR match+folder (XOR). Returns notApplied[] per message for flags the server silently dropped. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/bulk_delete: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
+    description: "Add or remove IMAP flags on multiple messages simultaneously. Prefer update_message_flags for a single message when you need per-flag server verification. Use when the same flag change (e.g. \\\\Seen, \\\\Flagged) should apply to several messages. Accepts emailIds[] OR match+folder (XOR). Returns notApplied[] per message for flags the server silently dropped. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/bulk_delete: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1419,6 +1421,7 @@ export const TOOLS = [
         flagsToAdd: { type: "array", items: { type: "string" }, description: 'IMAP flags to set, e.g. ["\\\\Seen", "\\\\Flagged"].' },
         flagsToRemove: { type: "array", items: { type: "string" }, description: "IMAP flags to clear." },
         dryRun: { type: "boolean", default: false },
+        expectedCount: { type: "integer", minimum: 0, description: "Number of messages you expect this call to act on (the count a dryRun reported). If the real count differs the call is refused before anything changes. Ignored by dryRun." },
         maxBatchSize: { type: "number", description: "Maximum number of messages to process. Defaults to 500. Use to prevent runaway operations." },
         confirmed: { type: "boolean", description: "Pass true to confirm setting \\\\Deleted. Required when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled." },
       },
@@ -1426,7 +1429,7 @@ export const TOOLS = [
   },
   {
     name: "bulk_update_labels",
-    description: "Add or remove Proton labels on multiple messages simultaneously. Use when the same label change should apply to several messages. Labels are IMAP folders under Labels/ namespace. Accepts emailIds[] OR match+folder (XOR).",
+    description: "Add or remove Proton labels on multiple messages simultaneously. Use when the same label change should apply to several messages. Labels are IMAP folders under Labels/ namespace. Accepts emailIds[] OR match+folder (XOR). With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1438,6 +1441,7 @@ export const TOOLS = [
         labelsToAdd: { type: "array", items: { type: "string" }, description: 'Labels to add, e.g. ["Labels/Work"].' },
         labelsToRemove: { type: "array", items: { type: "string" }, description: "Labels to remove." },
         dryRun: { type: "boolean", default: false },
+        expectedCount: { type: "integer", minimum: 0, description: "Number of messages you expect this call to act on (the count a dryRun reported). If the real count differs the call is refused before anything changes. Ignored by dryRun." },
         maxBatchSize: { type: "number", description: "Maximum number of messages to process. Defaults to 500. Use to prevent runaway operations." },
       },
     },
