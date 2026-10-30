@@ -298,7 +298,7 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 For a server with no desktop, next to a headless Bridge. The image installs the published npm package and is published for each release to `ghcr.io/googlarz/proton-mail-bridge-client` (`:<version>` and `:latest`, linux/amd64 and linux/arm64). To build it yourself from this repo:
 
 ```bash
-docker build -f docker/Dockerfile --build-arg VERSION=2.17.1 -t proton-mail-bridge-client .
+docker build -f docker/Dockerfile --build-arg VERSION=2.17.3 -t proton-mail-bridge-client .
 docker run -i --rm --network host \
   -e PROTONMAIL_USERNAME=you@proton.me -e PROTONMAIL_PASSWORD_FILE=/run/secrets/bridge \
   -v /path/to/bridge-password:/run/secrets/bridge:ro -v bridge-client-data:/data \
