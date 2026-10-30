@@ -6,7 +6,7 @@ All notable changes to this project are documented here.
 
 ### Added
 
-- **`expectedCount` on `bulk_move`, `bulk_delete`, `bulk_update_flags` and `bulk_update_labels`.** Run `dryRun` first, read the count and pass it back: if the call would act on a different number of messages (after resolution and exclusions, the number the `maxBatchSize` check uses) it is refused with an invalid-params error before anything changes, naming both numbers. A `dryRun` never refuses. Absent, nothing changes. Must be a non-negative integer.
+- **`expectedCount` on `bulk_move`, `bulk_delete`, `bulk_update_flags` and `bulk_update_labels`.** Run `dryRun` first, read the count and pass it back: if the call would act on a different number of messages (the `total` a `dryRun` reports: found messages plus ids not found) it is refused with an invalid-params error before anything changes, naming both numbers. A `dryRun` never refuses. Absent, nothing changes. Must be a non-negative integer.
 
 ## [2.17.1] — 2026-10-30
 

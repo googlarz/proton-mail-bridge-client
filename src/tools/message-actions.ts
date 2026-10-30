@@ -386,7 +386,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         });
       }
       ensureBulkBatchSize(totalUids, max);
-      ensureBulkExpectedCount(totalUids, expectedCount, dryRun);
+      ensureBulkExpectedCount(totalUids, prepared.reduce((n, group) => n + group.notFound.length, 0), expectedCount, dryRun);
 
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
@@ -477,7 +477,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         });
       }
       ensureBulkBatchSize(totalUids, max);
-      ensureBulkExpectedCount(totalUids, expectedCount, dryRun);
+      ensureBulkExpectedCount(totalUids, prepared.reduce((n, group) => n + group.notFound.length, 0), expectedCount, dryRun);
 
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
@@ -561,7 +561,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         });
       }
       ensureBulkBatchSize(totalUids, max);
-      ensureBulkExpectedCount(totalUids, expectedCount, dryRun);
+      ensureBulkExpectedCount(totalUids, prepared.reduce((n, group) => n + group.notFound.length, 0), expectedCount, dryRun);
 
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
@@ -644,7 +644,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         });
       }
       ensureBulkBatchSize(totalUids, max);
-      ensureBulkExpectedCount(totalUids, expectedCount, dryRun);
+      ensureBulkExpectedCount(totalUids, prepared.reduce((n, group) => n + group.notFound.length, 0), expectedCount, dryRun);
 
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {

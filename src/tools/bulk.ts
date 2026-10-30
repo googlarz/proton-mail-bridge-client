@@ -29,12 +29,14 @@ export function getBulkExpectedCount(args: Record<string, unknown>): number | un
   return value;
 }
 
-// A dryRun only previews, so it never throws here; the count it reports is the number to pass back.
-export function ensureBulkExpectedCount(actual: number, expected: number | undefined, dryRun: boolean): void {
-  if (expected === undefined || dryRun || actual === expected) return;
+// Compared with the `total` a dryRun reports: found messages plus ids that were not found (or stale), so the number
+// a dryRun gave can be passed back unchanged. A dryRun only previews, so it never throws here.
+export function ensureBulkExpectedCount(found: number, notFound: number, expected: number | undefined, dryRun: boolean): void {
+  const total = found + notFound;
+  if (expected === undefined || dryRun || total === expected) return;
   throw new McpError(
     ErrorCode.InvalidParams,
-    "matched " + actual + " messages, expected " + expected + "; nothing was changed. Run dryRun again.",
+    "matched " + total + " messages (" + notFound + " not found), expected " + expected + "; nothing was changed. Run dryRun again.",
   );
 }
 

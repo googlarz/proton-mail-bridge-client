@@ -59,15 +59,15 @@ const CALLS = {
 const call = (client, name, extra) => client.callTool({ name, arguments: { folder: "INBOX", match, ...CALLS[name], ...extra } });
 
 for (const name of Object.keys(CALLS)) {
-  test(`${name}: a wrong expectedCount is refused and the mailbox is unchanged`, async () => {
+  test(`${name}: a wrong expectedCount is refused and the mailbox is unchanged`, needsOpenssl, async () => {
     await withServer(async ({ client, inbox, flagged }) => {
-      await assert.rejects(call(client, name, { expectedCount: 2 }), (e) => /matched 3 messages, expected 2; nothing was changed\. Run dryRun again\./.test(e.message));
+      await assert.rejects(call(client, name, { expectedCount: 2 }), (e) => /matched 3 messages \(0 not found\), expected 2; nothing was changed\. Run dryRun again\./.test(e.message));
       assert.deepEqual(inbox(), [1, 2, 3, 4]);
       assert.equal(flagged(), 0);
     });
   });
 
-  test(`${name}: a matching expectedCount runs, and an absent one behaves as before`, async () => {
+  test(`${name}: a matching expectedCount runs, and an absent one behaves as before`, needsOpenssl, async () => {
     for (const extra of [{ expectedCount: 3 }, {}]) {
       await withServer(async ({ client, inbox, flagged }) => {
         const result = await call(client, name, extra);
@@ -78,7 +78,7 @@ for (const name of Object.keys(CALLS)) {
     }
   });
 
-  test(`${name}: dryRun with a wrong expectedCount does not throw and reports the count`, async () => {
+  test(`${name}: dryRun with a wrong expectedCount does not throw and reports the count`, needsOpenssl, async () => {
     await withServer(async ({ client, inbox, flagged }) => {
       const result = await call(client, name, { expectedCount: 99, dryRun: true });
       assert.notEqual(result.isError, true);
@@ -88,7 +88,7 @@ for (const name of Object.keys(CALLS)) {
     });
   });
 
-  test(`${name}: an invalid expectedCount is rejected with InvalidParams`, async () => {
+  test(`${name}: an invalid expectedCount is rejected with InvalidParams`, needsOpenssl, async () => {
     await withServer(async ({ client, inbox }) => {
       for (const expectedCount of [-1, 1.5, "3", true, {}]) {
         await assert.rejects(call(client, name, { expectedCount }), (e) => /expectedCount must be a non-negative integer/.test(e.message), JSON.stringify(expectedCount));
@@ -101,7 +101,7 @@ for (const name of Object.keys(CALLS)) {
 test("bulk_update_labels: a wrong expectedCount is refused, an invalid one is rejected", needsOpenssl, async () => {
   await withServer(async ({ client, inbox }) => {
     const args = { folder: "INBOX", match, labelsToAdd: ["Labels/Work"] };
-    await assert.rejects(client.callTool({ name: "bulk_update_labels", arguments: { ...args, expectedCount: 0 } }), /matched 3 messages, expected 0; nothing was changed/);
+    await assert.rejects(client.callTool({ name: "bulk_update_labels", arguments: { ...args, expectedCount: 0 } }), /matched 3 messages \(0 not found\), expected 0; nothing was changed/);
     await assert.rejects(client.callTool({ name: "bulk_update_labels", arguments: { ...args, expectedCount: -2 } }), /non-negative integer/);
     assert.deepEqual(inbox(), [1, 2, 3, 4]);
   });
@@ -110,7 +110,30 @@ test("bulk_update_labels: a wrong expectedCount is refused, an invalid one is re
 test("expectedCount counts resolved emailIds too", needsOpenssl, async () => {
   await withServer(async ({ client, inbox }) => {
     const emailIds = ["INBOX::1", "INBOX::2"];
-    await assert.rejects(client.callTool({ name: "bulk_move", arguments: { emailIds, targetFolder: "Archive", expectedCount: 5 } }), /matched 2 messages, expected 5; nothing was changed/);
+    await assert.rejects(client.callTool({ name: "bulk_move", arguments: { emailIds, targetFolder: "Archive", expectedCount: 5 } }), /matched 2 messages \(0 not found\), expected 5; nothing was changed/);
+    assert.deepEqual(inbox(), [1, 2, 3, 4]);
+  });
+});
+
+test("a not-found id counts: the total a dryRun reports is accepted by the real call, and only found ids change", needsOpenssl, async () => {
+  await withServer(async ({ client, inbox }) => {
+    const emailIds = ["INBOX::1", "INBOX::2", "garbage"];
+    const args = { emailIds, targetFolder: "Archive" };
+    const preview = JSON.parse((await client.callTool({ name: "bulk_move", arguments: { ...args, dryRun: true } })).content[0].text);
+    assert.equal(preview.total, 3);
+    assert.equal(preview.notFound, 1);
+    await assert.rejects(client.callTool({ name: "bulk_move", arguments: { ...args, expectedCount: 2 } }), /matched 3 messages \(1 not found\), expected 2; nothing was changed/);
+    assert.deepEqual(inbox(), [1, 2, 3, 4]);
+    const result = await client.callTool({ name: "bulk_move", arguments: { ...args, expectedCount: preview.total } });
+    assert.notEqual(result.isError, true);
+    assert.deepEqual(inbox(), [3, 4]);
+  });
+});
+
+test("bulk_update_labels: dryRun with a wrong expectedCount reports the total without throwing", needsOpenssl, async () => {
+  await withServer(async ({ client, inbox }) => {
+    const result = await client.callTool({ name: "bulk_update_labels", arguments: { folder: "INBOX", match, labelsToAdd: ["Labels/Work"], expectedCount: 99, dryRun: true } });
+    assert.equal(JSON.parse(result.content[0].text).total, 3);
     assert.deepEqual(inbox(), [1, 2, 3, 4]);
   });
 });
