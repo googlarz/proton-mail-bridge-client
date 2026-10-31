@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -111,13 +111,21 @@ const floats = (...values) => {
 test("a sidecar with NaN or infinite values is corrupt: not used, and rebuilt", async () => {
   const dir = await mkdtemp(join(tmpdir(), "emb-limits-"));
   try {
+    // Every rewrite has the same byte length; the service tells files apart by size and mtime, and a coarse
+    // filesystem clock (Windows CI) can give back-to-back writes the same mtime, so each write gets its own.
+    let tick = 0;
+    const writeSidecar = async (path, data) => {
+      await writeFile(path, data);
+      tick += 1;
+      await utimes(path, 1_700_000_000 + tick, 1_700_000_000 + tick);
+    };
     const service = makeService("http://127.0.0.1:9/api/embed", dir, [source(1)]);
     for (const bad of [NaN, Infinity, -Infinity]) {
-      await writeFile(join(dir, "mail-embeddings.bin"), sidecar({ model: "m", dims: 2, keys: ["a", "b"], hashes: [1, 2] }, Buffer.concat([floats(bad, bad), floats(1, 0)])));
+      await writeSidecar(join(dir, "mail-embeddings.bin"), sidecar({ model: "m", dims: 2, keys: ["a", "b"], hashes: [1, 2] }, Buffer.concat([floats(bad, bad), floats(1, 0)])));
       assert.deepEqual(await service.rank(new Float32Array([1, 0]), 5, {}), []);
       assert.equal((await service.coverage()).store, undefined);
     }
-    await writeFile(join(dir, "mail-embeddings.bin"), sidecar({ model: "m", dims: 2, keys: ["a", "b"], hashes: [1, 2] }, Buffer.concat([floats(0, 1), floats(1, 0)])));
+    await writeSidecar(join(dir, "mail-embeddings.bin"), sidecar({ model: "m", dims: 2, keys: ["a", "b"], hashes: [1, 2] }, Buffer.concat([floats(0, 1), floats(1, 0)])));
     assert.deepEqual((await service.rank(new Float32Array([1, 0]), 5, {})).map((hit) => hit.id), ["b", "a"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
