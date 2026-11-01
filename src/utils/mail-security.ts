@@ -83,7 +83,7 @@ function visibleText(raw: string): string {
     text = next;
   }
   return text
-    .replace(/[<>]/g, "")
+    .replace(/[<>]/g, " ")
     .replace(/&(?:nbsp|#160|#xa0|#32|#x20);/gi, " ")
     .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
     .trim();
