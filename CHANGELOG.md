@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **unpdf 2.0.0** dependency bump (page images are now read as RGBA); no behavior change.
+
 ### Fixed
 
 - **Slash trimming is linear** (CodeQL `js/polynomial-redos`): folder-path normalisation and the embeddings URL no longer use a regex that took seconds on a long run of inner slashes.

@@ -80,7 +80,7 @@
     "nodemailer": "^10.0.15",
     "sanitize-html": "^2.18.0",
     "turndown": "^7.2.4",
-    "unpdf": "1.9.1"
+    "unpdf": "2.0.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",
