@@ -231,7 +231,18 @@ test("a link whose text hides the host behind nested tags, entities or zero-widt
     "&#160;paypal.com",
     "\u200bpaypal.com",
     "\u2060\ufeffpaypal.com",
+    "https://paypal.com/?a=>b",
   ]) assert.ok(reasons(text).includes(caution), JSON.stringify(text));
+  // A stray ">" is deleted in place, not used as a cut: text around it still counts (the reading may be glued together).
+  for (const text of ["paypal.com>click here", "paypal.com/>login"]) {
+    assert.ok(reasons(text).some((r) => r.startsWith("A link reads ")), JSON.stringify(text));
+  }
   assert.deepEqual(reasons("<<b>b>paypal.com", "https://www.paypal.com/x"), []);
+  assertScalesWithInput(
+    "nested angle brackets",
+    (n) => `<a href="https://evil.example/">${"<".repeat(n)}${">".repeat(n)}paypal.com</a>`,
+    (html) => assessMail({ html }),
+    50_000,
+  );
   assert.equal(assessMail({ html: `<a href="https://paypal.com/x">paypal.com</a>` }).level, "ok");
 });

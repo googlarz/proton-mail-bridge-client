@@ -7,7 +7,7 @@ All notable changes to this project are documented here.
 ### Fixed
 
 - **Slash trimming is linear** (CodeQL `js/polynomial-redos`): folder-path normalisation and the embeddings URL no longer use a regex that took seconds on a long run of inner slashes.
-- **Link-mismatch caution** (CodeQL `js/incomplete-multi-character-sanitization`): nested tag markers, `&nbsp;`-style spaces and zero-width characters in a link's visible text no longer hide a differing host. Still a caution only.
+- **Link-mismatch caution** (CodeQL `js/incomplete-multi-character-sanitization`): nested tag markers (stripped in bounded passes), `&nbsp;`-style spaces and zero-width characters in a link's visible text no longer hide a differing host. Still a caution only.
 
 ## [2.17.3] — 2026-10-30
 

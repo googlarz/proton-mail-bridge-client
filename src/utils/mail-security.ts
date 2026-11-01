@@ -72,13 +72,18 @@ function hiddenTexts(html: string): string[] {
   return found;
 }
 
-// What a reader sees of a link's text after a single tag-strip pass: nested markers such as "<<b>b>x" leave a remnant
-// ("b>x") that is cut at its last ">", stray "<" are dropped, a minimal set of space entities becomes a space and
+// What a reader sees of a link's text: tags are stripped in at most 5 linear passes (nested markers such as "<<b>b>x"
+// need a second one), stray "<" and ">" are then deleted in place, a minimal set of space entities becomes a space and
 // zero-width characters vanish. Only feeds a caution-only heuristic.
-function visibleText(stripped: string): string {
-  const afterMarker = stripped.slice(stripped.lastIndexOf(">") + 1);
-  return afterMarker
-    .replace(/</g, "")
+function visibleText(raw: string): string {
+  let text = raw;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const next = text.replace(/<[^<>]*>/g, "");
+    if (next === text) break;
+    text = next;
+  }
+  return text
+    .replace(/[<>]/g, "")
     .replace(/&(?:nbsp|#160|#xa0|#32|#x20);/gi, " ")
     .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
     .trim();
@@ -95,7 +100,7 @@ function mismatchedLink(html: string): { shown: string; real: string } | undefin
     if (!target) continue;
     const start = (tag.index ?? 0) + tag[0].length;
     const close = lower.indexOf("</a", start);
-    const text = html.slice(start, close === -1 ? start + 500 : Math.min(close, start + 500)).replace(/<[^>]*>/g, "");
+    const text = html.slice(start, close === -1 ? start + 500 : Math.min(close, start + 500));
     const shownHost = visibleText(text).match(/^(?:https?:\/\/)?([\w.-]+\.[a-z]{2,})(?:[/\s]|$)/i)?.[1]?.toLowerCase();
     const realHost = hostOf(target);
     if (shownHost && realHost && baseDomain(shownHost) !== baseDomain(realHost)) return { shown: shownHost, real: realHost };
