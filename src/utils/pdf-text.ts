@@ -189,7 +189,7 @@ async function largestPageImage(pdf: Awaited<ReturnType<typeof getDocumentProxy>
     .filter((image) => image.width * image.height <= MAX_OCR_IMAGE_PIXELS)
     .sort((a, b) => b.width * b.height - a.width * a.height)[0];
   if (!largest) return undefined;
-  return new Uint8Array(encodePng(largest.width, largest.height, largest.channels, largest.data));
+  return new Uint8Array(encodePng(largest.width, largest.height, 4, largest.data));
 }
 
 type TextItem = { str?: string; hasEOL?: boolean };
