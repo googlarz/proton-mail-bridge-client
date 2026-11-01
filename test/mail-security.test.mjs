@@ -217,3 +217,21 @@ test("attachmentText is scanned like the body: an instruction inside a DOCX text
   const clean = { id: "INBOX::2", subject: "Report", text: "See attached.", attachmentText: "Quarterly numbers: 1, 2, 3." };
   assert.equal(annotateHighRisk(clean, new MailTaint()), false);
 });
+
+test("a link whose text hides the host behind nested tags, entities or zero-width characters still draws the mismatch caution", () => {
+  const reasons = (text, href = "https://evil.example/login") =>
+    assessMail({ html: `<p>Hello <a href="${href}">${text}</a></p>` }).reasons;
+  const caution = "A link reads paypal.com but goes to evil.example.";
+  for (const text of [
+    "paypal.com",
+    "<b>paypal.com</b>",
+    "<<b>b>paypal.com",
+    "<scr<script>ipt>paypal.com",
+    "&nbsp;paypal.com",
+    "&#160;paypal.com",
+    "\u200bpaypal.com",
+    "\u2060\ufeffpaypal.com",
+  ]) assert.ok(reasons(text).includes(caution), JSON.stringify(text));
+  assert.deepEqual(reasons("<<b>b>paypal.com", "https://www.paypal.com/x"), []);
+  assert.equal(assessMail({ html: `<a href="https://paypal.com/x">paypal.com</a>` }).level, "ok");
+});

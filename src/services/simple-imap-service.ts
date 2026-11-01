@@ -50,6 +50,7 @@ import {
   sortEmailsByNewest,
   stripHtmlToText,
   summarizeCalendarText,
+  trimSlashes,
 } from "../utils/helpers.js";
 import { logger, type Logger } from "../utils/logger.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
@@ -1438,12 +1439,12 @@ export class SimpleIMAPService {
       "inbox", "drafts", "sent", "sent mail", "trash", "deleted messages", "spam", "junk", "archive",
       "all mail", "starred", "folders", "labels",
     ]);
-    const normalized = path.replace(/^\/+|\/+$/g, "").trim().toLowerCase();
+    const normalized = trimSlashes(path).trim().toLowerCase();
     if (reservedNames.has(normalized)) {
       throw new Error(`Refusing to ${verb} reserved system folder ${path}.`);
     }
     const known = await this.getFolders().catch(() => [] as Array<{ path: string; specialUse?: string }>);
-    const target = known.find((entry) => entry.path.replace(/^\/+|\/+$/g, "").toLowerCase() === normalized);
+    const target = known.find((entry) => trimSlashes(entry.path).toLowerCase() === normalized);
     if (target?.specialUse) {
       throw new Error(`Refusing to ${verb} system folder ${path} (it is the server's ${target.specialUse} folder).`);
     }
@@ -2723,7 +2724,7 @@ export class SimpleIMAPService {
   }
 
   async emptyFolder(folder: string): Promise<{ folder: string; deleted: number }> {
-    if (folder.replace(/^\/+|\/+$/g, "").trim().toUpperCase() === "INBOX") {
+    if (trimSlashes(folder).trim().toUpperCase() === "INBOX") {
       throw new Error("emptyFolder cannot be used on INBOX. Move messages to Trash first.");
     }
 
@@ -4185,7 +4186,7 @@ export class SimpleIMAPService {
   // the move, so the move tools check this to apply the "trash" permission as well. A folder merely named
   // "Trash" under another path (Folders/Trash) is a different folder.
   async isTrashFolder(path: string): Promise<boolean | undefined> {
-    const normalize = (value: string) => value.trim().replace(/^\/+|\/+$/g, "").trim().toLowerCase();
+    const normalize = (value: string) => trimSlashes(value.trim()).trim().toLowerCase();
     const wanted = normalize(path);
     if (wanted === "trash" || wanted === "inbox.trash") {
       return true;

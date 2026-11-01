@@ -5,6 +5,7 @@ import type { AccountBundle } from "./account-manager.js";
 import type { LocalIndexService } from "./local-index-service.js";
 import type { EmailAddress, EmailSummary, EmbeddingsConfig, SearchEmailsInput } from "../types/index.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
+import { trimSlashes } from "../utils/helpers.js";
 import { isFileNotFound } from "../utils/corrupt-store.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { logger, type Logger } from "../utils/logger.js";
@@ -71,7 +72,7 @@ export function checkEmbeddingsEndpoint(raw: string, allowRemote: boolean): { ur
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`PROTONMAIL_EMBEDDINGS_URL must be an http:// or https:// URL, got: ${raw}`);
   }
-  url.pathname = url.pathname.replace(/\/+$/, "");
+  url.pathname = trimSlashes(url.pathname, false);
   const api = url.pathname.endsWith("/api/embed") ? "ollama" : url.pathname.endsWith("/embeddings") ? "openai" : undefined;
   if (!api) {
     throw new Error(`PROTONMAIL_EMBEDDINGS_URL must end with /api/embed (Ollama) or /v1/embeddings (OpenAI-compatible), got: ${raw}`);

@@ -10,6 +10,15 @@ import type {
 } from "../types/index.js";
 
 const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+/** Strips leading (unless `leading` is false) and trailing slashes in linear time; the regex /^\/+|\/+$/g is quadratic on "a///...x". */
+export function trimSlashes(value: string, leading = true): string {
+  let start = 0;
+  let end = value.length;
+  if (leading) while (start < end && value[start] === "/") start += 1;
+  while (end > start && value[end - 1] === "/") end -= 1;
+  return value.slice(start, end);
+}
+
 const EMAIL_ID_SEPARATOR = "::";
 
 // Multi-account support (2.1.0): rather than touching parseEmailId/createEmailId's
