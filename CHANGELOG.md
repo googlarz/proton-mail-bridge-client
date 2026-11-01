@@ -2,11 +2,13 @@
 
 All notable changes to this project are documented here.
 
-## [2.17.4] — 2026-11-01
+## [Unreleased]
 
 ### Changed
 
-- **unpdf 2.0.0** dependency bump (page images are now read as RGBA); no behavior change.
+- **unpdf 2.0.0** (was 1.9.1). Page images for OCR are now read as RGBA, so the PNG sent to `PROTONMAIL_OCR_COMMAND` is 4-channel (the pixels are the same). A scanned page whose only image is a 1-bit image mask used to give no text and now reaches OCR as black on a transparent background; some OCR engines read that worse than black on white.
+
+## [2.17.4] — 2026-11-01
 
 ### Fixed
 
