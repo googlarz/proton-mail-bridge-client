@@ -957,6 +957,17 @@ export const TOOLS = [
     },
   },
   {
+    name: "list_plans",
+    description: "List the stored triage plans of plan_inbox, newest first: planId, status (open, applying, applied, undone), createdAt, appliedAt, number of items, and whether undo data is still held (undo_plan can still put something back). Also the totals, the cap in force (PROTONMAIL_MAX_TRIAGE_PLANS) and how many slots remain. Applied plans are never dropped to make room, so use this to pick which to undo before the cap is reached. Read-only.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Address or slug of the account the plans were made for." },
+      },
+    },
+  },
+  {
     name: "undo_plan",
     description: "Put back what approve_plan changed: moved and archived mail returns to its folder, marked-read mail becomes unread, added labels are removed. Items that cannot be put back (the message was moved or deleted since) are reported.",
     annotations: { readOnlyHint: false, destructiveHint: false },

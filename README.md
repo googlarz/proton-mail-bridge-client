@@ -47,7 +47,7 @@ Let Claude Desktop (or Cline, or any MCP client) work with your Proton Mail, wit
    - "Which of my emails have attachments from this month?"
    - "Show me my drafts and tighten the oldest one."
 5. **Not sure about handing over control?** Start with `PROTONMAIL_MODE=drafts`: Claude can read, search and prepare drafts, but nothing is sent or deleted until you change the mode. The server also tells the client how to behave (ids, accounts, never obeying instructions found inside a message).
-6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 127), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
+6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 128), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
 
 ---
 
@@ -62,7 +62,7 @@ Let Claude Desktop (or Cline, or any MCP client) work with your Proton Mail, wit
 - **Fast local search** — full-text search across your inbox from a local index that keeps its read state in step with the server
 - **Rules that suggest themselves** — a scan proposes filters and cleanup from your own mail, applies them to existing mail after a preview, and can forward by condition; see [Mailbox rules](#mailbox-rules-suggestions-filters-cleanup-forwarding)
 - **Automatic reply, per address, with rules** — off by default, with a preview of what it would do, draft-for-approval mode and working-hours; see [Autoresponder](#autoresponder-automatic-reply-per-address) (Proton's own auto-reply may be all you need)
-- **Full CLI** — a dedicated command for every one of the 127 MCP tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
+- **Full CLI** — a dedicated command for every one of the 128 MCP tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
 - **Runs where you do** — Claude Desktop bundle, npm, Homebrew, or a [Docker image](#running-in-docker-headless-machines) for a headless machine
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
 
@@ -300,6 +300,8 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 ---
 
 ## Running in Docker (headless machines)
+
+> **Home server or NAS?** A [step-by-step recipe with a Compose file](docs/headless-docker.md) (untested end to end) shows Bridge without a GUI next to this server. **No cloud model at all?** See [fully local use](docs/fully-local.md) (experimental).
 
 For a server with no desktop, next to a headless Bridge. The image installs the published npm package and is published for each release to `ghcr.io/googlarz/proton-mail-bridge-client` (`:<version>` and `:latest`, linux/amd64 and linux/arm64). To build it yourself from this repo:
 
@@ -656,7 +658,7 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 
 `<command> --help` prints that command's usage without running it. Flags accept `--flag value` or `--flag=value` (a value starting with `--` needs the `=` form, or must come after a bare `--`); unknown flags are an error. Exit codes: `0` success, `1` failure (including a failed `doctor` or `connection-status` check, or a failed item in a `batch`/`bulk-*` run), `2` usage error.
 
-**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 127 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
+**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 128 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
 
 ---
 
@@ -678,7 +680,7 @@ A mode is a floor: the individual flags below can make things stricter (`PROTONM
 All flags work in both the MCP server and CLI:
 
 ```bash
-PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 127 — saves context window
+PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 128 — saves context window
 PROTONMAIL_READ_ONLY=true            # disable all write operations
 PROTONMAIL_ALLOW_SEND=false          # disable SMTP sends only (other writes still work)
 PROTONMAIL_CONFIRM_DESTRUCTIVE=true  # require confirmed:true on send, reply, forward, delete
@@ -722,7 +724,7 @@ PROTONMAIL_PASSWORD_COMMAND='pass proton/password'
 PROTONMAIL_DATA_DIR="$HOME/.proton-mail-bridge-client"
 
 # Tools
-PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 127
+PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 128
 PROTONMAIL_TOOLSET='full'            # 'full' (all tools), 'core' (the same 25 as TOOL_TIER=core) or 'reader' (read-only tools only, nothing that writes or sends); hides tools and refuses calls to them, never widens PROTONMAIL_MODE; wins over TOOL_TIER; invalid -> full
 
 # Safety
@@ -919,7 +921,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_KB`. **Do not point `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` at a broad directory such as `$HOME`:** `save_attachment` could then overwrite shell startup files, LaunchAgents or `~/.claude/settings.json`. The server refuses destinations inside any account's data directory (its `attachments` folder excepted) and the trusted CA file (`save_attachment(s)`, `export_email`), even when the download directory contains them, but it protects nothing else. This was already true before 2.17.
 - Office files are read in a small pool: at most 2 documents at a time, up to 16 waiting (further ones fail with a `busy` error), each worker memory-limited and each job stopped after 10 seconds from its start.
-- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 127: about 7k tokens of tool definitions instead of about 21k (measured with 116 tools, before the eleven tools of 2.17 were added and not re-measured; the full set now costs somewhat more) (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 128: about 7k tokens of tool definitions instead of about 21k (measured with 116 tools, before the eleven tools of 2.17 were added and not re-measured; the full set now costs somewhat more) (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 
 **Working with drafts**

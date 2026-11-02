@@ -67,6 +67,11 @@ export class TriagePlanService {
     this.maxPlans = options.runtime?.maxTriagePlans ?? DEFAULT_MAX_PLANS;
   }
 
+  /** The most plans kept: applied ones are never dropped to make room, so this is the number list_plans counts against. */
+  get cap(): number {
+    return this.maxPlans;
+  }
+
   async create(items: Omit<PlanItem, "n">[], now = new Date()): Promise<TriagePlan> {
     return this.withLock(async () => {
       const state = await this.load();
@@ -76,7 +81,7 @@ export class TriagePlanService {
       const plans = [...state.plans];
       while (plans.length >= this.maxPlans) {
         const spare = plans.findIndex((candidate) => candidate.status !== "applied" && candidate.status !== "applying");
-        if (spare === -1) throw new Error(`Cannot make a new plan: ${plans.length} stored plans are all applied, and each is the only way to undo its changes (limit ${this.maxPlans}). Undo plans you no longer need with undo_plan, or raise PROTONMAIL_MAX_TRIAGE_PLANS.`);
+        if (spare === -1) throw new Error(`Cannot make a new plan: ${plans.length} stored plans are all applied, and each is the only way to undo its changes (limit ${this.maxPlans}). list_plans shows which ones are stored; undo plans you no longer need with undo_plan, or raise PROTONMAIL_MAX_TRIAGE_PLANS.`);
         plans.splice(spare, 1);
       }
       state.plans = [...plans, plan];

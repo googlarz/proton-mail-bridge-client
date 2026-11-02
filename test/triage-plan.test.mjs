@@ -42,7 +42,7 @@ async function withServer(runtimeOverrides, fn) {
     const text = result.content.find((c) => c.type === "text").text;
     return result.isError ? { error: text } : JSON.parse(text);
   };
-  try { await fn({ call, folders, imapService }); } finally {
+  try { await fn({ call, folders, imapService, client }); } finally {
     await client.close(); await server.close(); await closeTrackedIndexes(); await bridge.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
@@ -149,6 +149,37 @@ test("a label Bridge reports as Labels/<name> counts as already there, so undo d
   });
 });
 
+test("list_plans shows each stored plan, the cap and the slots left, and changes nothing", needsOpenssl, async () => {
+  await withServer({}, async ({ call, client, folders }) => {
+    const listed = (await client.listTools()).tools.find((tool) => tool.name === "list_plans");
+    assert.equal(listed?.annotations?.readOnlyHint, true);
+
+    const empty = await call("list_plans", {});
+    assert.deepEqual([empty.total, empty.cap, empty.slotsRemaining, empty.plans], [0, 200, 200, []]);
+
+    const first = await call("plan_inbox", {});
+    const second = await call("plan_inbox", { scan: false, items: [{ emailId: first.items[0].emailId, action: "mark_read" }] });
+    await call("approve_plan", { planId: first.planId });
+    const inboxBefore = folders.INBOX.messages.length;
+
+    const one = await call("list_plans", {});
+    assert.equal(one.total, 2);
+    assert.equal(one.slotsRemaining, 198);
+    assert.deepEqual(one.byStatus, { applied: 1, open: 1 });
+    assert.deepEqual(one.plans.map((plan) => plan.planId), [second.planId, first.planId], "newest first");
+    const [open, applied] = one.plans;
+    assert.deepEqual([open.status, open.items, open.undoDataHeld, open.appliedAt], ["open", 1, false, undefined]);
+    assert.deepEqual([applied.status, applied.items, applied.undoDataHeld], ["applied", first.items.length, true]);
+    assert.ok(applied.createdAt && applied.appliedAt);
+    assert.equal(applied.undoableItems, first.items.length);
+    assert.equal(folders.INBOX.messages.length, inboxBefore, "listing changes nothing");
+
+    await call("undo_plan", { planId: first.planId });
+    const two = (await call("list_plans", {})).plans.find((plan) => plan.planId === first.planId);
+    assert.deepEqual([two.status, two.undoDataHeld, two.undoableItems], ["undone", false, 0]);
+  });
+});
+
 const planItems = [{ emailId: "1", from: "a@x.example", subject: "S", action: "archive", reason: "r", source: "client" }];
 
 async function withPlanStore(maxTriagePlans, fn) {
@@ -163,7 +194,7 @@ test("a full store of applied plans keeps the new plan or refuses, never drops u
       await service.beginApply(plan.id);
       await service.markApplied(plan.id, [], []);
     }
-    await assert.rejects(() => service.create(planItems), /all applied.*undo_plan.*PROTONMAIL_MAX_TRIAGE_PLANS/s);
+    await assert.rejects(() => service.create(planItems), /all applied.*list_plans.*undo_plan.*PROTONMAIL_MAX_TRIAGE_PLANS/s);
     const stored = await service.list();
     assert.equal(stored.length, 3);
     assert.ok(stored.every((plan) => plan.status === "applied"), "no applied plan was dropped");

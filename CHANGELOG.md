@@ -7,18 +7,14 @@ All notable changes to this project are documented here.
 ### Changed
 
 - **The README, package, registry and bundle descriptions now lead with safety.** The first promise is read-only or drafts mode, your approval before anything is sent or deleted, a tamper-evident audit log and local-only data, with the tool count moved lower. The README also states the defaults plainly: with `PROTONMAIL_MODE` unset the mode is `full`. No behaviour or default changed.
+
 ### Added
 
 - **`PROTONMAIL_TOOLSET` tool profiles: `full` (default), `core`, `reader`.** `core` is the 25-tool everyday set that `PROTONMAIL_TOOL_TIER=core` already gave; `reader` lists only tools that change nothing in the mailbox and send nothing (54 of 127). A profile only hides tools: they are left out of `tools/list` and a call to a hidden tool is refused with a clear error before any gate runs (this now also holds for `PROTONMAIL_TOOL_TIER=core`, which used to hide without refusing). It never widens `PROTONMAIL_MODE`, the allowed actions, confirmation or the risk gate. An invalid value warns on stderr and uses `full`; `PROTONMAIL_TOOLSET` wins over `PROTONMAIL_TOOL_TIER`.
-### Added
-
 - **`setup-claude-desktop` now checks your mailbox when it finishes.** After writing the config it makes one read-only call to Bridge (login and a folder listing with message counts; it sends nothing, changes nothing and writes no file) and prints "Bridge reachable, signed in as ..., INBOX has N messages", or, if that fails, the likeliest single cause (Bridge not running, wrong port, or a password that is not the Bridge password). It gives up after a few seconds, never prints the password, and `--no-check` skips it. It then lists what to do next: restart Claude Desktop completely, three example requests, and a note that the approval prompt Claude Desktop shows the first time is its own safety prompt. The config the wizard writes is unchanged.
-### Added
-
 - **A headless Docker recipe** ([docs/headless-docker.md](docs/headless-docker.md), `docker/docker-compose.example.yml`): a Bridge service and this server on a private Compose network, nothing published on the host, `PROTONMAIL_MODE=drafts`, TLS by host name via `PROTONMAIL_TLS_INSECURE_HOSTS` or `PROTONMAIL_TLS_CA_FILE`. Labelled untested end to end: only the compose file's syntax was checked, not a real Bridge.
-### Added
-
 - **`docs/fully-local.md`**: how to use the server with a local model and no cloud LLM (experimental, not validated by the maintainer).
+- **`list_plans`** (CLI `plans`): lists the stored triage plans, newest first, with status, created and applied times, number of items and whether undo data is still held, plus the total, the cap in force (`PROTONMAIL_MAX_TRIAGE_PLANS`) and the slots remaining, so you can pick plans to undo before the cap is reached. Read-only; the `plan_inbox` refusal at the cap now points to it.
 
 ## [2.17.7] — 2026-11-02
 

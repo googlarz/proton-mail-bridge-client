@@ -313,6 +313,7 @@ proton-mail-bridge-client find-commitments
 proton-mail-bridge-client set-commitment --args '{"text":"send the offer","direction":"mine","due":"2026-11-05"}'
 proton-mail-bridge-client commitments
 proton-mail-bridge-client approve-plan plan-1a2b3c4d --args '{"exclude":[3]}'
+proton-mail-bridge-client plans                                # stored plans, which still hold undo data, the cap and slots left
 proton-mail-bridge-client undo-plan plan-1a2b3c4d
 proton-mail-bridge-client define-category Receipts --args '{"keywords":["invoice","receipt"],"label":"Receipts"}'
 proton-mail-bridge-client categories
