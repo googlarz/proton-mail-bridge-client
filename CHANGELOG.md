@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`setup-claude-desktop` now checks your mailbox when it finishes.** After writing the config it makes one read-only call to Bridge (login and a folder listing with message counts; it sends nothing, changes nothing and writes no file) and prints "Bridge reachable, signed in as ..., INBOX has N messages", or, if that fails, the likeliest single cause (Bridge not running, wrong port, or a password that is not the Bridge password). It gives up after a few seconds, never prints the password, and `--no-check` skips it. It then lists what to do next: restart Claude Desktop completely, three example requests, and a note that the approval prompt Claude Desktop shows the first time is its own safety prompt. The config the wizard writes is unchanged.
+
 ## [2.17.7] — 2026-11-02
 
 ### Fixed
