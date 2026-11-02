@@ -294,7 +294,7 @@ export async function runClaudeDesktopSetupWizard(options: SetupWizardOptions = 
       smtpPort,
       dataDir,
     });
-    const result = await installClaudeDesktopConfig({ includeEnv: false, env: wizardEnv });
+    const result = await installClaudeDesktopConfig({ includeEnv: false, env: wizardEnv, newInstallEnv: { PROTONMAIL_MODE: "drafts" } });
 
     output.write("\nClaude Desktop setup complete.\n");
     output.write(`- Config written to: ${result.configPath}\n`);

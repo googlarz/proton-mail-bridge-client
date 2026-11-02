@@ -89,6 +89,7 @@ export const NEXT_STEPS = [
   "  3. The first time Claude uses a tool, Claude Desktop asks you to approve it. That prompt is Claude Desktop's own",
   '     safety check, not an error; choose "Allow once" or "Always allow".',
   "  4. Optional: for a daily brief of new mail and unanswered threads, run `proton-mail-bridge-client schedule --job brief` (it only prints the setup, installs nothing).",
+  "  5. A new setup starts in drafts mode: Claude can read and write drafts but cannot send. To allow sending, set PROTONMAIL_MODE to full in the server's env (an existing setup keeps its mode).",
   "",
 ].join("\n");
 

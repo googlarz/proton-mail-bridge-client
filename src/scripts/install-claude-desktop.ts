@@ -25,6 +25,8 @@ export interface InstallOptions {
   command?: string;
   includeEnv?: boolean;
   env?: Record<string, string>;
+  /** Env keys written only when the config has no entry for this server yet; an existing install keeps its own. */
+  newInstallEnv?: Record<string, string>;
   useRepoRuntime?: boolean;
   /** Test seams for the staged install; the defaults are the real implementations. */
   installDependencies?: (stagingDir: string, hasLockfile: boolean) => Promise<void>;
@@ -460,6 +462,7 @@ export function mergeClaudeDesktopConfig(
   existing: Record<string, unknown>,
   serverName: string,
   serverConfig: ClaudeDesktopServerConfig,
+  newInstallEnv?: Record<string, string>,
 ): Record<string, unknown> {
   const existingServers =
     existing.mcpServers && typeof existing.mcpServers === "object" && !Array.isArray(existing.mcpServers)
@@ -479,7 +482,7 @@ export function mergeClaudeDesktopConfig(
     typeof (existingServerConfig as { env?: unknown }).env === "object"
       ? ((existingServerConfig as { env: Record<string, string> }).env)
       : undefined;
-  const env = { ...existingEnv, ...serverConfig.env };
+  const env = { ...(existingServerConfig ? {} : newInstallEnv), ...existingEnv, ...serverConfig.env };
 
   return {
     ...existing,
@@ -635,7 +638,7 @@ export async function installClaudeDesktopConfig(options: InstallOptions = {}): 
 
   // Read again now: Claude Desktop or the user may have edited the file while the runtime installed.
   const existing = await readExistingConfig(configPath);
-  const merged = mergeClaudeDesktopConfig(existing, serverName, serverConfig);
+  const merged = mergeClaudeDesktopConfig(existing, serverName, serverConfig, options.newInstallEnv);
 
   await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
   const backupPath = await backupConfigIfPresent(configPath);

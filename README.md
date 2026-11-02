@@ -26,7 +26,7 @@
 
 Let Claude Desktop (or Cline, or any MCP client) work with your Proton Mail, with you in control of what it may do. The server can be set to **read-only** or **drafts** mode, where nothing is sent, moved or deleted. Sending and deleting can be set to wait for your approval: `assisted` mode asks for `confirmed: true`, and `PROTONMAIL_APPROVAL=elicit|require` makes the server ask **you** through the client instead of trusting the model. Every change can be recorded in a hash-chained, tamper-evident audit log. The server talks only to Proton Bridge on `127.0.0.1` and keeps its index on your disk; the mail text the AI model reads goes to the model provider unless the model runs locally (see [fully local](docs/fully-local.md)). The [threat model](docs/threat-model.md) says what is and is not covered. The same tools are also available as a full CLI for scripting, cron and piped automation, with no Claude required. A daily brief of new mail and threads waiting on you can be shown as a notification each morning: see [scheduled digest](docs/cli.md#scheduled-digest).
 
-> **Know the default:** with `PROTONMAIL_MODE` unset the server runs in `full` mode (sending allowed, no approval), and the `setup-claude-desktop` wizard writes `READ_ONLY=false` and `ALLOW_SEND=true` (moves and permanent delete are off in its action list). For a safer start set `PROTONMAIL_MODE=drafts` or `read-only` (see [Safety controls](#one-switch-protonmail_mode)). Approval by elicitation depends on the client supporting it; only `require` fails closed.
+> **Know the default:** with `PROTONMAIL_MODE` unset the server runs in `full` mode (sending allowed, no approval), but a **new** `setup-claude-desktop` install writes `PROTONMAIL_MODE=drafts` (Claude can read and write drafts, not send; moves and permanent delete are off in its action list). Re-running setup on an existing install keeps its mode. To allow sending set `PROTONMAIL_MODE=full`; for read-only use `read-only` (see [Safety controls](#one-switch-protonmail_mode)). Approval by elicitation depends on the client supporting it; only `require` fails closed.
 
 > **Using Proton Drive too?** See [**proton-drive-mcp**](https://github.com/googlarz/proton-drive-mcp), the companion MCP server and CLI for Proton Drive (upload, download, share and manage your encrypted files from Claude). Run both side by side to handle mail and files in one conversation, for example save an attachment from here, then upload it to Drive. More in [Related projects](#related-projects).
 
@@ -306,7 +306,7 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 For a server with no desktop, next to a headless Bridge. The image installs the published npm package and is published for each release to `ghcr.io/googlarz/proton-mail-bridge-client` (`:<version>` and `:latest`, linux/amd64 and linux/arm64). To build it yourself from this repo:
 
 ```bash
-docker build -f docker/Dockerfile --build-arg VERSION=2.17.7 -t proton-mail-bridge-client .
+docker build -f docker/Dockerfile --build-arg VERSION=2.18.0 -t proton-mail-bridge-client .
 docker run -i --rm --network host \
   -e PROTONMAIL_USERNAME=you@proton.me -e PROTONMAIL_PASSWORD_FILE=/run/secrets/bridge \
   -v /path/to/bridge-password:/run/secrets/bridge:ro -v bridge-client-data:/data \

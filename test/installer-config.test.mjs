@@ -32,6 +32,15 @@ test("merge keeps existing env keys that the shell did not export", () => {
   });
 });
 
+test("newInstallEnv is applied to a new install and never to an existing one", () => {
+  const fresh = mergeClaudeDesktopConfig({}, "proton-mail-bridge", serverConfig({ PROTONMAIL_PASSWORD: "p" }), { PROTONMAIL_MODE: "drafts" });
+  assert.equal(fresh.mcpServers["proton-mail-bridge"].env.PROTONMAIL_MODE, "drafts");
+  const existing = { mcpServers: { "proton-mail-bridge": { env: { PROTONMAIL_MODE: "full" } } } };
+  assert.equal(mergeClaudeDesktopConfig(existing, "proton-mail-bridge", serverConfig({ PROTONMAIL_PASSWORD: "p" }), { PROTONMAIL_MODE: "drafts" }).mcpServers["proton-mail-bridge"].env.PROTONMAIL_MODE, "full");
+  const legacy = { mcpServers: { "proton-mail-bridge": { env: { PROTONMAIL_PASSWORD: "old" } } } };
+  assert.equal(mergeClaudeDesktopConfig(legacy, "proton-mail-bridge", serverConfig({ PROTONMAIL_PASSWORD: "p" }), { PROTONMAIL_MODE: "drafts" }).mcpServers["proton-mail-bridge"].env.PROTONMAIL_MODE, undefined);
+});
+
 test("collectInstallEnv does not copy the installer's own runtime-dir override", () => {
   assert.deepEqual(collectInstallEnv({ PROTONMAIL_CLAUDE_RUNTIME_DIR: "/x", PROTONMAIL_USERNAME: "u" }), {
     PROTONMAIL_USERNAME: "u",
