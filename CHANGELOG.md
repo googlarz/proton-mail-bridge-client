@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.18.1] — 2026-11-02
+
+### Fixed
+
+- **The `.mcpb` bundles build again on Windows.** With the Node 22 floor (2.18.0), the bundle build compiled `better-sqlite3` from source and Node 22's bundled node-gyp could not find Visual Studio on the Windows runner, so 2.18.0 shipped to npm, Docker and Homebrew but with no `.mcpb` files. The build now installs with `--ignore-scripts`: the bundles use the prebuilt binaries that ship inside the package, so no compile is needed. Use 2.18.1 for the bundles.
+
 ## [2.18.0] — 2026-11-02
 
 ### Docs
