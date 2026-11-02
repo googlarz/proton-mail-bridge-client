@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`list_plans`** (CLI `plans`): lists the stored triage plans, newest first, with status, created and applied times, number of items and whether undo data is still held, plus the total, the cap in force (`PROTONMAIL_MAX_TRIAGE_PLANS`) and the slots remaining, so you can pick plans to undo before the cap is reached. Read-only; the `plan_inbox` refusal at the cap now points to it.
+
 ## [2.17.7] — 2026-11-02
 
 ### Fixed

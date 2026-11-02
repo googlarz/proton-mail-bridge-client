@@ -11,7 +11,7 @@ import { createTextResult } from "./results.js";
 import type { ToolContext } from "./context.js";
 import type { ToolResult } from "./results.js";
 
-// plan_inbox / approve_plan / undo_plan: tidy the mailbox in one reviewed batch. A plan holds changes that can be taken
+// plan_inbox / approve_plan / undo_plan / list_plans: tidy the mailbox in one reviewed batch. A plan holds changes that can be taken
 // back (archive, move, mark read, label), from the model's own proposals and from a scan for automatic mail nobody
 // reads. Approving applies the chosen ones and records how to undo each; what was left out is not proposed again.
 
@@ -41,6 +41,31 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
   const present = (item: PlanItem) => ({ n: item.n, emailId: prefixedIdFor(bundle, item.emailId), from: item.from, subject: item.subject, do: describeItem(item), reason: item.reason, source: item.source });
 
   switch (name) {
+    case "list_plans": {
+      const stored = await plans.list();
+      const byStatus: Record<string, number> = {};
+      for (const plan of stored) byStatus[plan.status] = (byStatus[plan.status] ?? 0) + 1;
+      // Undo data is held while at least one applied item still has a way back that has not been used.
+      const undoItems = (plan: (typeof stored)[number]) => (plan.applied ?? []).filter((item) => item.ok && item.undo && !item.undone).length;
+      return createTextResult({
+        account: bundle.account.address,
+        total: stored.length,
+        cap: plans.cap,
+        slotsRemaining: Math.max(0, plans.cap - stored.length),
+        byStatus,
+        plans: [...stored].reverse().map((plan) => ({
+          planId: plan.id,
+          status: plan.status,
+          createdAt: plan.createdAt,
+          ...(plan.appliedAt ? { appliedAt: plan.appliedAt } : {}),
+          items: plan.items.length,
+          undoDataHeld: undoItems(plan) > 0,
+          undoableItems: undoItems(plan),
+        })),
+        note: "Applied plans hold the undo data and are never dropped to make room; undo_plan with a planId frees its slot's undo data (the plan stays listed as undone and is the first to be dropped).",
+      });
+    }
+
     case "plan_inbox": {
       const limit = normalizeLimit(args.limit, 30, 1, MAX_ITEMS);
       const minAgeDays = optionalNumber(args.minAgeDays, 0, 365) ?? 3;

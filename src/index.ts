@@ -533,6 +533,7 @@ export function createServer(
         case "list_commitments":
           return await handleCommitmentTool(name, args, ctx);
 
+        case "list_plans":
         case "plan_inbox":
         case "approve_plan":
         case "undo_plan":

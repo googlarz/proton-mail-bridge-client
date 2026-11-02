@@ -2404,6 +2404,7 @@ export const TOOL_ONLY_COMMANDS: ToolOnlyCommand[] = [
   { command: "apply-rules", tool: "apply_rules", positionals: [], help: "Run the rules on mail already in the index; a preview unless --dryRun false (--ruleId, --limit, --confirmed)" },
   { command: "plan-inbox", tool: "plan_inbox", positionals: [], help: "Prepare a batch of mailbox changes to approve at once (--args '{\"scan\":true,\"limit\":30}')" },
   { command: "approve-plan", tool: "approve_plan", positionals: ["planId"], help: "Apply a plan from plan-inbox (--args '{\"exclude\":[3]}')" },
+  { command: "plans", tool: "list_plans", positionals: [], help: "Stored plans: status, age, items, whether undo data is held, the cap and the slots left (--account)" },
   { command: "undo-plan", tool: "undo_plan", positionals: ["planId"], help: "Put back what an approved plan changed" },
   { command: "define-category", tool: "define_category", positionals: ["name"], help: "Define or change an inbox category of your own (--args '{\"keywords\":[\"invoice\"],\"label\":\"Receipts\"}'; '{\"starter\":true}' for the starter set)" },
   { command: "categories", tool: "list_categories", positionals: [], help: "Your inbox categories and what corrections taught them (--account)" },
