@@ -1,0 +1,58 @@
+# UNTESTED END TO END (no real Bridge was available). See docs/headless-docker.md for the steps and what was checked.
+#
+# One-time sign-in of Bridge (interactive), before the first `up`:
+#   docker compose -f docker/docker-compose.example.yml run --rm bridge init
+#   (at the prompt: login, then info, then exit)
+# Then:
+#   docker compose -f docker/docker-compose.example.yml up -d bridge
+# The MCP client starts the server per session (stdio), see the doc:
+#   docker compose -f docker/docker-compose.example.yml run -i --rm --no-deps -T mcp
+
+services:
+  bridge:
+    # Community image, not made by Proton; pin a tag or digest you have checked.
+    image: shenxn/protonmail-bridge:latest
+    restart: unless-stopped
+    volumes:
+      - bridge-data:/root
+    # No "ports:". The server below reaches Bridge as bridge:143 and bridge:25 over the private compose network.
+    # If you also want a desktop mail client on this host, add (loopback only):
+    #   ports:
+    #     - "127.0.0.1:1143:143"
+    #     - "127.0.0.1:1025:25"
+
+  mcp:
+    image: ghcr.io/googlarz/proton-mail-bridge-client:latest   # pin a version, e.g. :2.17.7
+    profiles: ["client"]   # not started by `up`; the MCP client runs it with `run -i`
+    depends_on:
+      - bridge
+    stdin_open: true
+    environment:
+      PROTONMAIL_USERNAME: you@proton.me          # your Proton address
+      PROTONMAIL_PASSWORD_FILE: /run/secrets/bridge_password   # the Bridge password from `info`, NOT your Proton password
+      PROTONMAIL_IMAP_HOST: bridge
+      PROTONMAIL_IMAP_PORT: "143"
+      PROTONMAIL_IMAP_SECURE: "false"             # STARTTLS, as with Bridge on 1143
+      PROTONMAIL_SMTP_HOST: bridge
+      PROTONMAIL_SMTP_PORT: "25"
+      # Bridge's certificate is self-signed for localhost, so a host name fails verification (issue #56).
+      # Either name the host here (not verified) ...
+      PROTONMAIL_TLS_INSECURE_HOSTS: bridge
+      # ... or pin Bridge's exported certificate instead (preferred; remove the line above):
+      # PROTONMAIL_TLS_CA_FILE: /run/secrets/bridge_cert
+      PROTONMAIL_MODE: drafts                     # read, search, draft; nothing is sent or deleted
+    volumes:
+      - mcp-data:/data                            # the local index (PROTONMAIL_DATA_DIR=/data in the image)
+    secrets:
+      - bridge_password
+      # - bridge_cert
+
+secrets:
+  bridge_password:
+    file: ./secrets/bridge_password.txt
+  # bridge_cert:
+  #   file: ./secrets/bridge_cert.pem
+
+volumes:
+  bridge-data:
+  mcp-data:
