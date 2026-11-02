@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`search_emails` no longer loses a message that shares a Message-ID with another in the same folder** ([#68](https://github.com/googlarz/proton-mail-bridge-client/issues/68)). The de-duplication keyed on the RFC Message-ID alone, so two separate messages in one folder (a sender delivering the same newsletter twice) collapsed into one result while `totalMatched` counted both and `hasMore` stayed true with nothing left to fetch. Only copies of a message in different folders (label and All Mail views) collapse now, `totalMatched` no longer counts the copies dropped, and the local index search gets the same fix.
+
 ## [2.17.5] — 2026-11-02
 
 ### Changed

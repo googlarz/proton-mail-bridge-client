@@ -596,16 +596,30 @@ export function extractAttachments(
   return attachments;
 }
 
+// Collapses copies of one message that show up in several folders (a Proton label or All Mail view repeats a
+// message that also sits in INBOX), keyed on the RFC Message-ID. Two distinct messages in the SAME folder can share a
+// Message-ID (a sender that delivers the same newsletter twice); those are separate messages and both are kept.
 export function dedupeEmails(emails: EmailSummary[]): EmailSummary[] {
-  const seen = new Set<string>();
+  const seenIds = new Set<string>();
+  const foldersByMessageId = new Map<string, Set<string>>();
   const result: EmailSummary[] = [];
 
   for (const email of emails) {
-    const dedupeKey = email.messageId || email.id;
-    if (seen.has(dedupeKey)) {
+    if (seenIds.has(email.id)) {
       continue;
     }
-    seen.add(dedupeKey);
+    seenIds.add(email.id);
+    if (email.messageId) {
+      const folders = foldersByMessageId.get(email.messageId);
+      if (folders && !folders.has(email.folder)) {
+        continue;
+      }
+      if (folders) {
+        folders.add(email.folder);
+      } else {
+        foldersByMessageId.set(email.messageId, new Set([email.folder]));
+      }
+    }
     result.push(email);
   }
 
