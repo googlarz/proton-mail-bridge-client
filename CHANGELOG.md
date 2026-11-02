@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`docs/fully-local.md`**: how to use the server with a local model and no cloud LLM (experimental, not validated by the maintainer).
+
 ## [2.17.7] — 2026-11-02
 
 ### Fixed
