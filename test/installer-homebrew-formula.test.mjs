@@ -28,7 +28,7 @@ test("renderFormula fills url, sha256 and the test version, and refuses a 40-cha
   assert.ok(formula.includes(`sha256 "${sha256}"`));
   assert.ok(formula.includes('assert_match "2.3.2", output'));
   assert.ok(formula.includes('depends_on "node"'));
-  assert.match(formula, /Node >= 24/);
+  assert.match(formula, /Node >= 22/);
   assert.throws(() => renderFormula({ version: "2.3.2", sha256: "a".repeat(40) }), /64 hex/);
 });
 

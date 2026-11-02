@@ -6,6 +6,7 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- **Node.js 22 is now supported (the floor was 24).** `engines`, the bundle manifest, the README and the Homebrew formula now say Node 22 or later, and CI also runs the suite on Node 22. The whole suite (1751 tests), lint and the packed-install smoke test pass on Node 22.23 with the dependencies unchanged. Node 20 is not supported: `better-sqlite3` 13 itself requires Node 22 or later.
 - **The README, package, registry and bundle descriptions now lead with the safety settings, worded as things you can set.** Read-only or drafts mode, approval before anything is sent or deleted and a tamper-evident audit log are described as options, the default (`full`: sending allowed, no approval) is stated plainly once, and the tool count moved lower. The claim that mail data never leaves the machine is replaced by what is true: the server and index are local, and the text the AI model reads goes to the model provider unless the model is local. No behaviour or default changed.
 
 ### Added

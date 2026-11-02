@@ -70,7 +70,7 @@
     "url": "https://github.com/googlarz/proton-mail-bridge-client/issues"
   },
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",

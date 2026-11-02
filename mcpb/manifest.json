@@ -216,7 +216,7 @@
   "compatibility": {
     "claude_desktop": ">=0.10.0",
     "runtimes": {
-      "node": ">=24.0.0"
+      "node": ">=22.0.0"
     }
   }
 }

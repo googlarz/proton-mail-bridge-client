@@ -12,7 +12,7 @@
 [![npm version](https://img.shields.io/npm/v/proton-mail-bridge-client?color=%236d4aff&label=npm)](https://www.npmjs.com/package/proton-mail-bridge-client)
 [![CI](https://github.com/googlarz/proton-mail-bridge-client/actions/workflows/ci.yml/badge.svg)](https://github.com/googlarz/proton-mail-bridge-client/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js 24+](https://img.shields.io/badge/node-%3E%3D24-brightgreen)](https://nodejs.org)
+[![Node.js 22+](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet)](https://modelcontextprotocol.io)
 [![GitHub stars](https://img.shields.io/github/stars/googlarz/proton-mail-bridge-client?style=social)](https://github.com/googlarz/proton-mail-bridge-client)
@@ -38,7 +38,7 @@ Let Claude Desktop (or Cline, or any MCP client) work with your Proton Mail, wit
 
 1. **Install and sign in to [Proton Mail Bridge](https://proton.me/mail/bridge)**, and leave it running. In the Bridge app, open your account and copy the **Bridge password** (it is not your Proton password).
 2. **Connect Claude Desktop**, either way (quit Claude Desktop completely first, so it does not overwrite the config on exit):
-   - **Bundle** (needs Node.js 24 or later on the machine): download the `proton-mail-bridge-client-<your-os>.mcpb` for macOS (`darwin-arm64` Apple silicon, `darwin-x64` Intel), Linux (`linux-x64`, `linux-arm64`) or Windows (`win32-x64`) from the [latest release](https://github.com/googlarz/proton-mail-bridge-client/releases/latest) and open it. Claude Desktop asks for your Proton address and the Bridge password, plus optional settings (Bridge IMAP/SMTP host and port, read-only, allow sending, signature, extra accounts, data and download folders, tool tier); the defaults match a standard Bridge install.
+   - **Bundle** (needs Node.js 22 or later on the machine): download the `proton-mail-bridge-client-<your-os>.mcpb` for macOS (`darwin-arm64` Apple silicon, `darwin-x64` Intel), Linux (`linux-x64`, `linux-arm64`) or Windows (`win32-x64`) from the [latest release](https://github.com/googlarz/proton-mail-bridge-client/releases/latest) and open it. Claude Desktop asks for your Proton address and the Bridge password, plus optional settings (Bridge IMAP/SMTP host and port, read-only, allow sending, signature, extra accounts, data and download folders, tool tier); the defaults match a standard Bridge install.
    - **npm:** `npm install -g proton-mail-bridge-client`, then `proton-mail-bridge-client setup-claude-desktop` (it checks your Bridge ports and writes the config). Fully quit and reopen Claude Desktop afterwards.
 3. **Check it works:** run `proton-mail-bridge-client doctor`, or ask Claude "run the Proton Mail doctor".
 4. **Try these prompts:**
@@ -87,7 +87,7 @@ Download: [proton.me/mail/bridge](https://proton.me/mail/bridge)
 
 > **Bridge password vs Proton password:** Proton Bridge generates a separate local password that is *not* your Proton account password. Find it inside the Bridge app under **Account → Copy password** (or similar — exact label varies by Bridge version). You'll need this for setup.
 
-**2. Node.js 24 or later** — `node --version` to check.
+**2. Node.js 22 or later** — `node --version` to check.
 
 **3. Your Bridge credentials** — from the Bridge app:
 - IMAP host/port (default: `127.0.0.1:1143`)

@@ -9,7 +9,7 @@ class ProtonMailBridgeClient < Formula
   sha256 "671edcbef4965bc57eed1ab33cc6fd42be2722e181f353a72736f9256cf572af"
   license "MIT"
 
-  # Needs Node >= 24 (package.json engines). Homebrew has no way to state a minimum version for
+  # Needs Node >= 22 (package.json engines). Homebrew has no way to state a minimum version for
   # the rolling "node" formula; it currently provides a release that satisfies this.
   depends_on "node"
 
@@ -20,7 +20,7 @@ class ProtonMailBridgeClient < Formula
 
   def caveats
     <<~EOS
-      Requires Node.js 24 or newer (brew upgrade node if `node --version` is older).
+      Requires Node.js 22 or newer (brew upgrade node if `node --version` is older).
       Proton Mail Bridge must be running before using this tool.
       Download Bridge at: https://proton.me/mail/bridge
 

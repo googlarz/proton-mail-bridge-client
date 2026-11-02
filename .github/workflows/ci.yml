@@ -17,11 +17,14 @@ jobs:
         os: [ubuntu-latest]
         node-version: [24]
         include:
+          # The engines floor is Node 22 (package.json), so test the oldest supported line too.
+          - os: ubuntu-latest
+            node-version: 22
           # ubuntu-latest moves from Ubuntu 24.04 to 26.04 between 2026-10-19 and 2026-11-19 (actions/runner-images
           # issue 14748); test the new image now instead of finding out when the label moves.
           - os: ubuntu-26.04
             node-version: 24
-          # package.json says node >=24, so newer lines have to keep working; Node 26 passes the whole suite.
+          # package.json says node >=22, so newer lines have to keep working; Node 26 passes the whole suite.
           - os: ubuntu-latest
             node-version: 26
           # The darwin .mcpb bundle ships to users, so test on macOS too.
