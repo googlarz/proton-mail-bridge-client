@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Docs
+
+- A 60-second demo storyboard ([docs/demo-script.md](docs/demo-script.md)), a VHS tape for its CLI part ([docs/demo.tape](docs/demo.tape)) and draft launch posts ([docs/launch-drafts.md](docs/launch-drafts.md)). Drafts only; nothing is published and no behaviour changed.
+
 ### Changed
 
 - **Node.js 22 is now supported (the floor was 24).** `engines`, the bundle manifest, the README and the Homebrew formula now say Node 22 or later, and CI also runs the suite on Node 22. The whole suite (1751 tests), lint and the packed-install smoke test pass on Node 22.23 with the dependencies unchanged. Node 20 is not supported: `better-sqlite3` 13 itself requires Node 22 or later.
