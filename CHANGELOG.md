@@ -13,6 +13,9 @@ All notable changes to this project are documented here.
 ### Added
 
 - **`setup-claude-desktop` now checks your mailbox when it finishes.** After writing the config it makes one read-only call to Bridge (login and a folder listing with message counts; it sends nothing, changes nothing and writes no file) and prints "Bridge reachable, signed in as ..., INBOX has N messages", or, if that fails, the likeliest single cause (Bridge not running, wrong port, or a password that is not the Bridge password). It gives up after a few seconds, never prints the password, and `--no-check` skips it. It then lists what to do next: restart Claude Desktop completely, three example requests, and a note that the approval prompt Claude Desktop shows the first time is its own safety prompt. The config the wizard writes is unchanged.
+### Added
+
+- **A headless Docker recipe** ([docs/headless-docker.md](docs/headless-docker.md), `docker/docker-compose.example.yml`): a Bridge service and this server on a private Compose network, nothing published on the host, `PROTONMAIL_MODE=drafts`, TLS by host name via `PROTONMAIL_TLS_INSECURE_HOSTS` or `PROTONMAIL_TLS_CA_FILE`. Labelled untested end to end: only the compose file's syntax was checked, not a real Bridge.
 
 ## [2.17.7] — 2026-11-02
 
