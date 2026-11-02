@@ -42,7 +42,7 @@ try {
   delete stagedPkg.scripts?.prepare;
   writeFileSync(join(staging, "package.json"), JSON.stringify(stagedPkg, null, 2));
   cpSync(join(root, "package-lock.json"), join(staging, "package-lock.json"));
-  run("npm", ["ci", "--omit=dev"], { cwd: staging, stdio: "inherit" });
+  run("npm", ["ci", "--omit=dev", "--ignore-scripts"], { cwd: staging, stdio: "inherit" });
   cpSync(join(root, "dist"), serverDir, { recursive: true });
 
   const manifest = JSON.parse(readFileSync(join(root, "mcpb", "manifest.json"), "utf8"));

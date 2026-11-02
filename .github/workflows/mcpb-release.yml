@@ -36,7 +36,7 @@ jobs:
           node-version: '22'
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
 
       - name: Release tag must match package version
         if: github.event_name == 'release'
