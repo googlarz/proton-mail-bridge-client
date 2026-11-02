@@ -12,9 +12,8 @@ import { TOOLS } from "../dist/tools/definitions.js";
 import { needsApproval, buildApprovalMessage } from "../dist/utils/approval.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 
-// Independent adversarial suite for the 2.17 human-approval gate and delegation grants. A test marked `todo` documents a
-// defect found by the tester: it asserts the SECURE behaviour, so it fails today (node reports it as a todo, not a failure)
-// and should start passing when the defect is fixed, at which point the `todo` marker should be dropped.
+// Independent adversarial suite for the 2.17 human-approval gate and delegation grants. Each test asserts the secure behaviour; the defects
+// they first found were fixed within 2.17.
 
 const ADDRESS = "owner@example.com";
 const HOUR = 3_600_000;
@@ -102,7 +101,7 @@ test("approval: every tool that declares confirmed (and every taint-gated tool) 
 
 // DEFECT: apply_rules reads dryRun with normalizeBoolean ("false", "no", "off", 0 all mean a real run) but the approval/taint
 // gate compares with `=== false`, so a model that sends dryRun: "false" runs the rules for real with no human question.
-test("approval: apply_rules with dryRun spelled as a string or number still asks the person", { todo: "defect: isGatedAction uses === false" }, async () => {
+test("approval: apply_rules with dryRun spelled as a string or number still asks the person", async () => {
   for (const dryRun of [false, "false", "no", "off", 0, "0", " FALSE "]) {
     await withServer({ approval: "require", answer: "decline" }, async ({ call, asked }) => {
       const result = await call("apply_rules", { dryRun });
@@ -113,7 +112,7 @@ test("approval: apply_rules with dryRun spelled as a string or number still asks
 
 // DEFECT: the person approves the draft as it is when the question is built; the handler re-reads the draft after the
 // answer. update_draft is not gated, so a parallel call changes the recipients while the question is open.
-test("approval: a draft edited while the question is open is not sent to the new recipients", { todo: "defect: no binding between approved and executed draft" }, async () => {
+test("approval: a draft edited while the question is open is not sent to the new recipients", async () => {
   let draftId;
   await withServer({
     approval: "elicit",
@@ -330,7 +329,7 @@ test("delegation: a grant covers a draft only as it is when sent; a draft edited
 
 // DEFECT (conditional): save_attachment's outputPath is model controlled; when PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR is an
 // ancestor of the data directory (e.g. $HOME) a mail attachment can be written over grants.json, minting a grant.
-test("delegation: an attachment cannot be written over grants.json (download dir that contains the data dir)", { todo: "defect: no exclusion of dataDir from outputPath" }, async () => {
+test("delegation: an attachment cannot be written over grants.json (download dir that contains the data dir)", async () => {
   const root = await mkdtemp(join(tmpdir(), "adv-dl-"));
   const dir = join(root, "data");
   await mkdir(dir, { recursive: true });
@@ -348,7 +347,7 @@ test("delegation: an attachment cannot be written over grants.json (download dir
 
 // DEFECT: the question for a reply names the message but not who the reply will go to. The sender of that message controls
 // Reply-To, so "Replying to <subject>" can send the answer (and the quoted original) to an address the person never saw.
-test("approval: the question for a reply shows the address the reply will really go to", { todo: "defect: reply prompt omits the effective To (Reply-To redirect)" }, async () => {
+test("approval: the question for a reply shows the address the reply will really go to", async () => {
   await withServer({ approval: "require", answer: "decline" }, async ({ call, bundle, asked }) => {
     bundle.imapService.getEmailById = async () => ({ ...DETAIL, replyTo: [{ name: "", address: "collector@evil.example" }] });
     await call("reply_to_email", { emailId: DETAIL.id, body: "x" });
@@ -359,7 +358,7 @@ test("approval: the question for a reply shows the address the reply will really
 
 // DEFECT (low): set_contact / import_contacts need approval but fall into the "flags" branch of the prompt, which names
 // neither the contact nor what changes (a vip tag changes the autoresponder text for that sender).
-test("approval: the question for set_contact / import_contacts says what is being changed", { todo: "defect: generic prompt for contacts" }, async () => {
+test("approval: the question for set_contact / import_contacts says what is being changed", async () => {
   await withServer({ approval: "require", answer: "decline" }, async ({ call, asked }) => {
     await call("set_contact", { address: "victim@example.com", addTags: ["vip"] });
     await call("import_contacts", { vcard: "BEGIN:VCARD\nFN:A\nEMAIL:a@example.com\nEND:VCARD" });
@@ -369,7 +368,7 @@ test("approval: the question for set_contact / import_contacts says what is bein
 });
 
 // DEFECT (low): readStoredGrant does not apply MAX_GRANT_DAYS, so a hand-edited (or forged) expiresAt of year 9999 is honoured.
-test("delegation: a stored grant that outlasts the 30-day limit is not honoured", { todo: "defect: MAX_GRANT_DAYS enforced only at creation" }, async () => {
+test("delegation: a stored grant that outlasts the 30-day limit is not honoured", async () => {
   await withServer({ approval: "require", delegation: "on", answer: "decline" }, async ({ call, sent, dir }) => {
     const base = { id: "g-aaaaaaaa", note: "", account: ADDRESS, tools: ["send_email"], recipients: ["bob@example.com"], maxUses: 2, usedCount: 0, createdAt: new Date().toISOString(), revoked: false };
     await writeFile(join(dir, "grants.json"), JSON.stringify({ version: 1, grants: [{ ...base, expiresAt: "9999-12-31T00:00:00.000Z" }] }));
