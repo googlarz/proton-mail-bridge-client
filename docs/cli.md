@@ -6,6 +6,8 @@ Full command reference for the `proton-mail-bridge-client` CLI. See the [main RE
 proton-mail-bridge-client <command> [options]
 ```
 
+The CLI is not limited by `PROTONMAIL_TOOLSET` or `PROTONMAIL_TOOL_TIER`: those tool profiles are for MCP clients, and the CLI's own server always uses the full toolset.
+
 All commands support `--json` for machine-readable output, and `--help` (or `-h`) anywhere on the
 command line to print that command's usage without running it or connecting to Bridge:
 

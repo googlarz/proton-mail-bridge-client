@@ -52,6 +52,7 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
         total: stored.length,
         cap: plans.cap,
         slotsRemaining: Math.max(0, plans.cap - stored.length),
+        evictable: stored.filter((plan) => plan.status !== "applied" && plan.status !== "applying").length,
         byStatus,
         plans: [...stored].reverse().map((plan) => ({
           planId: plan.id,
@@ -62,7 +63,7 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
           undoDataHeld: undoItems(plan) > 0,
           undoableItems: undoItems(plan),
         })),
-        note: "Applied plans hold the undo data and are never dropped to make room; undo_plan with a planId frees its slot's undo data (the plan stays listed as undone and is the first to be dropped).",
+        note: "slotsRemaining is the free room now; evictable counts plans that are not applied or applying, which are dropped to make room when the cap is reached, oldest first (an open plan can be among them). Applied plans hold the undo data and are never dropped; once undo_plan has put a plan back it becomes undone and can be dropped like the rest.",
       });
     }
 

@@ -35,13 +35,17 @@ export async function runBridgeSelfTest(
   env: Record<string, string>,
   options: { diagnose?: Diagnose; timeoutMs?: number } = {},
 ): Promise<SelfTestResult> {
-  const config = configFor(env);
-  const service = new SimpleIMAPService(config, silentLogger);
   const timeoutMs = options.timeoutMs ?? SELF_TEST_TIMEOUT_MS;
   let timer: NodeJS.Timeout | undefined;
+  let service: SimpleIMAPService | undefined;
   try {
+    // Inside the try: a config error is a "could not check" message, not an exception that aborts the wizard.
+    const config = configFor(env);
+    service = new SimpleIMAPService(config, silentLogger);
+    const pending = service.getFolders(true);
+    pending.catch(() => {});
     const folders = await Promise.race([
-      service.getFolders(true),
+      pending,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(Object.assign(new Error("Timed out waiting for Bridge"), { code: "ETIMEDOUT" })), timeoutMs);
       }),
@@ -59,8 +63,10 @@ export async function runBridgeSelfTest(
     };
   } finally {
     if (timer) clearTimeout(timer);
+    // A connection still being opened when the timeout fires is dropped, so it cannot finish later and keep the CLI alive.
+    service?.abortConnecting();
     // Do not wait on a logout for a Bridge that is not answering.
-    void service.disconnect().catch(() => {});
+    void service?.disconnect().catch(() => {});
   }
 }
 

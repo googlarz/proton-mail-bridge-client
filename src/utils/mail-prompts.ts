@@ -2,6 +2,8 @@
 // assistant, naming the tools to use; it changes nothing by itself, and every one tells the assistant to ask before
 // it sends or changes anything.
 
+import { isToolListed } from "../tools/definitions.js";
+
 export interface MailPromptArgument {
   name: string;
   description: string;
@@ -98,6 +100,7 @@ export const MAIL_PROMPTS: MailPrompt[] = [
   },
 ];
 
-export function findMailPrompt(name: string): MailPrompt | undefined {
-  return MAIL_PROMPTS.find((prompt) => prompt.name === name);
+/** The prompts whose tools the active profile (PROTONMAIL_TOOLSET) lists, so no prompt tells the model to call a refused tool. */
+export function listedPrompts(): MailPrompt[] {
+  return MAIL_PROMPTS.filter((prompt) => prompt.tools.every((tool) => isToolListed(tool)));
 }

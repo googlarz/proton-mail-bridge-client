@@ -75,6 +75,14 @@ test("defaults reproduce the behaviour of an untouched install", () => {
   }
 });
 
+test("the tool profile setting is optional, has no default and leaves the tool tier alone when empty", () => {
+  assert.equal(env.PROTONMAIL_TOOLSET, "${user_config.toolset}");
+  assert.equal(userConfig.toolset.type, "string");
+  assert.notEqual(userConfig.toolset.required, true);
+  assert.equal(userConfig.toolset.default, undefined, "empty must mean not set, so PROTONMAIL_TOOL_TIER still applies");
+  assert.match(userConfig.toolset.description, /full.*core.*reader/);
+});
+
 test("the approval, delegation, OCR, attachment-index and embeddings settings are exposed and default to off", () => {
   const wired = {
     PROTONMAIL_APPROVAL: "approval",

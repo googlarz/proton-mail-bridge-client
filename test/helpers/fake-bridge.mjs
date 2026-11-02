@@ -70,10 +70,10 @@ function parseSet(set, maxUid) {
 
 /**
  * options: { accounts: { user: password }, folders: { name: { uidValidity, specialUse, messages: [createMessage()] } },
- *            mode: "implicit" | "starttls" | "plain", certificate }
+ *            mode: "implicit" | "starttls" | "plain", certificate, loginDelayMs }
  */
 export async function startFakeBridge(options) {
-  const { accounts = { "owner@example.com": "secret" }, mode = "plain", certificate } = options;
+  const { accounts = { "owner@example.com": "secret" }, mode = "plain", certificate, loginDelayMs = 0 } = options;
   const folders = options.folders;
   const state = { connections: 0, logins: 0, commands: [], folders };
   const sockets = new Set();
@@ -104,6 +104,15 @@ export async function startFakeBridge(options) {
     const sorted = (name) => [...(folder(name)?.messages ?? [])].sort((a, b) => a.uid - b.uid);
 
     const finishLogin = (tag, user, password) => {
+      if (loginDelayMs > 0) {
+        // A slow Bridge: the answer comes late, after a caller with a short timeout has given up.
+        setTimeout(() => { if (!socket.destroyed) answerLogin(tag, user, password); }, loginDelayMs);
+        return;
+      }
+      return answerLogin(tag, user, password);
+    };
+
+    const answerLogin = (tag, user, password) => {
       if (accounts[user] !== undefined && accounts[user] === password) {
         state.logins += 1;
         return write(`${tag} OK [CAPABILITY ${capability()}] Authentication successful\r\n`);
@@ -351,6 +360,7 @@ export async function startFakeBridge(options) {
     state,
     folders,
     // What Bridge does to a connection when something it depends on goes away.
+    openConnections: () => sockets.size,
     dropConnections: () => { for (const socket of sockets) socket.destroy(); },
     close: () => new Promise((resolve) => {
       server.close(() => resolve());

@@ -643,15 +643,23 @@ export function toolResultExitCode(toolName: string, result: Record<string, unkn
   return 0;
 }
 
+// Tool profiles (PROTONMAIL_TOOLSET, PROTONMAIL_TOOL_TIER) are for MCP clients. The CLI's own server always uses the full
+// toolset, so a profile set in the shell for Claude Desktop does not make CLI commands fail.
+export function cliServerEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return {
+    ...Object.fromEntries(Object.entries(base).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+    PROTONMAIL_TOOLSET: "full",
+    PROTONMAIL_TOOL_TIER: "full",
+    // The CLI reports a failed tool on stderr with its own exit codes; MCP clients get an isError result instead.
+    PROTONMAIL_TOOL_ERRORS: "protocol",
+  };
+}
+
 async function withMcpClient<T>(run: (client: Client) => Promise<T>): Promise<T> {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [cliEntryPath()],
-    env: {
-      ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
-      // The CLI reports a failed tool on stderr with its own exit codes; MCP clients get an isError result instead.
-      PROTONMAIL_TOOL_ERRORS: "protocol",
-    },
+    env: cliServerEnv(),
     stderr: "ignore",
   });
 

@@ -958,7 +958,7 @@ export const TOOLS = [
   },
   {
     name: "list_plans",
-    description: "List the stored triage plans of plan_inbox, newest first: planId, status (open, applying, applied, undone), createdAt, appliedAt, number of items, and whether undo data is still held (undo_plan can still put something back). Also the totals, the cap in force (PROTONMAIL_MAX_TRIAGE_PLANS) and how many slots remain. Applied plans are never dropped to make room, so use this to pick which to undo before the cap is reached. Read-only.",
+    description: "List the stored triage plans of plan_inbox, newest first: planId, status (open, applying, applied, undone), createdAt, appliedAt, number of items, and whether undo data is still held (undo_plan can still put something back). Also the totals, the cap in force (PROTONMAIL_MAX_TRIAGE_PLANS), slotsRemaining (free room now) and evictable (plans that are not applied or applying: when the cap is reached the oldest of them is dropped to make room, even an open one). Applied plans are never dropped, so use this to pick which to undo before the cap is reached. Without account it lists the primary account's plans. Read-only.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",

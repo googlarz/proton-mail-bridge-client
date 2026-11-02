@@ -220,3 +220,23 @@ test("a closed stdout pipe is recognised under both names the platforms use (EPI
   assert.equal(isClosedPipeError(new Error("plain")), false);
   assert.equal(isClosedPipeError(undefined), false);
 });
+
+// Tool profiles are for MCP clients; the CLI's own server must not inherit them from the shell.
+test("the CLI server env forces the full toolset whatever the shell sets", async () => {
+  const { cliServerEnv } = await import("../dist/cli.js");
+  const env = cliServerEnv({ PATH: "/bin", PROTONMAIL_TOOLSET: "reader", PROTONMAIL_TOOL_TIER: "core" });
+  assert.equal(env.PROTONMAIL_TOOLSET, "full");
+  assert.equal(env.PROTONMAIL_TOOL_TIER, "full");
+  assert.equal(env.PATH, "/bin");
+});
+
+test("a CLI command that is not in the reader profile still runs with PROTONMAIL_TOOLSET=reader in the shell", async () => {
+  const { dir, env } = await tempEnv({ PROTONMAIL_TOOLSET: "reader", PROTONMAIL_TOOL_TIER: "core" });
+  try {
+    const result = runCli(["clear-cache"], env);
+    assert.equal(result.code, 0, `${result.stdout} ${result.stderr}`);
+    assert.doesNotMatch(result.stdout + result.stderr, /not available/);
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});

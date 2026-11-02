@@ -3,8 +3,8 @@
   "name": "proton-mail-bridge-client",
   "display_name": "Proton Mail Bridge",
   "version": "2.17.7",
-  "description": "Safety-first Proton Mail for Claude Desktop: start read-only or drafts-only, approve sends and deletes yourself, tamper-evident audit log — entirely local via Proton Bridge, no third-party relay.",
-  "long_description": "Give Claude full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders and labels, save attachments, and more — 128 tools in total.\n\nEvery step stays on your machine: Proton Bridge decrypts your mail locally and exposes it over local IMAP/SMTP, this server reads that local connection and builds a local SQLite search index, and Claude Desktop talks to it as a local stdio process. No email ever leaves your machine except through your own Proton account when you send.\n\nRequires Proton Bridge to be installed, signed in, and running first — see proton.me/mail/bridge.",
+  "description": "Proton Mail for Claude Desktop via Proton Bridge. Can be set to read-only or drafts-only, to ask your approval for sends and deletes, and keeps a tamper-evident audit log. Default is full mode (sending allowed). The server and index run locally; text Claude reads goes to the model provider.",
+  "long_description": "Give Claude full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders and labels, save attachments, and more — 128 tools in total.\n\nThe server and its index are local: Proton Bridge decrypts your mail and exposes it over local IMAP/SMTP, this server reads that connection and builds a local SQLite search index, and Claude Desktop talks to it as a local stdio process. The text of mail that Claude reads goes to the model provider (unless the model is local); mail leaves your machine otherwise only through your own Proton account when you send.\n\nThe default mode is full (sending allowed, no approval). The safety settings below can restrict it: read-only, drafts, assisted, or approval of sends and deletes.\n\nRequires Proton Bridge to be installed, signed in, and running first — see proton.me/mail/bridge.",
   "author": {
     "name": "googlarz",
     "url": "https://github.com/googlarz"
@@ -40,6 +40,7 @@
         "PROTONMAIL_DATA_DIR": "${user_config.data_dir}",
         "PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR": "${user_config.download_dir}",
         "PROTONMAIL_TOOL_TIER": "${user_config.tool_tier}",
+        "PROTONMAIL_TOOLSET": "${user_config.toolset}",
         "PROTONMAIL_APPROVAL": "${user_config.approval}",
         "PROTONMAIL_APPROVAL_TIMEOUT_SECONDS": "${user_config.approval_timeout_seconds}",
         "PROTONMAIL_DELEGATION": "${user_config.delegation}",
@@ -148,6 +149,12 @@
       "title": "Tool tier",
       "description": "\"full\" exposes every tool; \"core\" exposes a smaller set to save context.",
       "default": "full",
+      "required": false
+    },
+    "toolset": {
+      "type": "string",
+      "title": "Tool profile",
+      "description": "Optional. One of: full (every tool), core (a smaller everyday set), reader (only tools that change nothing in the mailbox). Leave empty to use the tool tier above. A profile only hides tools; it never allows more than the safety settings do.",
       "required": false
     },
     "approval": {

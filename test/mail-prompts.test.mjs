@@ -84,3 +84,37 @@ test("a required argument is checked and used; an unknown prompt is an error tha
     await assert.rejects(client.getPrompt({ name: "nope" }), /Unknown prompt "nope"\. Available: morning-brief/);
   });
 });
+
+// Under a narrower tool profile (PROTONMAIL_TOOLSET) a prompt must not tell the model to call a tool the server refuses.
+import { TOOLS, isToolListed } from "../dist/tools/definitions.js";
+
+test("each prompt's tools list covers every tool its text names", () => {
+  for (const prompt of MAIL_PROMPTS) {
+    const args = Object.fromEntries((prompt.arguments ?? []).map((a) => [a.name, "x"]));
+    const text = prompt.render(args);
+    const named = TOOLS.map((tool) => tool.name).filter((name) => new RegExp(`\\b${name}\\b`).test(text));
+    assert.deepEqual([...named].sort(), [...prompt.tools].sort(), `${prompt.name}: tools list and text disagree`);
+  }
+});
+
+test("a narrower profile hides the prompts that name a tool it does not list, and refuses them", async () => {
+  const saved = { set: process.env.PROTONMAIL_TOOLSET, tier: process.env.PROTONMAIL_TOOL_TIER };
+  try {
+    for (const profile of ["core", "reader"]) {
+      process.env.PROTONMAIL_TOOLSET = profile;
+      const expected = MAIL_PROMPTS.filter((prompt) => prompt.tools.every((tool) => isToolListed(tool))).map((prompt) => prompt.name);
+      await withServer(["owner@example.com"], async ({ client }) => {
+        const { prompts } = await client.listPrompts();
+        assert.deepEqual(prompts.map((prompt) => prompt.name).sort(), expected.sort(), profile);
+        for (const prompt of MAIL_PROMPTS.filter((entry) => !expected.includes(entry.name))) {
+          await assert.rejects(client.getPrompt({ name: prompt.name, arguments: { who: "Anna" } }), /Unknown prompt/, `${profile}/${prompt.name}`);
+        }
+      });
+    }
+    process.env.PROTONMAIL_TOOLSET = "reader";
+    assert.ok(MAIL_PROMPTS.some((prompt) => !prompt.tools.every((tool) => isToolListed(tool))), "reader should hide at least one prompt");
+  } finally {
+    if (saved.set === undefined) delete process.env.PROTONMAIL_TOOLSET; else process.env.PROTONMAIL_TOOLSET = saved.set;
+    if (saved.tier === undefined) delete process.env.PROTONMAIL_TOOL_TIER; else process.env.PROTONMAIL_TOOL_TIER = saved.tier;
+  }
+});

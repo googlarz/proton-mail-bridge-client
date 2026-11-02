@@ -155,7 +155,7 @@ test("list_plans shows each stored plan, the cap and the slots left, and changes
     assert.equal(listed?.annotations?.readOnlyHint, true);
 
     const empty = await call("list_plans", {});
-    assert.deepEqual([empty.total, empty.cap, empty.slotsRemaining, empty.plans], [0, 200, 200, []]);
+    assert.deepEqual([empty.total, empty.cap, empty.slotsRemaining, empty.evictable, empty.plans], [0, 200, 200, 0, []]);
 
     const first = await call("plan_inbox", {});
     const second = await call("plan_inbox", { scan: false, items: [{ emailId: first.items[0].emailId, action: "mark_read" }] });
@@ -165,6 +165,8 @@ test("list_plans shows each stored plan, the cap and the slots left, and changes
     const one = await call("list_plans", {});
     assert.equal(one.total, 2);
     assert.equal(one.slotsRemaining, 198);
+    assert.equal(one.evictable, 1, "only the open plan can be dropped to make room");
+    assert.match(one.note, /oldest first/);
     assert.deepEqual(one.byStatus, { applied: 1, open: 1 });
     assert.deepEqual(one.plans.map((plan) => plan.planId), [second.planId, first.planId], "newest first");
     const [open, applied] = one.plans;
@@ -177,6 +179,7 @@ test("list_plans shows each stored plan, the cap and the slots left, and changes
     await call("undo_plan", { planId: first.planId });
     const two = (await call("list_plans", {})).plans.find((plan) => plan.planId === first.planId);
     assert.deepEqual([two.status, two.undoDataHeld, two.undoableItems], ["undone", false, 0]);
+    assert.equal((await call("list_plans", {})).evictable, 2, "an undone plan can be dropped like an open one");
   });
 });
 

@@ -777,6 +777,7 @@ export class SimpleIMAPService {
   private lastIdleError?: string;
   private _lastOpTs = 0;
   private _connectingPromise?: Promise<void>;
+  private _connectingClient?: ImapFlow;
   // One running IDLE session per folder; later callers wait on it (see waitForMailboxChanges).
   private readonly _idleSession = new Map<
     string,
@@ -829,13 +830,25 @@ export class SimpleIMAPService {
         this.log.warn("IMAP client error", "IMAPService", error);
       });
 
-      await client.connect();
-      this.client = client;
+      this._connectingClient = client;
+      try {
+        await client.connect();
+        this.client = client;
+      } finally {
+        if (this._connectingClient === client) this._connectingClient = undefined;
+      }
     })().finally(() => {
       this._connectingPromise = undefined;
     });
 
     return this._connectingPromise;
+  }
+
+  /** Drops a connection that is still being opened (not yet logged in), so it cannot finish after the caller gave up. */
+  abortConnecting(): void {
+    const client = this._connectingClient;
+    this._connectingClient = undefined;
+    client?.close();
   }
 
   async disconnect(): Promise<void> {

@@ -17,7 +17,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { isMainModule } from "./is-main.js";
 import { CORE_TOOL_NAMES, TOOLS, isToolListed, listedTools, resolveToolset } from "./tools/definitions.js";
-import { findMailPrompt, MAIL_PROMPTS } from "./utils/mail-prompts.js";
+import { listedPrompts } from "./utils/mail-prompts.js";
 import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./services/simple-imap-service.js";
 import type {
   ProtonMailConfig,
@@ -271,7 +271,7 @@ export function createServer(
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listedTools() }));
 
   server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-    prompts: MAIL_PROMPTS.map(({ name, title, description, arguments: promptArguments }) => ({
+    prompts: listedPrompts().map(({ name, title, description, arguments: promptArguments }) => ({
       name,
       title,
       description,
@@ -280,9 +280,9 @@ export function createServer(
   }));
 
   server.setRequestHandler(GetPromptRequestSchema, async (request) => {
-    const prompt = findMailPrompt(request.params.name);
+    const prompt = listedPrompts().find((entry) => entry.name === request.params.name);
     if (!prompt) {
-      throw new McpError(ErrorCode.InvalidParams, `Unknown prompt "${request.params.name}". Available: ${MAIL_PROMPTS.map((entry) => entry.name).join(", ")}.`);
+      throw new McpError(ErrorCode.InvalidParams, `Unknown prompt "${request.params.name}". Available: ${listedPrompts().map((entry) => entry.name).join(", ")}.`);
     }
     const provided = request.params.arguments ?? {};
     for (const argument of prompt.arguments ?? []) {

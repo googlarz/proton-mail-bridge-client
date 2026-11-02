@@ -87,3 +87,24 @@ test("--no-check skips the self-test and never contacts Bridge", async () => {
     spy.close();
   }
 });
+
+test("a connection that opens after the check timed out is closed, not left to keep the CLI alive", needsOpenssl, async () => {
+  const bridge = await startFakeBridge({ folders: folders(), mode: "starttls", certificate, loginDelayMs: 1500, accounts: { "owner@example.com": "bridge-secret" } });
+  try {
+    const started = Date.now();
+    const text = await setupFollowUp(envFor(bridge.port), { diagnose: diagnoseConnectionFailure, timeoutMs: 400 });
+    assert.ok(Date.now() - started < 1400, "the check must give up at its own timeout");
+    assert.match(text, /Could not reach your mailbox/);
+    // The late login answer would have arrived at about 1.5 s; by then the socket must already be gone.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    assert.equal(bridge.openConnections(), 0, "a socket to Bridge is still open");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("a config error becomes the normal could-not-check message instead of aborting the wizard", async () => {
+  const text = await setupFollowUp({ ...envFor(9), PROTONMAIL_MODE: "not-a-mode" }, { diagnose: diagnoseConnectionFailure });
+  assert.match(text, /Could not reach your mailbox/);
+  assert.match(text, /Quit Claude Desktop completely/);
+});
