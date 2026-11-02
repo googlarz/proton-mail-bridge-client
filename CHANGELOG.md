@@ -16,6 +16,9 @@ All notable changes to this project are documented here.
 ### Added
 
 - **A headless Docker recipe** ([docs/headless-docker.md](docs/headless-docker.md), `docker/docker-compose.example.yml`): a Bridge service and this server on a private Compose network, nothing published on the host, `PROTONMAIL_MODE=drafts`, TLS by host name via `PROTONMAIL_TLS_INSECURE_HOSTS` or `PROTONMAIL_TLS_CA_FILE`. Labelled untested end to end: only the compose file's syntax was checked, not a real Bridge.
+### Added
+
+- **`docs/fully-local.md`**: how to use the server with a local model and no cloud LLM (experimental, not validated by the maintainer).
 
 ## [2.17.7] — 2026-11-02
 
