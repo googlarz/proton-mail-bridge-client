@@ -9,6 +9,7 @@ import {
   installClaudeDesktopConfig,
   resolveClaudeDesktopConfigPath,
 } from "./install-claude-desktop.js";
+import { type Diagnose, setupFollowUp } from "./bridge-self-test.js";
 
 const DEFAULT_IMAP_HOST = "127.0.0.1";
 const DEFAULT_IMAP_PORT = 1143;
@@ -211,7 +212,13 @@ function portFromEnv(rawValue: string | undefined, fallback: number): number {
   }
 }
 
-export async function runClaudeDesktopSetupWizard(): Promise<void> {
+export interface SetupWizardOptions {
+  // --no-check: skip the read-only live check against Bridge after the config is written.
+  skipCheck?: boolean;
+  diagnose?: Diagnose;
+}
+
+export async function runClaudeDesktopSetupWizard(options: SetupWizardOptions = {}): Promise<void> {
   if (!input.isTTY || !output.isTTY) {
     throw new Error(
       "setup:claude-desktop needs an interactive terminal. Use npm run install:claude-desktop for a non-interactive install.",
@@ -278,18 +285,16 @@ export async function runClaudeDesktopSetupWizard(): Promise<void> {
       process.env.PROTONMAIL_DATA_DIR || DEFAULT_DATA_DIR,
     );
 
-    const result = await installClaudeDesktopConfig({
-      includeEnv: false,
-      env: buildWizardEnv({
-        username,
-        password,
-        imapHost,
-        imapPort,
-        smtpHost,
-        smtpPort,
-        dataDir,
-      }),
+    const wizardEnv = buildWizardEnv({
+      username,
+      password,
+      imapHost,
+      imapPort,
+      smtpHost,
+      smtpPort,
+      dataDir,
     });
+    const result = await installClaudeDesktopConfig({ includeEnv: false, env: wizardEnv });
 
     output.write("\nClaude Desktop setup complete.\n");
     output.write(`- Config written to: ${result.configPath}\n`);
@@ -297,9 +302,9 @@ export async function runClaudeDesktopSetupWizard(): Promise<void> {
     if (result.backupPath) {
       output.write(`- Previous config backup: ${result.backupPath}\n`);
     }
-    output.write("- Restart Claude Desktop.\n");
     output.write("- Keep Proton Bridge open while using the tools.\n");
     output.write("- If Bridge settings change later, run this wizard again.\n");
+    output.write(await setupFollowUp(wizardEnv, options));
   } finally {
     rl.close();
   }

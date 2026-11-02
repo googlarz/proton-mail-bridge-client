@@ -140,6 +140,7 @@ The wizard:
 - checks your local Bridge ports
 - asks for your Bridge username and Bridge password
 - writes the Claude Desktop MCP config entry
+- makes one read-only check against Bridge ("Bridge reachable, signed in as ..., INBOX has N messages", or the likeliest cause if it fails) and lists what to try first; `--no-check` skips the check
 
 The runtime is installed into a staging directory first, checked (Node starts, `better-sqlite3` opens a database, `dist` imports, version matches) and only then swapped in; the previous runtime stays next to it as `<runtime dir>.previous`, and a failed install leaves the working one untouched. The config is merged, not replaced: existing `env` keys you added by hand are kept, and the config is rewritten atomically (the newest 5 `.bak-*` copies are kept). Passwords are never printed. Run `npm run check:claude-desktop` to verify an install; it exits non-zero when the command, the runtime or the database module is broken.
 

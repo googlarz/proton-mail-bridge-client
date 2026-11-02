@@ -10,6 +10,9 @@ All notable changes to this project are documented here.
 ### Added
 
 - **`PROTONMAIL_TOOLSET` tool profiles: `full` (default), `core`, `reader`.** `core` is the 25-tool everyday set that `PROTONMAIL_TOOL_TIER=core` already gave; `reader` lists only tools that change nothing in the mailbox and send nothing (54 of 127). A profile only hides tools: they are left out of `tools/list` and a call to a hidden tool is refused with a clear error before any gate runs (this now also holds for `PROTONMAIL_TOOL_TIER=core`, which used to hide without refusing). It never widens `PROTONMAIL_MODE`, the allowed actions, confirmation or the risk gate. An invalid value warns on stderr and uses `full`; `PROTONMAIL_TOOLSET` wins over `PROTONMAIL_TOOL_TIER`.
+### Added
+
+- **`setup-claude-desktop` now checks your mailbox when it finishes.** After writing the config it makes one read-only call to Bridge (login and a folder listing with message counts; it sends nothing, changes nothing and writes no file) and prints "Bridge reachable, signed in as ..., INBOX has N messages", or, if that fails, the likeliest single cause (Bridge not running, wrong port, or a password that is not the Bridge password). It gives up after a few seconds, never prints the password, and `--no-check` skips it. It then lists what to do next: restart Claude Desktop completely, three example requests, and a note that the approval prompt Claude Desktop shows the first time is its own safety prompt. The config the wizard writes is unchanged.
 
 ## [2.17.7] — 2026-11-02
 

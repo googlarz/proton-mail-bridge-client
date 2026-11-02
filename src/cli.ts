@@ -53,7 +53,7 @@ export interface ParsedCliArgs {
 // boolean regardless of what follows it, so the next token is correctly left as a positional.
 const BOOLEAN_FLAGS = new Set([
   "all", "checkConnections", "confirmed", "dry-run", "full", "help", "html", "json", "live",
-  "no-attachment-text", "permanent", "read", "reply-all", "sent", "starred", "sync", "unread",
+  "no-attachment-text", "no-check", "permanent", "read", "reply-all", "sent", "starred", "sync", "unread",
   "unread-only", "unstar", "unstarred", "version", "wait",
 ]);
 
@@ -278,8 +278,8 @@ export const COMMAND_SPECS: Record<string, CommandSpec> = {
   schedule: { usage: "schedule [--job digest|brief] [--at HH:MM] [--system launchd|systemd|cron|schtasks] [--output <file>] [--password-file <file>]", description: "Print the scheduler definition that runs `digest` (or `brief`, as a notification) every day, with the commands to switch it on (installs nothing)", flags: ["job", "at", "system", "output", "password-file"] },
   help: { usage: "help [command]", description: "Show the command list, or the help for one command", flags: [] },
   version: { usage: "version [--check]", description: "Print the version and exit; --check also asks the npm registry whether a newer release exists", flags: ["check"] },
-  "setup-claude-desktop": { usage: "setup-claude-desktop", description: "Run the Claude Desktop setup wizard (works from any install)", flags: [] },
-  claude: { usage: "claude <setup|install|check|update|doctor>", description: "Claude Desktop integration: setup wizard, install or update the runtime, check status (update is an alias for install, doctor for check)", flags: [] },
+  "setup-claude-desktop": { usage: "setup-claude-desktop [--no-check]", description: "Run the Claude Desktop setup wizard (works from any install); afterwards it makes a read-only check of your mailbox unless --no-check is given", flags: ["no-check"] },
+  claude: { usage: "claude <setup|install|check|update|doctor> [--no-check]", description: "Claude Desktop integration: setup wizard, install or update the runtime, check status (update is an alias for install, doctor for check); --no-check skips the wizard's mailbox check", flags: ["no-check"] },
   status: { usage: "status", description: "Show local config, index, runtime, and Claude Desktop status", flags: [] },
   doctor: { usage: "doctor [--account <slug|address>] [--check-updates]", description: "Verify IMAP, SMTP, and Claude Desktop wiring for every account, or one (exits 1 when the check fails); --check-updates also asks the npm registry for a newer release", flags: ["account", "check-updates"] },
   "connection-status": { usage: "connection-status", description: "Show live IMAP/SMTP connectivity state (exits 1 when either is unreachable)", flags: [] },
@@ -2508,7 +2508,7 @@ async function runToolOnlyCommand(entry: ToolOnlyCommand, parsed: ParsedCliArgs)
 async function runClaude(parsed: ParsedCliArgs): Promise<void> {
   switch (parsed.subcommand) {
     case "setup":
-      await runClaudeDesktopSetupWizard();
+      await runClaudeDesktopSetupWizard({ skipCheck: isTruthyFlag(parsed.flags["no-check"]), diagnose: diagnoseConnectionFailure });
       return;
     case "install":
     case "update": {
@@ -2583,7 +2583,7 @@ export async function main(): Promise<void> {
       return;
     }
     case "setup-claude-desktop":
-      await runClaudeDesktopSetupWizard();
+      await runClaudeDesktopSetupWizard({ skipCheck: isTruthyFlag(parsed.flags["no-check"]), diagnose: diagnoseConnectionFailure });
       return;
     case "status":
       await runStatus(parsed);
