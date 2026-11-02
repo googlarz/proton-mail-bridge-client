@@ -15,11 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node-version: [24]
+        node-version: [22]
         include:
-          # The engines floor is Node 22 (package.json), so test the oldest supported line too.
+          # The engines floor is Node 22 (package.json, base matrix); Node 24 stays covered too.
           - os: ubuntu-latest
-            node-version: 22
+            node-version: 24
           # ubuntu-latest moves from Ubuntu 24.04 to 26.04 between 2026-10-19 and 2026-11-19 (actions/runner-images
           # issue 14748); test the new image now instead of finding out when the label moves.
           - os: ubuntu-26.04
