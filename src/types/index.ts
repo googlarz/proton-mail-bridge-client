@@ -591,6 +591,8 @@ export interface ProtonRuntimeConfig {
   ocrCommand?: string;
   /** Also index the text of PDF, DOCX, XLSX and PPTX attachments for search_indexed_emails (PROTONMAIL_INDEX_ATTACHMENTS, default false). */
   indexAttachments?: boolean;
+  /** Most triage plans kept (PROTONMAIL_MAX_TRIAGE_PLANS, default 200). Applied plans are never dropped to make room. */
+  maxTriagePlans?: number;
   opDelayMs: number;
   // Undo-send window: 0 disables (send immediately, current default behavior).
   // When >0, send_email queues instead of sending immediately, cancelable via

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { TriagePlanService } from "../dist/services/triage-plan-service.js";
 import { createServer } from "../dist/index.js";
 import { closeTrackedIndexes } from "./helpers/close-indexes.mjs";
 import { createMessage, makeCertificate, startFakeBridge } from "./helpers/fake-bridge.mjs";
@@ -145,5 +146,44 @@ test("a label Bridge reports as Labels/<name> counts as already there, so undo d
       await call("undo_plan", { planId: plan.planId });
     }
     assert.deepEqual(unlabelled, [], "the label was there before the plan: undo must leave it");
+  });
+});
+
+const planItems = [{ emailId: "1", from: "a@x.example", subject: "S", action: "archive", reason: "r", source: "client" }];
+
+async function withPlanStore(maxTriagePlans, fn) {
+  const dir = await mkdtemp(join(tmpdir(), "triage-cap-"));
+  try { await fn(new TriagePlanService({ dataDir: dir, runtime: { maxTriagePlans } })); } finally { await rm(dir, { recursive: true, force: true }); }
+}
+
+test("a full store of applied plans keeps the new plan or refuses, never drops undo data", async () => {
+  await withPlanStore(3, async (service) => {
+    for (let i = 0; i < 3; i += 1) {
+      const plan = await service.create(planItems);
+      await service.beginApply(plan.id);
+      await service.markApplied(plan.id, [], []);
+    }
+    await assert.rejects(() => service.create(planItems), /all applied.*undo_plan.*PROTONMAIL_MAX_TRIAGE_PLANS/s);
+    const stored = await service.list();
+    assert.equal(stored.length, 3);
+    assert.ok(stored.every((plan) => plan.status === "applied"), "no applied plan was dropped");
+  });
+});
+
+test("below the cap the new plan is stored, and an old open plan is the one evicted at the cap", async () => {
+  await withPlanStore(3, async (service) => {
+    const open = await service.create(planItems);
+    const applied = [];
+    for (let i = 0; i < 2; i += 1) {
+      const plan = await service.create(planItems);
+      await service.beginApply(plan.id);
+      await service.markApplied(plan.id, [], []);
+      applied.push(plan.id);
+    }
+    const fresh = await service.create(planItems);
+    assert.ok(await service.get(fresh.id), "the new plan exists");
+    assert.equal(await service.get(open.id), undefined, "the old open plan made room");
+    for (const id of applied) assert.ok(await service.get(id), "applied plans stay");
+    assert.equal((await service.list()).length, 3);
   });
 });
