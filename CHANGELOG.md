@@ -5,6 +5,7 @@ All notable changes to this project are documented here.
 ## [Unreleased]
 
 ## [2.17.6] — 2026-11-02
+
 ### Fixed
 
 - **plan_inbox no longer returns a plan that does not exist.** When every stored plan was applied, the new plan evicted itself. The new plan is never evicted now; if the cap is reached and all stored plans are applied (their undo data is kept), plan_inbox refuses with an error saying to undo some or raise the cap. The default cap is 200 (was 20) and `PROTONMAIL_MAX_TRIAGE_PLANS` sets it.
