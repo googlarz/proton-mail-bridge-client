@@ -1783,7 +1783,8 @@ export class SimpleIMAPService {
       anyCandidatesUnexamined = anyCandidatesUnexamined || moreRemain;
     }
 
-    const sorted = sortEmailsByNewest(dedupeEmails(collected)).slice(0, limit);
+    const deduped = dedupeEmails(collected);
+    const sorted = sortEmailsByNewest(deduped).slice(0, limit);
 
     // totalMatched/hasMore mean different things depending on whether a local-only
     // filter is present:
@@ -1800,10 +1801,11 @@ export class SimpleIMAPService {
     //   defeats the bounded-batch fix above), and derive hasMore from whether any
     //   folder's bounded scan stopped early with candidates still unexamined, or the
     //   combined cross-folder result was itself truncated to `limit`.
-    const totalMatchedForResponse = hasLocalOnlyFilters ? collected.length : totalMatched;
+    // Copies dropped by dedupeEmails were counted by the raw SEARCH but are not in the results.
+    const totalMatchedForResponse = hasLocalOnlyFilters ? deduped.length : totalMatched - (collected.length - deduped.length);
     const hasMore = hasLocalOnlyFilters
-      ? anyCandidatesUnexamined || collected.length > sorted.length
-      : totalMatched > sorted.length;
+      ? anyCandidatesUnexamined || deduped.length > sorted.length
+      : totalMatchedForResponse > sorted.length;
 
     return {
       folders,

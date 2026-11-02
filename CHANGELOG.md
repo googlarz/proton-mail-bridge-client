@@ -7,6 +7,7 @@ All notable changes to this project are documented here.
 ### Fixed
 
 - **plan_inbox no longer returns a plan that does not exist.** When every stored plan was applied, the new plan evicted itself. The new plan is never evicted now; if the cap is reached and all stored plans are applied (their undo data is kept), plan_inbox refuses with an error saying to undo some or raise the cap. The default cap is 200 (was 20) and `PROTONMAIL_MAX_TRIAGE_PLANS` sets it.
+- **`search_emails` no longer loses a message that shares a Message-ID with another in the same folder** ([#68](https://github.com/googlarz/proton-mail-bridge-client/issues/68)). The de-duplication keyed on the RFC Message-ID alone, so two separate messages in one folder (a sender delivering the same newsletter twice) collapsed into one result while `totalMatched` counted both and `hasMore` stayed true with nothing left to fetch. Only copies of a message in different folders (label and All Mail views) collapse now, `totalMatched` no longer counts the copies dropped, and the local index search gets the same fix.
 
 ## [2.17.5] — 2026-11-02
 
