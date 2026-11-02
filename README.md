@@ -4,7 +4,7 @@
  | |_) | |_) | | | || || | | |  \| | | |\/| | / _ \  | || |
  |  __/|  _ <| |_| || || |_| | |\  | | |  | |/ ___ \ | || |___
  |_|   |_| \_\\___/ |_| \___/|_| \_| |_|  |_/_/   \_\___|_____|
-  Bridge Client  ·  Safety-first MCP + CLI for Proton Mail
+  Bridge Client  ·  MCP + CLI for Proton Mail, with safety modes
 ```
 
 <div align="center">
