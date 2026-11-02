@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Docs
+
+- A 60-second demo storyboard ([docs/demo-script.md](docs/demo-script.md)), a VHS tape for its CLI part ([docs/demo.tape](docs/demo.tape)) and draft launch posts ([docs/launch-drafts.md](docs/launch-drafts.md)). Drafts only; nothing is published and no behaviour changed.
+
 ### Changed
 
 - **The README, package, registry and bundle descriptions now lead with the safety settings, worded as things you can set.** Read-only or drafts mode, approval before anything is sent or deleted and a tamper-evident audit log are described as options, the default (`full`: sending allowed, no approval) is stated plainly once, and the tool count moved lower. The claim that mail data never leaves the machine is replaced by what is true: the server and index are local, and the text the AI model reads goes to the model provider unless the model is local. No behaviour or default changed.
