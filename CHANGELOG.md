@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Docs
+
+- Launch drafts and the demo script now say that new setup-wizard installs start in `drafts` mode, and the refusal text and `runtime-status` fields were checked on a live Bridge.
+
 ## [2.18.1] — 2026-11-02
 
 ### Fixed

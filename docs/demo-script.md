@@ -2,7 +2,7 @@
 
 A screen recording that shows one idea: you decide what the assistant may do, and every change leaves a record. It is not a feature tour.
 
-Everything below uses commands and settings that exist in this repository ([README](../README.md), [CLI reference](cli.md), `src/cli.ts`). Record against a **test Proton account**, not your real mailbox. I have not run this script against a live Bridge, so the exact output text is marked *unverified* where it matters; confirm it on the day.
+Everything below uses commands and settings that exist in this repository ([README](../README.md), [CLI reference](cli.md), `src/cli.ts`). Record against a **test Proton account**, not your real mailbox. The refusal text and the `runtime-status` mode field were checked against a live Bridge on 2026-11-02 (read-only, SMTP pointed at a dead port); the rest of the output text is still unchecked, so confirm it on the day.
 
 ## Before recording
 
@@ -40,8 +40,8 @@ Expected, and where it comes from:
 
 - `doctor`: IMAP and SMTP checks for each account; exit code 1 if Bridge is unreachable or login is rejected ([CLI reference](cli.md), Exit codes).
 - `emails`: the five newest INBOX messages.
-- `send` in `drafts` mode: refused, nothing is sent. `src/utils/runtime-policy.ts` throws "Send operations are disabled by the current runtime policy." *Unverified:* whether the CLI prints exactly that text.
-- `runtime-status`: the policy in force and background sync state per account ([CLI reference](cli.md)). *Unverified:* the exact field that shows the mode (README says `get_runtime_status` shows it).
+- `send` in `drafts` mode: refused, nothing is sent. `src/utils/runtime-policy.ts` throws "Send operations are disabled by the current runtime policy." Checked live: the CLI prints `MCP error -32603: Send operations are disabled by the current runtime policy.`
+- `runtime-status`: the policy in force and background sync state per account ([CLI reference](cli.md)). Checked live: `runtime.mode` is `drafts` and `runtime.allowSend` is `false`.
 - `get-audit-logs`: recent write-operation entries. The tape's own commands change nothing, so the list may be empty or show only earlier entries. Do a take beforehand that creates a draft if you want visible entries.
 - `verify-audit-log`: reports `ok`, entries checked and the head hash (README, Audit log).
 
