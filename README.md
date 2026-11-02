@@ -758,6 +758,7 @@ PROTONMAIL_PDF_MAX_MB='10'            # largest PDF get_attachment_text extracts
 PROTONMAIL_PDF_MAX_PAGES='50'         # pages get_attachment_text reads from a PDF (1-2000); a longer PDF is cut off with a note saying how many pages are missing
 PROTONMAIL_OCR_COMMAND=''             # optional: a program run as '<command> <image file> stdout' (tesseract's convention) so get_attachment_text can read images and PDF pages without a text layer. Started without a shell, 60 s limit; unset, such images and scans fail
 PROTONMAIL_INDEX_ATTACHMENTS='false'  # true: text of PDF, DOCX, XLSX and PPTX attachments is added to the local index so search finds it (bounded, no OCR); more disk, slower sync
+PROTONMAIL_MAX_TRIAGE_PLANS='200'      # most plan_inbox plans kept (positive integer; anything else = 200). Applied plans hold the undo data and are never dropped: when all stored plans are applied, plan_inbox refuses until you undo_plan some or raise this
 
 # Semantic search (optional; nothing runs unless the URL is set)
 PROTONMAIL_EMBEDDINGS_URL=''          # http://127.0.0.1:11434/api/embed (Ollama) or an OpenAI-compatible .../v1/embeddings; mail text is sent there

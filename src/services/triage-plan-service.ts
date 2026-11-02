@@ -55,26 +55,31 @@ interface TriageState {
   declined: Array<{ sender: string; at: string }>;
 }
 
-const MAX_PLANS = 20;
+export const DEFAULT_MAX_PLANS = 200;
 const MAX_DECLINED = 500;
 
 export class TriagePlanService {
   private readonly storePath: string;
+  private readonly maxPlans: number;
 
-  constructor(options: { dataDir: string }) {
+  constructor(options: { dataDir: string; runtime?: { maxTriagePlans?: number } }) {
     this.storePath = join(options.dataDir, "triage-plans.json");
+    this.maxPlans = options.runtime?.maxTriagePlans ?? DEFAULT_MAX_PLANS;
   }
 
   async create(items: Omit<PlanItem, "n">[], now = new Date()): Promise<TriagePlan> {
     return this.withLock(async () => {
       const state = await this.load();
       const plan: TriagePlan = { id: `plan-${randomUUID().slice(0, 8)}`, createdAt: now.toISOString(), items: items.map((item, index) => ({ ...item, n: index + 1 })), status: "open" };
-      state.plans = [...state.plans, plan];
-      // Make room by dropping plans that carry no undo data first: an applied plan is the only way back.
-      while (state.plans.length > MAX_PLANS) {
-        const spare = state.plans.findIndex((candidate) => candidate.status !== "applied" && candidate.status !== "applying");
-        state.plans.splice(spare === -1 ? 0 : spare, 1);
+      // Make room by dropping plans that carry no undo data first: an applied plan is the only way back, so it is never
+      // dropped. If nothing can be dropped, refuse rather than lose undo data (or the plan being created).
+      const plans = [...state.plans];
+      while (plans.length >= this.maxPlans) {
+        const spare = plans.findIndex((candidate) => candidate.status !== "applied" && candidate.status !== "applying");
+        if (spare === -1) throw new Error(`Cannot make a new plan: ${plans.length} stored plans are all applied, and each is the only way to undo its changes (limit ${this.maxPlans}). Undo plans you no longer need with undo_plan, or raise PROTONMAIL_MAX_TRIAGE_PLANS.`);
+        plans.splice(spare, 1);
       }
+      state.plans = [...plans, plan];
       await this.save(state);
       return plan;
     });

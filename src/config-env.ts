@@ -79,6 +79,14 @@ export function parseIntegerEnv(
   return Math.min(max, Math.max(min, parsed));
 }
 
+// Not a valid positive integer: the default, not a clamped value (parseIntegerEnv would turn 0 or -5 into the minimum).
+function parsePositiveIntegerEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return defaultValue;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : defaultValue;
+}
+
 // Ports need a hard failure, not the silent clamping parseIntegerEnv applies
 // for its other (non-port) callers — a typo like PROTONMAIL_IMAP_PORT=99999
 // should abort startup with a clear message instead of quietly becoming 65535
@@ -394,6 +402,7 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       pdfMaxPages: parseIntegerEnv("PROTONMAIL_PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, 1, 2000),
       ocrCommand: process.env.PROTONMAIL_OCR_COMMAND?.trim() || undefined,
       indexAttachments: parseBooleanEnv("PROTONMAIL_INDEX_ATTACHMENTS", false),
+      maxTriagePlans: parsePositiveIntegerEnv("PROTONMAIL_MAX_TRIAGE_PLANS", 200),
       opDelayMs,
       sendDelaySeconds,
       ...(embeddings ? { embeddings } : {}),
