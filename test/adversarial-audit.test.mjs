@@ -13,7 +13,7 @@ const cfg = (dataDir) => ({
 });
 async function withDir(fn) {
   const dir = await mkdtemp(join(tmpdir(), "adv-audit-"));
-  try { await fn(dir, join(dir, "audit.log")); } finally { await rm(dir, { recursive: true, force: true }); }
+  try { await fn(dir, join(dir, "audit.log")); } finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 }
 const rec = (s, i, extra = {}) => s.record({ timestamp: `2026-10-29T12:00:00.${String(i).padStart(3, "0")}Z`, tool: "t", status: "success", durationMs: i, input: { i }, ...extra });
 const lines = async (p) => (await readFile(p, "utf8")).split("\n").filter(Boolean);
