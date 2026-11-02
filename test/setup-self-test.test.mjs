@@ -82,6 +82,7 @@ test("--no-check skips the self-test and never contacts Bridge", async () => {
     const text = await setupFollowUp(envFor(spy.address().port), { skipCheck: true });
     assert.doesNotMatch(text, /Checking your mailbox/);
     assert.match(text, /Quit Claude Desktop completely/);
+    assert.match(text, /schedule --job brief/);
     assert.equal(connections, 0);
   } finally {
     spy.close();
