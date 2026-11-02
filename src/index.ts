@@ -16,7 +16,7 @@ import {
   UnsubscribeRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { isMainModule } from "./is-main.js";
-import { CORE_TOOL_NAMES, TOOLS, listedTools } from "./tools/definitions.js";
+import { CORE_TOOL_NAMES, TOOLS, isToolListed, listedTools, resolveToolset } from "./tools/definitions.js";
 import { findMailPrompt, MAIL_PROMPTS } from "./utils/mail-prompts.js";
 import { describeImapError, isLikelyAuthenticationError, isLikelyCertificateError, isLikelyConnectionError, isLikelyTlsMismatchError } from "./services/simple-imap-service.js";
 import type {
@@ -476,6 +476,10 @@ export function createServer(
     logger.debug("Handling tool call", "MCPServer", { name, argKeys: Object.keys(args || {}) });
 
     try {
+      // A tool the profile (PROTONMAIL_TOOLSET) hides is refused before any gate, policy or handler runs.
+      if (!isToolListed(name)) {
+        throw new McpError(ErrorCode.MethodNotFound, `Tool "${name}" is not available: PROTONMAIL_TOOLSET=${resolveToolset()} does not expose it. Set PROTONMAIL_TOOLSET=full to call it.`);
+      }
       // PROTONMAIL_DELEGATION=on: a grant that covers every recipient of this send stands in for the person's answer.
       const delegated = await ctx.delegation.approve(name, args, { declared: declaredArguments(name), approval: config.runtime.approval ?? "off", canElicit: clientCanElicit(server) });
       // PROTONMAIL_APPROVAL: the person is asked through the client, and `confirmed` from the model counts for nothing.

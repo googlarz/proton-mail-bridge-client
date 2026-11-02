@@ -717,6 +717,7 @@ PROTONMAIL_DATA_DIR="$HOME/.proton-mail-bridge-client"
 
 # Tools
 PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 127
+PROTONMAIL_TOOLSET='full'            # 'full' (all tools), 'core' (the same 25 as TOOL_TIER=core) or 'reader' (read-only tools only, nothing that writes or sends); hides tools and refuses calls to them, never widens PROTONMAIL_MODE; wins over TOOL_TIER; invalid -> full
 
 # Safety
 PROTONMAIL_READ_ONLY='false'

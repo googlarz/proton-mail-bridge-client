@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`PROTONMAIL_TOOLSET` tool profiles: `full` (default), `core`, `reader`.** `core` is the 25-tool everyday set that `PROTONMAIL_TOOL_TIER=core` already gave; `reader` lists only tools that change nothing in the mailbox and send nothing (54 of 127). A profile only hides tools: they are left out of `tools/list` and a call to a hidden tool is refused with a clear error before any gate runs (this now also holds for `PROTONMAIL_TOOL_TIER=core`, which used to hide without refusing). It never widens `PROTONMAIL_MODE`, the allowed actions, confirmation or the risk gate. An invalid value warns on stderr and uses `full`; `PROTONMAIL_TOOLSET` wins over `PROTONMAIL_TOOL_TIER`.
+
 ## [2.17.7] — 2026-11-02
 
 ### Fixed

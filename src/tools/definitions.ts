@@ -2,6 +2,8 @@
 // Data only: what a tool does is in the handler in index.ts. Keep a new tool's name in the CLI table
 // (TOOL_ONLY_COMMANDS in cli.ts) and, if it is routine, in CORE_TOOL_NAMES.
 
+import { logger } from "../utils/logger.js";
+
 const ACCOUNT_FILTER_PROPERTY = {
   type: "string",
   description: "Only this account (its address or slug). Without it the tool covers every configured account.",
@@ -2264,13 +2266,66 @@ export const TOOLS = [
   },
 ] as const;
 
-// Core tier: the 20 tools that cover ~80% of daily email use.
-export function listedTools(): Array<(typeof TOOLS)[number]> {
-  const tier = (process.env.PROTONMAIL_TOOL_TIER ?? "full").trim().toLowerCase();
-  return tier === "core" ? [...TOOLS].filter((t) => CORE_TOOL_NAMES.has(t.name)) : [...TOOLS];
+export type Toolset = "full" | "core" | "reader";
+
+// Names the PROTONMAIL_TOOLSET setting accepts. PROTONMAIL_TOOL_TIER (full|core) is the older spelling and is used when
+// PROTONMAIL_TOOLSET is not set.
+export const TOOLSET_NAMES: readonly Toolset[] = ["full", "core", "reader"];
+
+let warnedToolset: string | undefined;
+
+/** The profile in effect. An invalid PROTONMAIL_TOOLSET falls back to "full" with a warning on stderr (once per value). */
+export function resolveToolset(): Toolset {
+  const raw = process.env.PROTONMAIL_TOOLSET?.trim().toLowerCase();
+  // An unfilled "${user_config...}" from a host that did not substitute it is "not set", not a typo.
+  if (raw && !raw.startsWith("${")) {
+    if ((TOOLSET_NAMES as readonly string[]).includes(raw)) return raw as Toolset;
+    if (warnedToolset !== raw) {
+      warnedToolset = raw;
+      logger.warn(`PROTONMAIL_TOOLSET must be one of: ${TOOLSET_NAMES.join(", ")} (got "${raw}"); using "full".`, "MCPServer");
+    }
+    return "full";
+  }
+  return (process.env.PROTONMAIL_TOOL_TIER ?? "full").trim().toLowerCase() === "core" ? "core" : "full";
 }
 
-// Set PROTONMAIL_TOOL_TIER=core to expose only these — reduces context-window burn
+// Tools the "reader" profile keeps: the ones that change nothing in the mailbox, send nothing and write no file outside
+// the server's own data directory (get_attachment_content, save_*, export_email and the like are left out for that
+// reason). Fail-closed: a new tool is not a reader tool until it is named here. A profile only hides tools; it never
+// widens what PROTONMAIL_MODE, the allowed actions, confirmation or the risk gate permit.
+export const READER_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "get_emails", "get_email_by_id", "get_emails_by_ids", "search_emails", "search_indexed_emails",
+  "get_threads", "get_thread_by_id", "get_thread_brief", "get_actionable_threads", "get_inbox_digest",
+  "get_follow_up_candidates", "find_document_threads", "prepare_meeting_context",
+  "get_folders", "get_labels", "count_messages", "top_senders", "get_email_stats", "get_email_analytics", "get_volume_trends",
+  "list_attachments", "get_attachment_text", "get_unsubscribe_info",
+  "list_drafts", "get_draft", "list_remote_drafts", "list_scheduled_sends", "list_snoozed", "list_reply_reminders",
+  "list_commitments", "find_commitments", "list_categories", "list_templates", "get_template", "render_template",
+  "get_rules", "suggest_rules", "export_sieve", "get_autoresponder", "preview_autoresponder",
+  "get_contacts", "find_contact", "list_grants", "get_events", "wait_for_mailbox_changes",
+  "get_connection_status", "get_runtime_status", "list_accounts", "run_doctor", "get_index_status", "sync_folders",
+  "get_logs", "get_audit_logs", "verify_audit_log",
+]);
+
+/** The tools each narrower profile lists; "full" lists every tool. */
+export const TOOLSET_TOOL_NAMES: Record<Exclude<Toolset, "full">, ReadonlySet<string>> = {
+  get core() {
+    return CORE_TOOL_NAMES;
+  },
+  reader: READER_TOOL_NAMES,
+};
+
+/** Whether the profile in effect lists (and so allows calling) this tool. */
+export function isToolListed(name: string): boolean {
+  const toolset = resolveToolset();
+  return toolset === "full" || TOOLSET_TOOL_NAMES[toolset].has(name);
+}
+
+export function listedTools(): Array<(typeof TOOLS)[number]> {
+  return [...TOOLS].filter((tool) => isToolListed(tool.name));
+}
+
+// PROTONMAIL_TOOLSET=core (or the older PROTONMAIL_TOOL_TIER=core) exposes only these — reduces context-window burn
 // significantly on every session. Default is "full" (all tools).
 export const CORE_TOOL_NAMES = new Set([
   "get_emails",
