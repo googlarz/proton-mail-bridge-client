@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A forward is no longer lost when two server processes share a data directory on Windows.** Replacing a store file could fail with EPERM/EACCES/EBUSY while the other process had it open; the replacement is now retried a few times. And when claiming a forward failed, the message was still marked handled, so it was never retried and the other instance saw "duplicate"; it is now left unhandled and tried again on the next run. A forward that was claimed and then failed to send is still not retried (at most once).
+
 ## [2.17.6] — 2026-11-02
 
 ### Fixed

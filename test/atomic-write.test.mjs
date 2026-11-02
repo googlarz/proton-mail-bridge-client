@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
-import { mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "../dist/utils/atomic-write.js";
@@ -26,6 +26,47 @@ test("writes the content, leaves no temp file behind and creates an owner-only f
     assert.equal(await readFile(path, "utf8"), '{"a":1}');
     assert.deepEqual(await readdir(dir), ["store.json"]);
     if (process.platform !== "win32") assert.equal((await stat(path)).mode & 0o777, 0o600);
+  });
+});
+
+function busy(code = "EPERM") {
+  return Object.assign(new Error(`${code}: operation not permitted, rename`), { code });
+}
+
+test("retries a rename that fails with EPERM twice, then succeeds", async () => {
+  await withDir(async (dir) => {
+    const path = join(dir, "store.json");
+    await writeFile(path, "old");
+    let calls = 0;
+    const flaky = async (from, to) => {
+      calls += 1;
+      if (calls <= 2) throw busy();
+      return rename(from, to);
+    };
+    await writeFileAtomic(path, "new", flaky);
+    assert.equal(calls, 3);
+    assert.equal(await readFile(path, "utf8"), "new");
+    assert.deepEqual(await readdir(dir), ["store.json"]);
+  });
+});
+
+test("gives up after the retry cap, rethrows the last error and removes the temp file", async () => {
+  await withDir(async (dir) => {
+    const path = join(dir, "store.json");
+    await writeFile(path, "old");
+    let calls = 0;
+    await assert.rejects(writeFileAtomic(path, "new", async () => { calls += 1; throw busy("EBUSY"); }), /EBUSY/);
+    assert.equal(calls, 5);
+    assert.equal(await readFile(path, "utf8"), "old");
+    assert.deepEqual(await readdir(dir), ["store.json"]);
+  });
+});
+
+test("does not retry an error that is not contention", async () => {
+  await withDir(async (dir) => {
+    let calls = 0;
+    await assert.rejects(writeFileAtomic(join(dir, "store.json"), "x", async () => { calls += 1; throw busy("ENOENT"); }), /ENOENT/);
+    assert.equal(calls, 1);
   });
 });
 

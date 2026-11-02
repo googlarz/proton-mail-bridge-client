@@ -145,6 +145,9 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
       continue;
     }
     const did: string[] = [];
+    // Set when claiming a forward failed: nothing was sent, so the message must not count as handled (the next run
+    // retries it). A claim that succeeded followed by a failed send stays handled: at most once.
+    let claimFailed = false;
     try {
       const uidValidity = parseEmailId(email.id).uidValidity;
       for (const forward of change.forwardTo) {
@@ -155,7 +158,13 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
         if (options.automatic && email.messageId) {
           // Claimed before sending, under a lock: a second server process on this data directory (some clients start a
           // stdio server twice) must not forward the same message again.
-          const claim = await bundle.rulesService.claimForward(forward.ruleId, email.messageId);
+          let claim: Awaited<ReturnType<typeof bundle.rulesService.claimForward>>;
+          try {
+            claim = await bundle.rulesService.claimForward(forward.ruleId, email.messageId);
+          } catch (error) {
+            claimFailed = true;
+            throw error;
+          }
           if (claim === "duplicate") continue;
           if (claim === "limit") {
             skipped.add("forward (daily limit)");
@@ -211,7 +220,7 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
     }
     result.results.push(entry);
     for (const rule of change.rules) {
-      if (options.automatic && email.messageId) handled.push({ ruleId: rule.id, messageId: email.messageId });
+      if (options.automatic && email.messageId && !claimFailed) handled.push({ ruleId: rule.id, messageId: email.messageId });
       if (did.length || entry.error) {
         bundle.eventLog.emit({ type: "rule.acted", refId: rule.id, emailId: email.id, from: entry.from, subject: email.subject, detail: `${rule.name}: ${entry.error ? `failed (${entry.error})` : did.join(", ")}` });
         log.push({
