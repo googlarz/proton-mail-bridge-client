@@ -19,7 +19,7 @@ The text the model reads: every message body, subject, sender and attachment tex
 ## Settings that matter for small models
 
 - **`PROTONMAIL_MODE=read-only`.** Start here. Add `drafts` only once you trust the behaviour. Modes are in the README ("One switch").
-- **`PROTONMAIL_TOOL_TIER=core`.** Exposes 25 tools instead of 127, so far less tool-definition text for a small context window. It exists today (`src/tools/definitions.ts`).
+- **`PROTONMAIL_TOOL_TIER=core`.** Exposes 25 tools instead of 128, so far less tool-definition text for a small context window. It exists today (`src/tools/definitions.ts`).
 - **`PROTONMAIL_TOOLSET`.** A setting with `core` and `reader` profiles is planned for the next release. It is not in the current release; do not rely on it yet.
 
 ## Judge a model yourself
