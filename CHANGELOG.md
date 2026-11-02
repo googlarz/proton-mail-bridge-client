@@ -4,8 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.17.5] — 2026-11-02
+
 ### Changed
 
+- **Test fixes.** Two timing-sensitive tests (notify connect wait, 12,000-item scan) no longer fail on a loaded machine, and an OCR test no longer depends on `tesseract` being absent. No runtime change.
 - **unpdf 2.0.0** (was 1.9.1). Page images for OCR are now read as RGBA, so the PNG sent to `PROTONMAIL_OCR_COMMAND` is 4-channel (the pixels are the same). A scanned page whose only image is a 1-bit image mask used to give no text and now reaches OCR as black on a transparent background; some OCR engines read that worse than black on white.
 
 ## [2.17.4] — 2026-11-01

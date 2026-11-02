@@ -174,8 +174,8 @@ test("OCR: a path with spaces and quotes is one argv entry, never shell-parsed",
   assert.equal(out.text, "got:2:stdout");
 });
 
-test("OCR: a PROTONMAIL_OCR_COMMAND with arguments is treated as a file name (documented limitation)", async () => {
-  await assert.rejects(runOcr("tesseract --psm 6", Buffer.from("x"), ".png"), /not found/);
+test("OCR: a PROTONMAIL_OCR_COMMAND with arguments still names a program that must exist", async () => {
+  await assert.rejects(runOcr("no-such-ocr-program --psm 6", Buffer.from("x"), ".png"), /not found/);
 });
 
 test("OCR: shell metacharacters in the command are not interpreted", async () => {

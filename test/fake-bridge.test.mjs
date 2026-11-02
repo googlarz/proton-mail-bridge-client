@@ -355,7 +355,8 @@ test("notify exits promptly on SIGTERM while connecting to a server that never s
   const dir = await mkdtemp(join(tmpdir(), "fake-bridge-notify-"));
   try {
     await withNotifyChild({ port: server.address().port }, dir, async (child, state, exited) => {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const connectBy = Date.now() + 10_000;
+      while (sockets.size === 0 && Date.now() < connectBy) await new Promise((resolve) => setTimeout(resolve, 50));
       assert.equal(sockets.size, 1, "the daemon connected and is waiting for the greeting");
       await stopsPromptly(child, state, exited, "SIGTERM");
     });

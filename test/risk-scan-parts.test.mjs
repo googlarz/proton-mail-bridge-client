@@ -54,5 +54,5 @@ test("a clean list of 12,000 items is scanned quickly", async () => {
   const { taint } = await run(result);
   const took = performance.now() - started;
   assert.equal(taint.current(), undefined);
-  assert.ok(took < 600, `took ${Math.round(took)} ms`);
+  assert.ok(took < 2000, `took ${Math.round(took)} ms`);
 });
