@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The README, package, registry and bundle descriptions now lead with safety.** The first promise is read-only or drafts mode, your approval before anything is sent or deleted, a tamper-evident audit log and local-only data, with the tool count moved lower. The README also states the defaults plainly: with `PROTONMAIL_MODE` unset the mode is `full`. No behaviour or default changed.
+
 ## [2.17.7] — 2026-11-02
 
 ### Fixed

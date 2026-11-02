@@ -4,7 +4,7 @@
  | |_) | |_) | | | || || | | |  \| | | |\/| | / _ \  | || |
  |  __/|  _ <| |_| || || |_| | |\  | | |  | |/ ___ \ | || |___
  |_|   |_| \_\\___/ |_| \___/|_| \_| |_|  |_/_/   \_\___|_____|
-  Bridge Client  ·  CLI + Claude Desktop MCP for Proton Mail
+  Bridge Client  ·  Safety-first MCP + CLI for Proton Mail
 ```
 
 <div align="center">
@@ -24,7 +24,9 @@
 
 ---
 
-Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders, save attachments, and more — 127 MCP tools in total. Most of the same capabilities are also available as a full CLI for scripting, cron, and piped automation — no Claude required.
+Let Claude Desktop (or Cline, or any MCP client) work with your Proton Mail, with you in control of what it may do. Start in **read-only** or **drafts** mode, where nothing is sent, moved or deleted. Sending and deleting can be made to wait for your approval: `assisted` mode asks for `confirmed: true`, and `PROTONMAIL_APPROVAL=elicit|require` makes the server ask **you** through the client instead of trusting the model. Every change is recorded in a hash-chained, tamper-evident audit log, and all mail data stays on your machine, talking only to Proton Bridge on `127.0.0.1`. The [threat model](docs/threat-model.md) says what is and is not covered. The same tools are also available as a full CLI for scripting, cron and piped automation, with no Claude required.
+
+> **Know the defaults:** with `PROTONMAIL_MODE` unset the server runs in `full` mode (sending allowed, no confirmation), and the `setup-claude-desktop` wizard writes `READ_ONLY=false` and `ALLOW_SEND=true` (moves and permanent delete are off in its action list). If you want the safe start described above, set `PROTONMAIL_MODE=drafts` or `read-only` yourself (see [Safety controls](#one-switch-protonmail_mode)). Approval by elicitation depends on the client supporting it; only `require` fails closed.
 
 > **Using Proton Drive too?** See [**proton-drive-mcp**](https://github.com/googlarz/proton-drive-mcp), the companion MCP server and CLI for Proton Drive (upload, download, share and manage your encrypted files from Claude). Run both side by side to handle mail and files in one conversation, for example save an attachment from here, then upload it to Drive. More in [Related projects](#related-projects).
 
@@ -51,13 +53,16 @@ Give Claude Desktop (or Cline, or any MCP client) full access to your Proton Mai
 
 ## What you get
 
-- **Claude reads and manages your Proton Mail** — triage, reply, draft, archive, search, move, batch-act on threads, pull attachments (PDF text and pictures included), answer calendar invitations
-- **Safety you choose** — `PROTONMAIL_MODE` presets (`read-only`, `drafts`, `assisted`, `full`), a send gate, confirmation for destructive actions, a per-action allowlist, and a [threat model](docs/threat-model.md) that says what is and is not covered
+- **Read-only or drafts first** — `PROTONMAIL_MODE` presets (`read-only`, `drafts`, `assisted`, `full`) decide how much the assistant may do; other flags can only tighten a preset, never loosen it
+- **Your approval, not the model's** — with `PROTONMAIL_APPROVAL`, sends and deletes need your answer through the client (MCP elicitation); a mail that tells the model to "pass confirmed" cannot give it. A mail firewall flags text that reads like an instruction to an AI
+- **Tamper-evident audit log** — tool calls that change something are hash-chained in `audit.log`; `verify_audit_log` detects edited, deleted or reordered entries (it is evidence, not a defence against someone with the same file access; see [Audit log](#audit-log-tamper-evident))
+- **Local only** — Proton Mail, Proton Bridge, this server, your AI client; no third-party relay, and the search index, drafts and audit log live in your data directory
+- **Claude reads and manages your Proton Mail** — triage, reply, draft, archive, search, move, batch-act on threads, pull attachments (PDF text and pictures included), answer calendar invitations, all within the mode you chose
 - **Several addresses at once** — each Proton login (or each address Bridge exposes) is its own isolated account with its own index, drafts and settings
 - **Fast local search** — full-text search across your inbox from a local index that keeps its read state in step with the server
 - **Rules that suggest themselves** — a scan proposes filters and cleanup from your own mail, applies them to existing mail after a preview, and can forward by condition; see [Mailbox rules](#mailbox-rules-suggestions-filters-cleanup-forwarding)
 - **Automatic reply, per address, with rules** — off by default, with a preview of what it would do, draft-for-approval mode and working-hours; see [Autoresponder](#autoresponder-automatic-reply-per-address) (Proton's own auto-reply may be all you need)
-- **Full CLI** — a dedicated command for every one of the 127 tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
+- **Full CLI** — a dedicated command for every one of the 127 MCP tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
 - **Runs where you do** — Claude Desktop bundle, npm, Homebrew, or a [Docker image](#running-in-docker-headless-machines) for a headless machine
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
 
