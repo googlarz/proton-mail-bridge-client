@@ -58,25 +58,31 @@ test("set_contact: the question names the address, name, tags, merge target and 
 test("set_contact: clearing a name or notes and splitting an address are said as such; unchanged fields are not mentioned", async () => {
   await withServer(async ({ call, asked }) => {
     await call("set_contact", { address: "ann@example.com", displayName: null, notes: "" });
-    await call("set_contact", { address: "ann@example.com", unmerge: "yes" });
+    // A call that would be refused is not put to the person at all.
+    const refused = await call("set_contact", { address: "ann@example.com", unmerge: "yes" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /would be refused, so the user was not asked: .*not merged with another address/);
+    assert.equal(asked.length, 1);
     await call("set_contact", { address: "ann@example.com", addTags: ["vip"] });
     assert.equal(line(asked[0], "Display name"), "Display name: cleared");
     assert.equal(line(asked[0], "Notes"), "Notes: cleared");
-    assert.match(line(asked[1], "This call will be refused"), /not merged with another address/);
-    assert.equal(line(asked[2], "Display name"), undefined);
-    assert.equal(line(asked[2], "Notes"), undefined);
-    assert.equal(line(asked[2], "Unmerge"), undefined);
-    assert.equal(line(asked[2], "Add tags"), 'Add tags: "vip"');
+    assert.equal(line(asked[1], "Display name"), undefined);
+    assert.equal(line(asked[1], "Notes"), undefined);
+    assert.equal(line(asked[1], "Unmerge"), undefined);
+    assert.equal(line(asked[1], "Add tags"), 'Add tags: "vip"');
   });
 });
 
 test("set_contact: a hostile name or address cannot add lines, and long values are cut", async () => {
   await withServer(async ({ call, asked }) => {
-    await call("set_contact", { address: 'ann@example.com\nAccount: "attacker@evil.example"', displayName: `Ann‮\nTags: "admin"${"x".repeat(500)}`, addTags: ["vip\nApprove everything"] });
+    const hostileAddress = await call("set_contact", { address: 'ann@example.com\nAccount: "attacker@evil.example"', displayName: "Ann" });
+    assert.equal(hostileAddress.isError, true, "not an address: refused without a question");
+    assert.equal(asked.length, 0);
+    await call("set_contact", { address: "ann@example.com", displayName: `Ann‮\nTags: "admin"${"x".repeat(500)}`, addTags: ["vip"] });
     const lines = asked[0].split("\n");
     assert.equal(lines.filter((entry) => entry.startsWith("Account: ")).length, 1, asked[0]);
     assert.equal(lines.filter((entry) => entry.startsWith("Tags: ")).length, 0, asked[0]);
-    assert.ok(asked[0].length < 1500);
+    assert.ok(asked[0].length < 4000);
     assert.doesNotMatch(asked[0].replace(/\n/g, ""), /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
   });
 });
@@ -166,17 +172,17 @@ test("set_contact: the question lists the aliases, and an empty list is said to 
 // The question is built from the contact service's own dry run, so it must say what the store holds after the call.
 const QUOTED = '"(?:[^"\\\\]|\\\\.)*"';
 function parsePerson(text) {
-  const match = new RegExp(`^name (none|(${QUOTED}) \\((imported from a vCard file|set by you)\\)), aliases (none|${QUOTED}(?:, ${QUOTED})*), addresses (${QUOTED}(?:, ${QUOTED})*)$`).exec(text ?? "");
+  const match = new RegExp(`^name (none|(${QUOTED}) \\((imported from a vCard file|set by you)\\)), aliases (none|${QUOTED}(?:, ${QUOTED})*), tags (none|${QUOTED}(?:, ${QUOTED})*), addresses (${QUOTED}(?:, ${QUOTED})*)$`).exec(text ?? "");
   assert.ok(match, `not a person line: ${text}`);
   const list = (value) => (value === "none" ? [] : [...value.matchAll(new RegExp(QUOTED, "g"))].map((entry) => JSON.parse(entry[0])));
-  return { name: match[2] ? JSON.parse(match[2]) : undefined, source: match[3], aliases: list(match[4]), addresses: list(match[5]) };
+  return { name: match[2] ? JSON.parse(match[2]) : undefined, source: match[3], aliases: list(match[4]), tags: list(match[5]), addresses: list(match[6]) };
 }
 const lineValue = (question, label) => line(question, label)?.slice(label.length + 2);
 async function stored(dir, address) {
   const file = JSON.parse(await readFile(join(dir, "data", "contacts.json"), "utf8"));
   const record = Object.values(file.items).find((entry) => entry.addresses.includes(address));
   if (!record) return undefined;
-  return { name: record.displayName, source: record.displayName ? (record.displayNameFrom === "import" ? "imported from a vCard file" : "set by you") : undefined, aliases: record.aliases ?? [], addresses: record.addresses };
+  return { name: record.displayName, source: record.displayName ? (record.displayNameFrom === "import" ? "imported from a vCard file" : "set by you") : undefined, aliases: record.aliases ?? [], tags: record.tags ?? [], addresses: record.addresses };
 }
 
 test("the question shows exactly what is stored after the call, for a table of set, merge, unmerge and import cases", async () => {
@@ -223,10 +229,11 @@ test("the question shows exactly what is stored after the call, for a table of s
 
     // A refused call says so, and the store is untouched.
     const before = await stored(dir, "jan@example.com");
+    const askedBefore = asked.length;
     const refused = await call("set_contact", { address: "jan@example.com", aliases: ["a@b.example"] });
     assert.equal(refused.isError, true);
-    assert.match(line(asked.at(-1), "This call will be refused"), /not an alias/);
-    assert.equal(line(asked.at(-1), "After the call"), undefined);
+    assert.match(refused.content[0].text, /would be refused, so the user was not asked: .*not an alias/);
+    assert.equal(asked.length, askedBefore, "no question for a call that would be refused");
     assert.deepEqual(await stored(dir, "jan@example.com"), before);
   }, { answer: "accept" });
 });
@@ -246,8 +253,8 @@ test("the question says when what was typed is not what is stored", async () => 
     assert.equal(line(asked.at(-1), "Aliases"), 'Aliases: "Clean"');
     await call("set_contact", { address: "ann@example.com", displayName: "​" });
     assert.equal(line(asked.at(-1), "Display name"), "Display name: cleared" + changed);
-    await call("set_contact", { address: "ann@example.com", aliases: ["a@b.example"] });
-    assert.match(line(asked.at(-1), "This call will be refused"), /not an alias/);
+    const refused = await call("set_contact", { address: "ann@example.com", aliases: ["a@b.example"] });
+    assert.match(refused.content[0].text, /would be refused, so the user was not asked: .*not an alias/);
   });
 });
 
@@ -257,13 +264,13 @@ test("set_contact with mergeWith: both people, which address is first, and the n
     await call("set_contact", { address: "attacker@evil.example", mergeWith: "boss@company.example" });
     const question = asked.at(-1);
     assert.equal(line(question, "Person of address"), "Person of address: nothing stored yet");
-    assert.equal(line(question, "Person of mergeWith"), 'Person of mergeWith: name "Boss Person" (set by you), aliases "Boss", "Szef", addresses "boss@company.example"');
+    assert.equal(line(question, "Person of mergeWith"), 'Person of mergeWith: name "Boss Person" (set by you), aliases "Boss", "Szef", tags none, addresses "boss@company.example"');
     assert.equal(line(question, "Primary address after the merge"), 'Primary address after the merge: "attacker@evil.example"');
     assert.equal(line(question, "Name after the merge"), 'Name after the merge: "Boss Person" (set by you)');
     await call("set_contact", { address: "ann@example.com", displayName: "Ann", aliases: ["Ania"] });
     await call("set_contact", { address: "ann@example.com", mergeWith: "boss@company.example", displayName: "Mama" });
     const second = asked.at(-1);
-    assert.equal(line(second, "Person of address"), 'Person of address: name "Ann" (set by you), aliases "Ania", addresses "ann@example.com"');
+    assert.equal(line(second, "Person of address"), 'Person of address: name "Ann" (set by you), aliases "Ania", tags none, addresses "ann@example.com"');
     assert.equal(line(second, "Display name"), 'Display name: "Mama" (set by you)');
     assert.equal(line(second, "Name after the merge"), 'Name after the merge: "Mama" (set by you)');
     assert.equal(line(second, "Primary address after the merge"), 'Primary address after the merge: "ann@example.com"');
@@ -273,10 +280,11 @@ test("set_contact with mergeWith: both people, which address is first, and the n
 test("set_contact unmerge: who stays behind, with the name's source; a blank name is cleared", async () => {
   await withServer(async ({ call, asked }) => {
     await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss"], mergeWith: "other@company.example" });
-    await call("set_contact", { address: "mailto:<Boss@Company.example>", unmerge: true });
-    const refused = asked.at(-1);
-    assert.equal(line(refused, "Split out"), undefined, "a refused call shows the refusal, not a result");
-    assert.match(line(refused, "This call will be refused"), /would stay behind holding the name/);
+    const askedBefore = asked.length;
+    const refused = await call("set_contact", { address: "mailto:<Boss@Company.example>", unmerge: true });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /would be refused, so the user was not asked: .*would stay behind holding the name/);
+    assert.equal(asked.length, askedBefore);
     await call("set_contact", { address: "mailto:<Boss@Company.example>", unmerge: true, displayName: "   ", aliases: [] });
     const done = asked.at(-1);
     assert.equal(line(done, "Split out"), 'Split out: "boss@company.example"');
@@ -285,7 +293,7 @@ test("set_contact unmerge: who stays behind, with the name's source; a blank nam
     await call("set_contact", { address: "a@company.example", displayName: "Aa", mergeWith: "b@company.example" });
     await call("set_contact", { address: "a@company.example", mergeWith: "c@company.example" });
     await call("set_contact", { address: "c@company.example", unmerge: true, displayName: "Aa", aliases: [] });
-    assert.equal(line(asked.at(-1), "Stays behind"), 'Stays behind: name "Aa" (set by you), aliases none, addresses "a@company.example", "b@company.example"');
+    assert.equal(line(asked.at(-1), "Stays behind"), 'Stays behind: name "Aa" (set by you), aliases none, tags none, addresses "a@company.example", "b@company.example"');
   }, { answer: "accept" });
 });
 
@@ -293,6 +301,11 @@ test("set_contact: when the contact store cannot be read the question says the e
   const { buildApprovalMessage } = await import("../dist/utils/approval.js");
   const question = await buildApprovalMessage("set_contact", { address: "a@example.com", displayName: "X" }, { account: () => "owner@example.com", contactPreview: async () => { throw new Error("unreadable"); } });
   assert.match(question, /Effect: unknown \(the contact store could not be read\)/);
+  // What was typed is all there is to show, and it is shown as given.
+  const typed = await buildApprovalMessage("set_contact", { address: "a@example.com", displayName: "Sze\u200bf", aliases: ["Boss", "Szef"], unmerge: true }, { account: () => "owner@example.com", contactPreview: async () => { throw new Error("unreadable"); } });
+  assert.match(typed, /Display name given: "Sze f"/);
+  assert.match(typed, /Aliases given: "Boss", "Szef"/);
+  assert.match(typed, /Unmerge: yes/);
 });
 
 test("import_contacts: the first 20 people as they would be stored, the effect, and how many more", async () => {
@@ -305,10 +318,11 @@ test("import_contacts: the first 20 people as they would be stored, the effect, 
     const question = asked[0];
     assert.equal(line(question, "Cards"), "Cards: 25");
     assert.equal(line(question, "Effect"), "Effect: adds 25 people, adds to 0 existing ones, leaves 0 cards as they are");
-    assert.equal(line(question, "Person 1"), 'Person 1: name "Prezes" (imported from a vCard file), aliases none, addresses "prezes@evil.example" - new person');
-    assert.equal(line(question, "Person 20"), 'Person 20: name "Person 19" (imported from a vCard file), aliases none, addresses "p19@example.com" - new person');
+    assert.equal(line(question, "Person 1"), 'Person 1: name "Prezes" (imported from a vCard file), aliases none, tags none, addresses "prezes@evil.example" - new person');
+    assert.equal(line(question, "Person 20"), 'Person 20: name "Person 19" (imported from a vCard file), aliases none, tags none, addresses "p19@example.com" - new person');
     assert.equal(line(question, "Person 21"), undefined);
-    assert.equal(line(question, "More"), "More: and 5 more cards");
+    assert.equal(line(question, "More"), "More: and 5 more cards after the first 20");
+    assert.ok(question.indexOf("More: ") < question.indexOf("Person 1: "), "the More line comes before the rows");
   });
 });
 
@@ -319,7 +333,118 @@ test("import_contacts: a name that is another person's alias, and addresses of a
     await writeFile(path, `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:SZEFOWA\r\nEMAIL:stranger@evil.example\r\nEMAIL:second@evil.example\r\nEND:VCARD\r\nBEGIN:VCARD\r\nVERSION:3.0\r\nFN:Anna Lis\r\nEMAIL:szefowa@company.example\r\nEMAIL:new@evil.example\r\nEND:VCARD\r\n`);
     await call("import_contacts", { path });
     const question = asked.at(-1);
-    assert.match(line(question, "Person 1"), /name none, aliases none, addresses "stranger@evil\.example", "second@evil\.example" - new person; name left out because it is an alias of another person: "SZEFOWA"/);
+    assert.match(line(question, "Person 1"), /name none, aliases none, tags none, addresses "stranger@evil\.example", "second@evil\.example" - new person; name left out because it is an alias of another person: "SZEFOWA"/);
     assert.match(line(question, "Person 2"), /addresses not attached because they belong to another person: "new@evil\.example"/);
+  }, { answer: "accept" });
+});
+
+async function editStore(dir, mutate) {
+  const path = join(dir, "data", "contacts.json");
+  const file = JSON.parse(await readFile(path, "utf8"));
+  mutate(Object.values(file.items));
+  await writeFile(path, JSON.stringify(file));
+}
+const recordOf = async (dir, address) => Object.values(JSON.parse(await readFile(join(dir, "data", "contacts.json"), "utf8")).items).find((entry) => entry.addresses.includes(address));
+
+test("a merge question shows its effect first, so a person with 20 addresses cannot push the resulting name out of it", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const path = join(dir, "big.vcf");
+    const emails = Array.from({ length: 20 }, (_, index) => `EMAIL:long.address.number.${index}.for.the.merge.test@evil-company-with-a-long-name.example\r\n`).join("");
+    await writeFile(path, `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Prezes\r\n${emails}END:VCARD\r\n`);
+    await call("import_contacts", { path });
+    await call("set_contact", { address: "x@example.com", mergeWith: "long.address.number.0.for.the.merge.test@evil-company-with-a-long-name.example", aliases: ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10"] });
+    const question = asked.at(-1);
+    assert.equal(line(question, "Name after the merge"), 'Name after the merge: "Prezes" (imported from a vCard file)');
+    assert.match(line(question, "After the call"), /name "Prezes" \(imported from a vCard file\), aliases "a1".*tags none, addresses "x@example\.com", .* and 16 more$/);
+    assert.ok(question.indexOf("After the call") < question.indexOf("Person of mergeWith"), "the effect comes before the people it started from");
+    assert.ok(question.length < 4000 && !question.endsWith("…"), `not cut (${question.length})`);
+    assert.match(line(question, "Person of mergeWith"), / and 15 more/, "addresses are capped per person");
+  }, { answer: "accept" });
+});
+
+test("a merge question shows tags that are carried over", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "a@example.com", addTags: ["vip"] });
+    await call("set_contact", { address: "b@example.com", addTags: ["work", "old"] });
+    await call("set_contact", { address: "a@example.com", mergeWith: "b@example.com" });
+    const question = asked.at(-1);
+    assert.match(line(question, "Person of address"), /tags "vip", addresses/);
+    assert.match(line(question, "Person of mergeWith"), /tags "work", "old", addresses/);
+    assert.match(line(question, "After the call"), /tags "vip", "work", "old", addresses "a@example\.com", "b@example\.com"/);
+  }, { answer: "accept" });
+});
+
+test("a call that would be refused is not asked about, and a call whose store changed while the person was asked is refused as stale", async () => {
+  // P: the alias is taken at the time of the question: refused at once, no question.
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "a@example.com", aliases: ["Szef"] });
+    const askedBefore = asked.length;
+    const result = await call("set_contact", { address: "b@example.com", aliases: ["Szef"] });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /would be refused, so the user was not asked: .*already used by a@example\.com/);
+    assert.equal(asked.length, askedBefore);
+  }, { answer: "accept" });
+
+  // P2: free at the time of the question (it says so); while the person decides another call takes it: refused as stale.
+  await withServer(async ({ call, asked, hooks, dir }) => {
+    await call("set_contact", { address: "a@example.com", displayName: "A" });
+    hooks.onAsk = async () => { await editStore(dir, (records) => { records.find((entry) => entry.addresses.includes("a@example.com")).aliases = ["Szef"]; }); };
+    const result = await call("set_contact", { address: "b@example.com", aliases: ["Szef"] });
+    assert.equal(line(asked.at(-1), "Aliases"), 'Aliases: "Szef"');
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /contacts changed after you were asked/);
+    assert.equal(await recordOf(dir, "b@example.com"), undefined, "nothing was stored for b");
+  }, { answer: "accept" });
+
+  // Q: the question says "Name after the merge: none"; while the person decides b is named "Szef": the merge must not go through.
+  await withServer(async ({ call, asked, hooks, dir }) => {
+    await call("set_contact", { address: "a@example.com", addTags: ["x"] });
+    await call("set_contact", { address: "b@example.com", addTags: ["y"] });
+    hooks.onAsk = async () => { await editStore(dir, (records) => { records.find((entry) => entry.addresses.includes("b@example.com")).displayName = "Szef"; }); };
+    const result = await call("set_contact", { address: "a@example.com", mergeWith: "b@example.com" });
+    assert.equal(line(asked.at(-1), "Name after the merge"), "Name after the merge: none");
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /contacts changed after you were asked/);
+    assert.deepEqual((await recordOf(dir, "a@example.com")).addresses, ["a@example.com"], "not merged");
+    assert.equal((await recordOf(dir, "b@example.com")).displayName, "Szef");
+  }, { answer: "accept" });
+
+  // An import: its question says what would be stored; the store changed meanwhile (the name now clashes with an alias).
+  await withServer(async ({ call, asked, hooks, dir }) => {
+    await call("set_contact", { address: "boss@example.com", addTags: ["x"] });
+    const path = join(dir, "c.vcf");
+    await writeFile(path, card("Prezes", "p@evil.example"));
+    hooks.onAsk = async () => { await editStore(dir, (records) => { records.find((entry) => entry.addresses.includes("boss@example.com")).aliases = ["Prezes"]; }); };
+    const result = await call("import_contacts", { path });
+    assert.match(line(asked.at(-1), "Person 1"), /name "Prezes" \(imported from a vCard file\).* - new person$/);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /contacts changed after you were asked/);
+    assert.equal(await recordOf(dir, "p@evil.example"), undefined);
+  }, { answer: "accept" });
+
+  // Nothing changed meanwhile: it goes through.
+  await withServer(async ({ call, asked }) => {
+    const result = await call("set_contact", { address: "a@example.com", aliases: ["Szef"] });
+    assert.ok(!result.isError, result.content[0].text);
+    assert.equal(asked.length, 1);
+  }, { answer: "accept" });
+});
+
+test("an import question with long rows keeps its summary, effect and More line, and caps the addresses of each row", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const path = join(dir, "wide.vcf");
+    let text = "";
+    for (let index = 0; index < 30; index += 1) {
+      const emails = Array.from({ length: 10 }, (_, number) => `EMAIL:person.${index}.address.${number}.with.a.rather.long.local.part@some-long-company-domain.example\r\n`).join("");
+      text += `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${"N".repeat(90)}${index}\r\n${emails}END:VCARD\r\n`;
+    }
+    await writeFile(path, text);
+    await call("import_contacts", { path });
+    const question = asked[0];
+    assert.ok(question.length <= 5000);
+    assert.match(line(question, "Effect"), /adds 30 people/);
+    assert.equal(line(question, "More"), "More: and 10 more cards after the first 20");
+    assert.ok(question.indexOf("Effect: ") < question.indexOf("More: ") && question.indexOf("More: ") < question.indexOf("Person 1: "));
+    assert.match(line(question, "Person 1"), /addresses "[^"]+", "[^"]+", "[^"]+" and 7 more - new person$/, "three addresses per row, the rest counted");
   }, { answer: "accept" });
 });

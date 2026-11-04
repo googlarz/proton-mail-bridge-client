@@ -3,11 +3,11 @@ import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import type { AccountBundle } from "../services/account-manager.js";
-import type { ContactPatch, ContactRecord } from "../services/contact-service.js";
+import { StaleContactError, type ContactPatch, type ContactRecord } from "../services/contact-service.js";
 import type { EmailAddress, EmailSummary } from "../types/index.js";
 import { cleanContactText, foldText, lowerAscii, normalizeContactAddress } from "../utils/contact-text.js";
 import { InvalidArgumentError, isSelfAddress, isValidEmail, normalizeBoolean, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
-import { assertApprovedContentUnchanged, contentDigest } from "../utils/approval.js";
+import { approvedStoreDigest, assertApprovedContentUnchanged, contentDigest, staleContactRefusal } from "../utils/approval.js";
 import { assessMail } from "../utils/mail-security.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
 import { CONTACT_NAME_MAX, parseVcf, type ParsedVCard } from "../utils/vcard.js";
@@ -299,7 +299,16 @@ export async function handleContactTool(name: string, args: Record<string, unkno
       ensureMailboxWriteAllowed(config.runtime);
       const target = resolveAccountArg(args) ?? primaryBundle;
       const { address, patch } = contactPatchFromArgs(args);
-      const outcome = await withAudit(target.auditService, name, args, async () => target.contactService.update(address, patch));
+      // Asked about: the store must still be what the person was shown (checked inside the store's lock).
+      const approved = approvedStoreDigest(args, "contact");
+      const outcome = await withAudit(target.auditService, name, args, async () => {
+        try {
+          return await target.contactService.update(address, patch, approved);
+        } catch (error) {
+          if (error instanceof StaleContactError) throw staleContactRefusal(name);
+          throw error;
+        }
+      });
       return createTextResult({
         account: target.account.address,
         address: normalizeContactAddress(address),
@@ -318,7 +327,13 @@ export async function handleContactTool(name: string, args: Record<string, unkno
         // The person was told how many cards this file held when asked; a file rewritten since is not imported.
         assertApprovedContentUnchanged(args, "vcard", contentDigest(text), name);
         const parsed = parseVcf(text);
-        const stored = await target.contactService.importCards(cardsForImport(parsed.cards, target.ownAddresses));
+        let stored;
+        try {
+          stored = await target.contactService.importCards(cardsForImport(parsed.cards, target.ownAddresses), approvedStoreDigest(args, "vcard"));
+        } catch (error) {
+          if (error instanceof StaleContactError) throw staleContactRefusal(name);
+          throw error;
+        }
         return { cards: parsed.cards.length, withoutAddress: parsed.skipped, truncated: parsed.truncated, ...stored };
       });
       return createTextResult({

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, unlink } from "node:fs/promises";
 import { readRegularFile } from "../utils/regular-file.js";
 import { dirname, join } from "node:path";
@@ -144,6 +144,7 @@ export interface PersonView {
   /** "imported": the name came from an imported vCard file; "you": the user set it. */
   nameSource?: "imported" | "you";
   aliases: string[];
+  tags: string[];
   addresses: string[];
 }
 
@@ -168,13 +169,50 @@ export interface ImportRow {
   addressesLeftOut: string[];
 }
 
+/** How many cards an import question lists (and so how many rows its digest covers). */
+export const IMPORT_PREVIEW_ROWS = 20;
+
+const digestOf = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** A digest of what a set_contact would store (and of the people it starts from). The approval binds to it; update() recomputes it inside the store lock. */
+export const contactPreviewDigest = (preview: ContactPreview): string => digestOf(preview);
+/** The same for an import: its outcome and the rows its question lists. */
+export const importPreviewDigest = (preview: { outcome: ContactImportOutcome; rows: ImportRow[] }): string => digestOf({ outcome: preview.outcome, rows: preview.rows });
+
+/** The contact store is no longer what the person was shown when they were asked (or it could not be shown). */
+export class StaleContactError extends Error {
+  constructor() {
+    super("The contact store changed after the person was asked, or what the call would do could not be shown to them.");
+    this.name = "StaleContactError";
+  }
+}
+
 export function personView(record: ContactRecord | undefined): PersonView | undefined {
   if (!record) return undefined;
   return {
     ...(record.displayName ? { name: record.displayName, nameSource: record.displayNameFrom === "import" ? ("imported" as const) : ("you" as const) } : {}),
     aliases: [...(record.aliases ?? [])],
+    tags: [...(record.tags ?? [])],
     addresses: [...record.addresses],
   };
+}
+
+function previewOn(store: ContactFile, address: string, patch: ContactPatch): ContactPreview {
+  const target = normalizeContactAddress(address);
+  const other = patch.mergeWith ? normalizeContactAddress(patch.mergeWith) : undefined;
+  const before = { address: personView(target ? recordOf(store, target) : undefined), mergeWith: personView(other ? recordOf(store, other) : undefined) };
+  try {
+    const result = applyPatch(structuredClone(store), address, patch, new Date().toISOString());
+    return { target: target ?? undefined, before, after: { contact: personView(result.contact), splitFrom: personView(result.splitFrom) } };
+  } catch (error) {
+    if (error instanceof InvalidArgumentError) return { target: target ?? undefined, refused: error.message, before, after: {} };
+    throw error;
+  }
+}
+
+function previewImportOn(store: ContactFile, cards: ParsedVCard[], rows = IMPORT_PREVIEW_ROWS): { outcome: ContactImportOutcome; rows: ImportRow[] } {
+  const trace: ImportRow[] = [];
+  const outcome = applyCards(structuredClone(store), cards, new Date().toISOString(), { rows: trace, limit: rows });
+  return { outcome, rows: trace };
 }
 
 // The one place a set_contact is carried out: update() stores its result, preview() shows it without storing.
@@ -381,9 +419,12 @@ export class ContactService {
   }
 
   /** Applies the patch to the person `address` belongs to. Returns the record now holding `address` (none when nothing is stored for it) and, after an unmerge, the record it was split from. */
-  async update(address: string, patch: ContactPatch): Promise<{ contact?: ContactRecord; splitFrom?: ContactRecord }> {
+  async update(address: string, patch: ContactPatch, approvedDigest?: string | null): Promise<{ contact?: ContactRecord; splitFrom?: ContactRecord }> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
+      // Asked about: it must still do what the person was shown (a parallel call may have changed the people it names). Checked
+      // here, inside the lock, on the store this call is about to change. null: it could not be shown.
+      if (approvedDigest !== undefined && (approvedDigest === null || contactPreviewDigest(previewOn(store, address, patch)) !== approvedDigest)) throw new StaleContactError();
       const result = applyPatch(store, address, patch, new Date().toISOString());
       await this.save(store);
       return result;
@@ -395,23 +436,15 @@ export class ContactService {
    * The approval question is built from this and nothing else, so what it says is what ends up in the file.
    */
   async preview(address: string, patch: ContactPatch): Promise<ContactPreview> {
-    const store = await this.load();
-    const target = normalizeContactAddress(address);
-    const other = patch.mergeWith ? normalizeContactAddress(patch.mergeWith) : undefined;
-    const before = { address: personView(target ? recordOf(store, target) : undefined), mergeWith: personView(other ? recordOf(store, other) : undefined) };
-    try {
-      const result = applyPatch(structuredClone(store), address, patch, new Date().toISOString());
-      return { target: target ?? undefined, before, after: { contact: personView(result.contact), splitFrom: personView(result.splitFrom) } };
-    } catch (error) {
-      if (error instanceof InvalidArgumentError) return { target: target ?? undefined, refused: error.message, before, after: {} };
-      throw error;
-    }
+    return previewOn(await this.load(), address, patch);
   }
 
   /** Adds the people of a vCard file. Fills only what is not set yet. A card that names a known person never adds an address to them: a file could otherwise give its own address that person's tags (vip changes the autoresponder). */
-  async importCards(cards: ParsedVCard[]): Promise<ContactImportOutcome> {
+  async importCards(cards: ParsedVCard[], approvedDigest?: string | null): Promise<ContactImportOutcome> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
+      // As update(): asked about, so it must still do what the person was shown, checked inside the lock.
+      if (approvedDigest !== undefined && (approvedDigest === null || importPreviewDigest(previewImportOn(store, cards)) !== approvedDigest)) throw new StaleContactError();
       const outcome = applyCards(store, cards, new Date().toISOString());
       if (outcome.added || outcome.updated) await this.save(store);
       return outcome;
@@ -419,11 +452,8 @@ export class ContactService {
   }
 
   /** What `importCards(cards)` would store, card by card (the first `rows`), by running the same code on a copy of the store. */
-  async previewImport(cards: ParsedVCard[], rows = 20): Promise<{ outcome: ContactImportOutcome; rows: ImportRow[] }> {
-    const store = structuredClone(await this.load());
-    const trace: ImportRow[] = [];
-    const outcome = applyCards(store, cards, new Date().toISOString(), { rows: trace, limit: rows });
-    return { outcome, rows: trace };
+  async previewImport(cards: ParsedVCard[], rows = IMPORT_PREVIEW_ROWS): Promise<{ outcome: ContactImportOutcome; rows: ImportRow[] }> {
+    return previewImportOn(await this.load(), cards, rows);
   }
 
   // See TemplateService.withLock: the in-process chain plus a lock across processes sharing this dataDir.

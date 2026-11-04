@@ -11,7 +11,7 @@ import { basename } from "node:path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { FORWARD_DAILY_LIMIT, type EffectiveRule } from "../services/rules-service.js";
-import type { ContactPreview, ImportRow, PersonView } from "../services/contact-service.js";
+import { contactPreviewDigest, importPreviewDigest, type ContactImportOutcome, type ContactPreview, type ImportRow, type PersonView } from "../services/contact-service.js";
 import { CONTACT_NAME_MAX } from "./vcard.js";
 import type { AutoresponderRule } from "../services/autoresponder-service.js";
 import { normalizeBoolean } from "./helpers.js";
@@ -70,15 +70,17 @@ function storedName(person: PersonView | undefined): string {
 function importRowText(row: ImportRow): string {
   const left = [
     row.nameLeftOut ? `name left out because it is an alias of another person: ${quoted(row.nameLeftOut, CONTACT_NAME_MAX)}` : "",
-    row.addressesLeftOut.length ? `addresses not attached because they belong to another person: ${listed(row.addressesLeftOut, 5)}` : "",
+    row.addressesLeftOut.length ? `addresses not attached because they belong to another person: ${listed(row.addressesLeftOut, 3)}` : "",
   ].filter(Boolean);
-  return `${personText(row.person, "nothing is stored for this card")} - ${row.status}${left.length ? `; ${left.join("; ")}` : ""}`;
+  return `${personText(row.person, "nothing is stored for this card", 3)} - ${row.status}${left.length ? `; ${left.join("; ")}` : ""}`;
 }
 
-/** A person as the store would hold them after the call. */
-function personText(person: PersonView | undefined, absent: string): string {
+const SHOWN_ADDRESSES = 5;
+
+/** A person as the store would hold them after the call. At most `maxAddresses` addresses are listed (and 5 tags), the rest counted. */
+function personText(person: PersonView | undefined, absent: string, maxAddresses = SHOWN_ADDRESSES): string {
   if (!person) return absent;
-  return `name ${storedName(person)}, aliases ${person.aliases.length ? listed(person.aliases, person.aliases.length) : "none"}, addresses ${listed(person.addresses, person.addresses.length)}`;
+  return `name ${storedName(person)}, aliases ${person.aliases.length ? listed(person.aliases, maxAddresses === SHOWN_ADDRESSES ? person.aliases.length : 3) : "none"}, tags ${person.tags.length ? listed(person.tags, 5) : "none"}, addresses ${listed(person.addresses, maxAddresses)}`;
 }
 
 function listed(values: string[], max = 5): string {
@@ -126,7 +128,7 @@ export interface ApprovalLookups {
   /** What a set_contact call would store (names with their source, aliases, addresses, or why it is refused), from the contact service's own dry run. */
   contactPreview(args: Record<string, unknown>): Promise<ContactPreview | undefined>;
   /** What an import would store, card by card, from the contact service's own dry run, with the file's card count and a digest of its text. */
-  vcard(path: string, args: Record<string, unknown>): Promise<{ cards: number; digest: string; rows: ImportRow[]; total: number; outcome: { added: number; updated: number; unchanged: number } } | undefined>;
+  vcard(path: string, args: Record<string, unknown>): Promise<{ cards: number; digest: string; rows: ImportRow[]; total: number; outcome: ContactImportOutcome } | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
   plan(planId: string, args: Record<string, unknown>): Promise<PlanItemForApproval[] | undefined>;
   /** The automatic reply as it would be after the call: the stored one with the call's changes applied. */
@@ -173,7 +175,8 @@ export const ruleApprovalDigest = (rule: EffectiveRule): string => sha256(stable
 // What the person was shown, kept on the call's own argument object under a symbol: JSON from a client cannot carry a
 // symbol key, so the model can neither set nor forge it, and it is not an argument (not listed, not audited, not ignored-noted).
 // `digest` is undefined when the stored content could not be read for the question; nothing then matches it.
-type Bound = { kind: "draft" | "plan" | "vcard" | "autoresponder" | "rule"; digest: string | undefined };
+// `store` (vcard only): a digest of what the import would store, which the contact service recomputes inside its lock.
+type Bound = { kind: "draft" | "plan" | "vcard" | "autoresponder" | "rule" | "contact"; digest: string | undefined; store?: string };
 const APPROVED = Symbol("approved content");
 type Marked = Record<string | symbol, unknown>;
 
@@ -194,7 +197,10 @@ const MAX_MESSAGE_CHARS = 1500;
 // These carry a block (the reply text, a rule's conditions and actions) that the person needs to read in full.
 const LONG_QUESTIONS = new Set(["set_autoresponder", "set_rule", "apply_rules"]);
 const MAX_LONG_MESSAGE_CHARS = 2500;
-// An import lists up to 20 people, each with their addresses: room for all of them, so the "More" line is not cut off.
+// A contact question puts what the call does first and the people it started from last, so that a cut only ever takes the
+// tail; an import lists up to 20 cards after its summary and may still be cut in the rows (the summary, the effect and the
+// "More" line come before them).
+const MAX_CONTACT_MESSAGE_CHARS = 4000;
 const MAX_IMPORT_MESSAGE_CHARS = 5000;
 
 function whenText(when: unknown): string {
@@ -256,8 +262,9 @@ export async function buildApprovalMessage(name: string, args: Record<string, un
   return (await buildApproval(name, args, lookups)).message;
 }
 
-async function buildApproval(name: string, args: Record<string, unknown>, lookups: ApprovalLookups): Promise<{ message: string; bound?: Bound }> {
+async function buildApproval(name: string, args: Record<string, unknown>, lookups: ApprovalLookups): Promise<{ message: string; bound?: Bound; refused?: string }> {
   let bound: Bound | undefined;
+  let refused: string | undefined;
   const lines: string[] = [`Approve ${name}?`, `Account: ${quoted(lookups.account(args))}`];
   const add = (label: string, text: string | undefined) => { if (text) lines.push(`${label}: ${text}`); };
   const recipients = (label: string, values: unknown) => { const list = strings(values); if (list.length) add(label, listed(list)); };
@@ -419,10 +426,16 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, 80));
       // Everything below is what the contact store itself says it would store: the same code as the call, run on a copy.
       const preview: ContactPreview | undefined = await within(() => lookups.contactPreview(args));
+      bound = { kind: "contact", digest: preview && !preview.refused ? contactPreviewDigest(preview) : undefined };
       const unmerge = normalizeBoolean(args.unmerge, false);
       if (!preview) {
-        add("Effect", "unknown (the contact store could not be read)");
+        add("Effect", "unknown (the contact store could not be read); the call is refused unless the store is as it will be read then");
+        // What was typed, as given: all there is to show.
+        if (args.displayName !== undefined) add("Display name given", args.displayName === null ? "null (clear it)" : quoted(args.displayName, CONTACT_NAME_MAX));
+        if (Array.isArray(args.aliases)) add("Aliases given", args.aliases.length ? listed(strings(args.aliases), args.aliases.length) : "[] (clear them)");
+        if (unmerge) add("Unmerge", "yes");
       } else if (preview.refused) {
+        refused = preview.refused;
         add("This call will be refused", quoted(preview.refused, 400));
       } else {
         const holder = unmerge ? preview.after.splitFrom : preview.after.contact;
@@ -435,9 +448,9 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
           const typed = args.aliases.map(String);
           add("Aliases", `${stored.length ? listed(stored, stored.length) : "cleared"}${JSON.stringify(typed) !== JSON.stringify(stored) ? CHANGED : ""}`);
         }
-        if (typeof args.mergeWith === "string" && args.mergeWith.trim()) {
-          add("Person of address", personText(preview.before.address, "nothing stored yet"));
-          add("Person of mergeWith", personText(preview.before.mergeWith, "nothing stored yet"));
+        // The effect first (it must never be what a length cut takes away), the people it started from last.
+        const merging = typeof args.mergeWith === "string" && args.mergeWith.trim() !== "";
+        if (merging) {
           add("Primary address after the merge", holder?.addresses[0] ? quoted(holder.addresses[0], 80) : "none");
           add("Name after the merge", storedName(holder));
         }
@@ -448,6 +461,10 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         } else {
           add("After the call", personText(preview.after.contact, "nothing is stored for this address any more"));
         }
+        if (merging) {
+          add("Person of address", personText(preview.before.address, "nothing stored yet"));
+          add("Person of mergeWith", personText(preview.before.mergeWith, "nothing stored yet"));
+        }
       }
       if (args.notes !== undefined) add("Notes", args.notes === null || args.notes === "" ? "cleared" : quoted(args.notes, 80));
       break;
@@ -455,13 +472,14 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     case "import_contacts": {
       const path = typeof args.path === "string" ? args.path : "";
       const file = path ? await within(() => lookups.vcard(path, args)) : undefined;
-      bound = { kind: "vcard", digest: file?.digest };
+      bound = { kind: "vcard", digest: file?.digest, store: file ? importPreviewDigest(file) : undefined };
       add("File", quoted(basename(path), 80)); add("Cards", file ? String(file.cards) : "unknown (the file could not be read)");
       if (file) {
         add("Effect", `adds ${file.outcome.added} people, adds to ${file.outcome.updated} existing ones, leaves ${file.outcome.unchanged} cards as they are`);
+        // The "More" line comes before the rows: a cut in a long list takes rows, never the summary.
+        if (file.total > file.rows.length) add("More", `and ${file.total - file.rows.length} more cards after the first ${file.rows.length}`);
         // The first people as the store would hold them after the import (from the contact service's own dry run).
         for (const [index, row] of file.rows.entries()) add(`Person ${index + 1}`, importRowText(row));
-        if (file.total > file.rows.length) add("More", `and ${file.total - file.rows.length} more cards`);
       }
       break;
     }
@@ -485,8 +503,8 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     }
   }
   const text = lines.join("\n");
-  const cap = name === "import_contacts" ? MAX_IMPORT_MESSAGE_CHARS : LONG_QUESTIONS.has(name) ? MAX_LONG_MESSAGE_CHARS : MAX_MESSAGE_CHARS;
-  return { message: text.length > cap ? `${text.slice(0, cap - 1)}…` : text, bound };
+  const cap = name === "import_contacts" ? MAX_IMPORT_MESSAGE_CHARS : name === "set_contact" ? MAX_CONTACT_MESSAGE_CHARS : LONG_QUESTIONS.has(name) ? MAX_LONG_MESSAGE_CHARS : MAX_MESSAGE_CHARS;
+  return { message: text.length > cap ? `${text.slice(0, cap - 1)}…` : text, bound, refused };
 }
 
 type ElicitingServer = Pick<Server, "elicitInput" | "getClientCapabilities">;
@@ -509,6 +527,22 @@ export function assertApprovedContentUnchanged(args: Record<string, unknown>, ki
   const bound = (args as Marked)[APPROVED] as Bound | undefined;
   if (!bound || bound.kind !== kind || bound.digest === current) return;
   throw refuse(`Not approved: the ${kind} changed after you were asked (or could not be shown to you), so ${name} did not run. Nothing was done. Look at it again and ask the user again.`);
+}
+
+/**
+ * The digest of what the contact store would do, as the person was shown it: undefined when the call was not asked about
+ * (nothing to check), null when it could not be shown (the call is then refused). `kind` is "contact" for set_contact and
+ * "vcard" for import_contacts. The contact service compares it with its own result inside its lock.
+ */
+export function approvedStoreDigest(args: Record<string, unknown>, kind: "contact" | "vcard"): string | null | undefined {
+  const bound = (args as Marked)[APPROVED] as Bound | undefined;
+  if (!bound || bound.kind !== kind) return undefined;
+  return (kind === "contact" ? bound.digest : bound.store) ?? null;
+}
+
+/** The refusal for a contact call whose store changed after the person was asked. */
+export function staleContactRefusal(name: string): McpError {
+  return refuse(`Not approved: the contacts changed after you were asked (or what ${name} would do could not be shown to you), so ${name} did not run. Nothing was done. Look at it again and ask the user again.`);
 }
 
 /**
@@ -535,7 +569,9 @@ export async function applyApprovalPolicy(options: {
     throw refuse(`${name} needs the user's approval and PROTONMAIL_APPROVAL=require, but this client does not support MCP elicitation, so the user cannot be asked. Use a client that supports it, or set PROTONMAIL_APPROVAL=elicit (or off) to go back to confirmed: true.`);
   }
   const seconds = options.timeoutSeconds ?? DEFAULT_APPROVAL_TIMEOUT_SECONDS;
-  const { message, bound } = await buildApproval(name, args, options.lookups);
+  const { message, bound, refused } = await buildApproval(name, args, options.lookups);
+  // A call that would be refused anyway is not put to the person: a yes would change nothing.
+  if (refused) throw refuse(`${name} would be refused, so the user was not asked: ${cleanForPrompt(refused, 400)}`);
   let answer;
   try {
     answer = await server.elicitInput({ message, requestedSchema: { type: "object", properties: {} } }, { timeout: seconds * 1000 });
