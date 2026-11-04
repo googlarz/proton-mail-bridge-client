@@ -385,6 +385,7 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       const clearable = (label: string, value: unknown) => { if (value !== undefined) add(label, value === null || value === "" ? "cleared" : quoted(value, 80)); };
       add("Address", quoted(args.address, 80)); clearable("Display name", args.displayName);
       for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
+      if (Array.isArray(args.aliases)) add("Aliases", args.aliases.length ? listed(strings(args.aliases)) : "cleared");
       if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, 80));
       if (normalizeBoolean(args.unmerge, false)) add("Unmerge", "yes");
       clearable("Notes", args.notes);

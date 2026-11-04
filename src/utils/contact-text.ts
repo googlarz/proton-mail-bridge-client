@@ -25,3 +25,16 @@ export function normalizeContactAddress(value: string): string | undefined {
   const address = lowerAscii(value.trim().replace(/^mailto:/i, "").replace(/^<|>$/g, "").trim());
   return address.length <= 254 && ADDRESS.test(address) ? address : undefined;
 }
+
+/** Case and diacritic-insensitive form of a name, for matching: "Maćka" and "MACKA" are the same. "ł" has no decomposition, so it is mapped by hand. */
+export function foldText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[łŁ]/g, "l")
+    .replace(/[đĐ]/g, "d")
+    .replace(/[øØ]/g, "o")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}

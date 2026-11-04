@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Contact aliases and `resolve_recipient`** (CLI `resolve-recipient`). `set_contact` takes `aliases` (up to 10 nicknames per person, 1-40 characters, no `@`; an empty list clears them; an alias another person already uses is refused with that person named), `find_contact` matches and shows them, and the `set_contact` approval question lists them. The new read-only `resolve_recipient` (also in the `reader` profile) turns a name, nickname, partial name or mistyped address into candidates from the contact store, each with `confidence` (`exact`, `likely`, `possible`) and `matchedBy`, and `needsChoice` when more than one is likely or better. It ignores case and diacritics (Polish letters included), recognises a few common Polish inflections (`Maćka` finds `Maciek`) and matches an address up to 2 edits away when the query contains an `@`. It only suggests: nothing is chosen or sent for you.
+- **A recipient that is not an address now comes back with suggestions.** When `to`, `cc` or `bcc` of `create_draft`, the reply and forward drafts, `send_email`, `reply_to_email`, `reply_all_email`, `forward_email`, `update_draft`, `send_draft`, `schedule_draft` and the other tools that validate recipients holds something that is not a valid address, the error keeps its text and adds up to 3 `resolve_recipient` suggestions. Valid addresses are untouched and no address is ever substituted.
+- README: reading or syncing Proton's own address book is not possible through Bridge, so contacts stay a local store filled with `import_contacts` until Proton offers another way than a .vcf export.
+
 ### Docs
 
 - Launch drafts and the demo script now say that new setup-wizard installs start in `drafts` mode, and the refusal text and `runtime-status` fields were checked on a live Bridge.

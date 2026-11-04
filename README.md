@@ -47,7 +47,7 @@ Let Claude Desktop (or Cline, or any MCP client) work with your Proton Mail, wit
    - "Which of my emails have attachments from this month?"
    - "Show me my drafts and tighten the oldest one."
 5. **Not sure about handing over control?** Start with `PROTONMAIL_MODE=drafts`: Claude can read, search and prepare drafts, but nothing is sent or deleted until you change the mode. The server also tells the client how to behave (ids, accounts, never obeying instructions found inside a message).
-6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 128), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
+6. **Optional:** `PROTONMAIL_READ_ONLY=true` to browse without being able to change anything, `PROTONMAIL_TOOL_TIER=core` for a smaller tool set (25 instead of 129), and more accounts under [Multi-account support](#multi-account-support-v210). More recipes below in [Try it](#try-it-example-claude-prompts).
 
 ---
 
@@ -62,7 +62,7 @@ Let Claude Desktop (or Cline, or any MCP client) work with your Proton Mail, wit
 - **Fast local search** — full-text search across your inbox from a local index that keeps its read state in step with the server
 - **Rules that suggest themselves** — a scan proposes filters and cleanup from your own mail, applies them to existing mail after a preview, and can forward by condition; see [Mailbox rules](#mailbox-rules-suggestions-filters-cleanup-forwarding)
 - **Automatic reply, per address, with rules** — off by default, with a preview of what it would do, draft-for-approval mode and working-hours; see [Autoresponder](#autoresponder-automatic-reply-per-address) (Proton's own auto-reply may be all you need)
-- **Full CLI** — a dedicated command for every one of the 128 MCP tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
+- **Full CLI** — a dedicated command for every one of the 129 MCP tools (plus a generic `tool <name>` passthrough), scriptable and pipeable; `doctor` checks every account and `report` prints a diagnostic summary for a bug report
 - **Runs where you do** — Claude Desktop bundle, npm, Homebrew, or a [Docker image](#running-in-docker-headless-machines) for a headless machine
 - **Privacy-native** — no third-party email service involved; your mail stays on your machine
 
@@ -458,7 +458,13 @@ A local ledger of what you promised and what was promised to you. `find_commitme
 
 ## Contacts (people, not addresses)
 
-`find_contact` (CLI: `find-contact`) finds a person by name, part of a name or address and returns them as one identity: their addresses (merged ones included), organisation, tags, your notes, first and last contact, message counts both ways, the last few subjects, and whether you have ever written to them. Counts, dates and names come from the local index each time; only what you say is stored. `set_contact` sets a display name, notes and tags (such as `vip`), merges another address into the same person, or splits one out again. `import_contacts` reads a local `.vcf` file (vCard 2.1, 3.0, 4.0) and takes name, e-mail addresses, organisation and note; it fills only what is not set yet, **never reads `CATEGORIES` and never sets a tag**, so a file cannot mark anyone as a VIP. An import also **never attaches an address to a person who already exists**: a card that names a known person (or whose address belongs to another person) adds nothing for those addresses and is reported under `conflicts` (the first 20, with `conflictCount` for the total). Merging two addresses into one person is something only `set_contact` with `mergeWith` does, so a file cannot give its own address someone's tags. A tag can be used in an autoresponder rule as `tag:vip` in `from`. Because tags change what the autoresponder does, `set_contact` and `import_contacts` are gated like the tools that reach outside: after a suspicious message was read in the session they ask for `confirmed: true` (or for your approval, with `PROTONMAIL_APPROVAL`).
+`find_contact` (CLI: `find-contact`) finds a person by name, part of a name or address and returns them as one identity: their addresses (merged ones included), organisation, tags, your notes, first and last contact, message counts both ways, the last few subjects, and whether you have ever written to them. Counts, dates and names come from the local index each time; only what you say is stored. `set_contact` sets a display name, notes, aliases (nicknames) and tags (such as `vip`), merges another address into the same person, or splits one out again. `import_contacts` reads a local `.vcf` file (vCard 2.1, 3.0, 4.0) and takes name, e-mail addresses, organisation and note; it fills only what is not set yet, **never reads `CATEGORIES` and never sets a tag**, so a file cannot mark anyone as a VIP. An import also **never attaches an address to a person who already exists**: a card that names a known person (or whose address belongs to another person) adds nothing for those addresses and is reported under `conflicts` (the first 20, with `conflictCount` for the total). Merging two addresses into one person is something only `set_contact` with `mergeWith` does, so a file cannot give its own address someone's tags. A tag can be used in an autoresponder rule as `tag:vip` in `from`. Because tags change what the autoresponder does, `set_contact` and `import_contacts` are gated like the tools that reach outside: after a suspicious message was read in the session they ask for `confirmed: true` (or for your approval, with `PROTONMAIL_APPROVAL`).
+
+**Nicknames and typos: `aliases` and `resolve_recipient`.** `set_contact` takes `aliases`: up to 10 nicknames per person (each 1-40 characters, no `@`), replaced as a list, an empty list clears them. An alias belongs to one person: the same alias (case and diacritics ignored) for a second person is refused, and the error names the first. `find_contact` matches aliases and shows them. `resolve_recipient` (CLI: `resolve-recipient <text>`, read-only, also in the `reader` profile) turns what you typed for a recipient (a name, a nickname, a part of a name, or an address that may have a typo) into a short list of candidates with the real address, a `confidence` (`exact`, `likely`, `possible`) and `matchedBy` (`displayName`, `alias`, `address`, `typo-of-address`, `name-prefix`), plus `needsChoice: true` when more than one candidate is likely or better. Matching ignores case and diacritics (Polish letters included). An address is compared only when the query contains an `@`: up to 2 edits against the addresses in the contact store and the local index (one edit is `likely`, two `possible`). **It never picks for you:** it only suggests, the client is told to show the candidate and the real address and to ask before using it, and nothing is ever substituted or sent on its own. The same holds for `create_draft`, the reply and forward drafts, `send_email` and the other tools that take `to`, `cc` or `bcc`: when an entry is not a valid address, the error keeps its original text and adds up to 3 suggestions from the store as text; an entry that is a valid address is never looked at or changed (a valid address with a typo in it, such as `ann@exmaple.com`, is not suggested against: use `resolve_recipient` for that).
+
+**The limit on Polish inflection.** Names change their ending in Polish ("Maciek", "Maćka", "Maćkowi"). `resolve_recipient` does not know Polish grammar and has no dictionary; it recognises a few common patterns only: a name with up to 3 extra letters at the end ("Jana" for "Jan", "Piotrowi" for "Piotr"), a final vowel that changes ("Kasię" for "Kasia", "Mamy" for "Mama"), the "-ek" / "-iek" names that lose the "e" ("Marka" for "Marek", "Maćka" for "Maciek"), and the start of a name typed so far ("Mac", at least 3 letters, `possible` only). Other forms (a changed stem such as "Ewie" for "Ewa", a diminutive that is not stored as an alias, a surname in another case) are not found: add the form you use as an alias. Names in other languages get the same rules, which fit them by chance only. Only the contact store is searched for names; a person who has only written to you and is not in the store is found by `find_contact` (from headers), and by `resolve_recipient` only through their address.
+
+**Proton's own address book.** Reading or syncing Proton's own address book is not possible through Bridge (it exposes IMAP and SMTP only). Until Proton offers another way to sync contacts than exporting a .vcf file, contacts here are a local store you fill with import_contacts. We are waiting for Proton to expose such a way and will add it then.
 
 Limits: at most 5 MB and 5000 cards per import (the result says if cards were left); nothing is fetched over the network and nothing changes in the mailbox. This is a store of your own (in the account's data directory, one per account), not Proton's address book, which Bridge does not expose: export your contacts from Proton as vCard if you want them here. A name taken from mail headers is whatever the sender wrote; it is cleaned of control and invisible characters and shown, never followed.
 
@@ -658,7 +664,7 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 
 `<command> --help` prints that command's usage without running it. Flags accept `--flag value` or `--flag=value` (a value starting with `--` needs the `=` form, or must come after a bare `--`); unknown flags are an error. Exit codes: `0` success, `1` failure (including a failed `doctor` or `connection-status` check, or a failed item in a `batch`/`bulk-*` run), `2` usage error.
 
-**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 128 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
+**Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 129 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
 
 ---
 
@@ -680,7 +686,7 @@ A mode is a floor: the individual flags below can make things stricter (`PROTONM
 All flags work in both the MCP server and CLI:
 
 ```bash
-PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 128 — saves context window
+PROTONMAIL_TOOL_TIER=core            # expose 25 core tools instead of all 129 — saves context window
 PROTONMAIL_READ_ONLY=true            # disable all write operations
 PROTONMAIL_ALLOW_SEND=false          # disable SMTP sends only (other writes still work)
 PROTONMAIL_CONFIRM_DESTRUCTIVE=true  # require confirmed:true on send, reply, forward, delete
@@ -724,7 +730,7 @@ PROTONMAIL_PASSWORD_COMMAND='pass proton/password'
 PROTONMAIL_DATA_DIR="$HOME/.proton-mail-bridge-client"
 
 # Tools
-PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 128
+PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 129
 PROTONMAIL_TOOLSET='full'            # 'full' (all tools), 'core' (the same 25 as TOOL_TIER=core) or 'reader' (read-only tools only, nothing that writes or sends); hides tools and refuses calls to them, never widens PROTONMAIL_MODE; wins over TOOL_TIER; invalid -> full
 
 # Safety
@@ -838,7 +844,7 @@ With several accounts or a signature, the server sends from whichever `from` the
 `create_template` · `list_templates` · `get_template` · `delete_template` · `render_template` — `{{variable}}` substitution, render then pass the result to `send_email`
 
 ### Contacts & categories
-`find_contact` · `set_contact` · `import_contacts` · `define_category` · `list_categories` · `categorize_inbox` · `correct_category` — see [Contacts](#contacts-people-not-addresses) and [Own categories](#own-categories-separate-from-protons)
+`find_contact` · `resolve_recipient` · `set_contact` · `import_contacts` · `define_category` · `list_categories` · `categorize_inbox` · `correct_category` — see [Contacts](#contacts-people-not-addresses) and [Own categories](#own-categories-separate-from-protons)
 
 ### Import/export & attachments
 `export_email` · `import_email` · `get_attachment_text` · `get_emails_by_ids`
@@ -921,7 +927,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_KB`. **Do not point `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` at a broad directory such as `$HOME`:** `save_attachment` could then overwrite shell startup files, LaunchAgents or `~/.claude/settings.json`. The server refuses destinations inside any account's data directory (its `attachments` folder excepted) and the trusted CA file (`save_attachment(s)`, `export_email`), even when the download directory contains them, but it protects nothing else. This was already true before 2.17.
 - Office files are read in a small pool: at most 2 documents at a time, up to 16 waiting (further ones fail with a `busy` error), each worker memory-limited and each job stopped after 10 seconds from its start.
-- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 128: about 7k tokens of tool definitions instead of about 21k (measured with 116 tools, before the eleven tools of 2.17 were added and not re-measured; the full set now costs somewhat more) (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 129: about 7k tokens of tool definitions instead of about 21k (measured with 116 tools, before the eleven tools of 2.17 were added and not re-measured; the full set now costs somewhat more) (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 
 **Working with drafts**

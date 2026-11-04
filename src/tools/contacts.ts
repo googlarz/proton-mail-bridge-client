@@ -5,7 +5,7 @@ import { extname, isAbsolute, join } from "node:path";
 import type { AccountBundle } from "../services/account-manager.js";
 import type { ContactRecord } from "../services/contact-service.js";
 import type { EmailAddress, EmailSummary } from "../types/index.js";
-import { cleanContactText, lowerAscii, normalizeContactAddress } from "../utils/contact-text.js";
+import { cleanContactText, foldText, lowerAscii, normalizeContactAddress } from "../utils/contact-text.js";
 import { InvalidArgumentError, isSelfAddress, normalizeBoolean, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
 import { assertApprovedContentUnchanged, contentDigest } from "../utils/approval.js";
 import { assessMail } from "../utils/mail-security.js";
@@ -15,6 +15,7 @@ import { requireString } from "./args.js";
 import { withAudit } from "./audit.js";
 import type { ToolContext } from "./context.js";
 import { refreshIndexForSearch } from "./index-refresh.js";
+import { RESOLVE_NOTE, resolveInAccount } from "./recipient-resolver.js";
 import { createTextResult, type ToolResult } from "./results.js";
 
 // Contacts as people: find_contact merges what the local index knows about an address (names in headers, counts both
@@ -35,9 +36,7 @@ const FREEMAIL = new Set([
 ]);
 const SECOND_LEVEL = new Set(["co", "com", "org", "net", "ac", "gov", "edu", "or", "ne"]);
 
-function fold(text: string): string {
-  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-}
+const fold = foldText;
 
 function orgFromDomain(address: string): { name: string; domain: string } | undefined {
   const domain = address.split("@")[1] ?? "";
@@ -96,7 +95,7 @@ async function findInAccount(bundle: AccountBundle, query: string, limit: number
       for (const entry of [...email.to, ...email.cc, ...email.bcc]) if (matches(entry)) hit(lower(entry));
     }
     for (const record of records) {
-      const text = fold([record.displayName, record.org, ...record.addresses].filter(Boolean).join("\n"));
+      const text = fold([record.displayName, record.org, ...(record.aliases ?? []), ...record.addresses].filter(Boolean).join("\n"));
       if (text.includes(needle)) for (const address of record.addresses) hit(address, 2);
     }
   }
@@ -158,6 +157,7 @@ async function findInAccount(bundle: AccountBundle, query: string, limit: number
         addresses,
         org,
         tags: record?.tags ?? [],
+        ...(record?.aliases?.length ? { aliases: record.aliases } : {}),
         ...(record?.notes ? { notes: record.notes } : {}),
         firstContactAt: dates[0] ?? null,
         lastContactAt: dates[dates.length - 1] ?? null,
@@ -166,7 +166,7 @@ async function findInAccount(bundle: AccountBundle, query: string, limit: number
         lastSubjects,
         ...(capped ? { capped: true } : {}),
       };
-      const risk = assessMail({ text: [name, record?.notes, record?.org].filter(Boolean).join("\n") });
+      const risk = assessMail({ text: [name, record?.notes, record?.org, ...(record?.aliases ?? [])].filter(Boolean).join("\n") });
       if (risk.level === "high") {
         node.risk = risk;
         ctx.taint.mark(`contact:${addresses[0]}`, risk);
@@ -210,6 +210,12 @@ function tagList(value: unknown, key: string): string[] | undefined {
   return list as string[];
 }
 
+function aliasList(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) throw new InvalidArgumentError('aliases must be a list of names, for example ["Maciek"]; an empty list clears them.');
+  return value as string[];
+}
+
 function clearableText(value: unknown, key: string): string | null | undefined {
   if (value === undefined) return undefined;
   if (value === null || value === "") return null;
@@ -242,6 +248,31 @@ export async function handleContactTool(name: string, args: Record<string, unkno
       });
     }
 
+    case "resolve_recipient": {
+      const query = requireString(args, "query").trim();
+      if (query.length < 2 || query.length > 200) throw new InvalidArgumentError("query must be 2-200 characters: a name, a nickname, a part of a name, or an address.");
+      const limit = normalizeLimit(args.limit, 5, 1, 20);
+      const found = (
+        await Promise.all(
+          selectedBundles(args).map(async (bundle) => {
+            if (query.includes("@")) await refreshIndexForSearch(bundle);
+            return resolveInAccount(bundle, query, ctx, { useIndex: query.includes("@") });
+          }),
+        )
+      ).flat();
+      const order = { exact: 0, likely: 1, possible: 2 };
+      const candidates = found.sort((a, b) => order[a.confidence] - order[b.confidence]).slice(0, limit);
+      return createTextResult({
+        query,
+        candidates,
+        // More than one person fits well: the choice is the user's, and so is the choice when there is one.
+        needsChoice: candidates.filter((candidate) => candidate.confidence !== "possible").length > 1,
+        note: candidates.length
+          ? RESOLVE_NOTE
+          : "No one in the contact store (or, for an address, the local index) matches. Ask the user for the address; do not guess one. Fill the store with import_contacts or set_contact.",
+      });
+    }
+
     case "set_contact": {
       // A local store, not the mailbox: gated like templates and rules, so a read-only server changes nothing.
       ensureMailboxWriteAllowed(config.runtime);
@@ -252,11 +283,12 @@ export async function handleContactTool(name: string, args: Record<string, unkno
         notes: clearableText(args.notes, "notes"),
         addTags: tagList(args.addTags, "addTags"),
         removeTags: tagList(args.removeTags, "removeTags"),
+        aliases: aliasList(args.aliases),
         mergeWith: typeof args.mergeWith === "string" && args.mergeWith.trim() ? args.mergeWith : undefined,
         unmerge: normalizeBoolean(args.unmerge, false),
       };
-      if (!patch.unmerge && !patch.mergeWith && !patch.addTags?.length && !patch.removeTags?.length && patch.displayName === undefined && patch.notes === undefined) {
-        throw new InvalidArgumentError("Nothing to change: pass displayName, notes, addTags, removeTags, mergeWith or unmerge.");
+      if (!patch.unmerge && !patch.mergeWith && !patch.addTags?.length && !patch.removeTags?.length && patch.displayName === undefined && patch.notes === undefined && patch.aliases === undefined) {
+        throw new InvalidArgumentError("Nothing to change: pass displayName, notes, aliases, addTags, removeTags, mergeWith or unmerge.");
       }
       const outcome = await withAudit(target.auditService, name, args, async () => target.contactService.update(address, patch));
       return createTextResult({

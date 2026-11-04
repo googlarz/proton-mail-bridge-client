@@ -75,10 +75,22 @@ export function isValidEmail(email: string): boolean {
   return EMAIL_REGEX.test(email);
 }
 
+// A recipient field that holds something that is not an address. The message is the whole error; the server adds
+// suggestions from the contact store to it at one place (see recipientHint), so no call site has to.
+export class InvalidRecipientError extends Error {
+  constructor(
+    readonly field: string,
+    readonly invalid: string[],
+  ) {
+    super(`Invalid ${field} email address(es): ${invalid.join(", ")}`);
+    this.name = "InvalidRecipientError";
+  }
+}
+
 export function ensureValidEmails(emails: string[], fieldName: string): void {
   const invalid = emails.filter((email) => !isValidEmail(email));
   if (invalid.length > 0) {
-    throw new Error(`Invalid ${fieldName} email address(es): ${invalid.join(", ")}`);
+    throw new InvalidRecipientError(fieldName, invalid);
   }
 }
 

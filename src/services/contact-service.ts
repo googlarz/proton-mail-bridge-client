@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import type { ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
-import { cleanContactText, normalizeContactAddress } from "../utils/contact-text.js";
+import { cleanContactText, foldText, normalizeContactAddress } from "../utils/contact-text.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { InvalidArgumentError } from "../utils/helpers.js";
@@ -24,6 +24,8 @@ export interface ContactRecord {
   displayName?: string;
   org?: string;
   tags?: string[];
+  /** Nicknames and other ways the user refers to this person; unique across the store (case and diacritics ignored). */
+  aliases?: string[];
   notes?: string;
   createdAt: string;
   updatedAt: string;
@@ -35,6 +37,8 @@ export interface ContactPatch {
   notes?: string | null;
   addTags?: string[];
   removeTags?: string[];
+  /** Replaces the list of aliases; an empty list clears it. */
+  aliases?: string[];
   /** Another address of the same person: its record (if any) is merged into this one. */
   mergeWith?: string;
   /** Split this address out of the person it was merged into. */
@@ -60,6 +64,8 @@ interface ContactFile {
 export const MAX_CONTACTS = 10_000;
 const MAX_ADDRESSES = 50;
 const MAX_TAGS = 20;
+export const MAX_ALIASES = 10;
+export const ALIAS_MAX = 40;
 const TAG_PATTERN = /^[\p{L}\p{N}_-]{1,32}$/u;
 
 function createEmptyStore(): ContactFile {
@@ -78,8 +84,29 @@ function normalizeTag(value: string): string {
   return tag;
 }
 
+function normalizeAliases(values: string[]): string[] {
+  const seen = new Set<string>();
+  const aliases: string[] = [];
+  for (const value of values) {
+    const alias = cleanContactText(value, 1000);
+    if (!alias) throw new InvalidArgumentError("An alias cannot be empty.");
+    if (alias.includes("@")) throw new InvalidArgumentError(`"${alias.slice(0, 40)}" is not an alias: an alias is a name or nickname, not an address (no "@").`);
+    if (alias.length > ALIAS_MAX) throw new InvalidArgumentError(`"${alias.slice(0, 40)}..." is too long for an alias: use at most ${ALIAS_MAX} characters.`);
+    const key = foldText(alias);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    aliases.push(alias);
+  }
+  if (aliases.length > MAX_ALIASES) throw new InvalidArgumentError(`A person can have at most ${MAX_ALIASES} aliases.`);
+  return aliases;
+}
+
 function says(record: ContactRecord): boolean {
-  return record.addresses.length > 1 || Boolean(record.displayName || record.org || record.notes || record.tags?.length);
+  return record.addresses.length > 1 || Boolean(record.displayName || record.org || record.notes || record.tags?.length || record.aliases?.length);
+}
+
+function personLabel(record: ContactRecord): string {
+  return record.displayName ? `${record.displayName} (${record.addresses[0]})` : record.addresses[0];
 }
 
 function recordOf(store: ContactFile, address: string): ContactRecord | undefined {
@@ -113,9 +140,10 @@ export class ContactService {
     const target = requireContactAddress(address);
     const addTags = (patch.addTags ?? []).map(normalizeTag);
     const removeTags = (patch.removeTags ?? []).map(normalizeTag);
+    const aliases = patch.aliases !== undefined ? normalizeAliases(patch.aliases) : undefined;
     const mergeWith = patch.mergeWith !== undefined ? requireContactAddress(patch.mergeWith, "mergeWith") : undefined;
     if (mergeWith === target) throw new InvalidArgumentError("mergeWith must be another address than address.");
-    if (patch.unmerge && (mergeWith || addTags.length || removeTags.length || patch.displayName !== undefined || patch.notes !== undefined)) {
+    if (patch.unmerge && (mergeWith || addTags.length || removeTags.length || patch.displayName !== undefined || patch.notes !== undefined || aliases !== undefined)) {
       throw new InvalidArgumentError("unmerge is done on its own; change the other fields in a second call.");
     }
     return this.withLock(async () => {
@@ -143,6 +171,8 @@ export class ContactService {
           record.org ??= other.org;
           const tags = [...new Set([...(record.tags ?? []), ...(other.tags ?? [])])];
           if (tags.length) record.tags = tags.slice(0, MAX_TAGS);
+          const merged = [...new Map([...(record.aliases ?? []), ...(other.aliases ?? [])].map((alias) => [foldText(alias), alias])).values()];
+          if (merged.length) record.aliases = merged.slice(0, MAX_ALIASES);
           const notes = [record.notes, other.notes].filter(Boolean).join("\n\n");
           if (notes) record.notes = notes.slice(0, CONTACT_NOTES_MAX);
           delete store.items[other.id];
@@ -157,6 +187,15 @@ export class ContactService {
         const notes = patch.notes === null ? "" : cleanContactText(patch.notes, CONTACT_NOTES_MAX, true);
         if (notes) record.notes = notes;
         else delete record.notes;
+      }
+      if (aliases !== undefined) {
+        for (const alias of aliases) {
+          const key = foldText(alias);
+          const owner = Object.values(store.items).find((entry) => entry.id !== record.id && entry.aliases?.some((used) => foldText(used) === key));
+          if (owner) throw new InvalidArgumentError(`The alias "${alias}" is already used by ${personLabel(owner)}. Remove it there first, or pick another alias.`);
+        }
+        if (aliases.length) record.aliases = aliases;
+        else delete record.aliases;
       }
       if (addTags.length || removeTags.length) {
         const tags = [...new Set([...(record.tags ?? []), ...addTags])].filter((tag) => !removeTags.includes(tag));
@@ -250,7 +289,11 @@ export class ContactService {
       if (!parsed || typeof parsed.items !== "object" || parsed.items === null || Array.isArray(parsed.items)) throw new Error("contacts.json has no items object");
       // A hand-edited record without a list of addresses would break every lookup; it is left out.
       const items: Record<string, ContactRecord> = Object.create(null);
-      for (const [id, record] of Object.entries(parsed.items)) if (record && Array.isArray(record.addresses)) items[id] = record;
+      for (const [id, record] of Object.entries(parsed.items)) {
+        if (!record || !Array.isArray(record.addresses)) continue;
+        if (record.aliases !== undefined && !Array.isArray(record.aliases)) delete record.aliases;
+        items[id] = record;
+      }
       return { ...createEmptyStore(), ...parsed, items };
     } catch (error) {
       if (isFileNotFound(error)) return createEmptyStore();

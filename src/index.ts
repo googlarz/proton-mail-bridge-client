@@ -25,6 +25,7 @@ import type {
 import {
   isTextLikeMimeType,
   InvalidArgumentError,
+  InvalidRecipientError,
   withAccountPrefix,
   normalizeBoolean,
   optionalInteger,
@@ -56,6 +57,7 @@ import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
 import { handleDelegationTool } from "./tools/delegation.js";
 import { handleContactTool, readVcfFile } from "./tools/contacts.js";
+import { recipientHint } from "./tools/recipient-resolver.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
 import { applyApprovalPolicy, clientCanElicit, contentDigest, type ApprovalLookups } from "./utils/approval.js";
 import { parseVcf } from "./utils/vcard.js";
@@ -528,6 +530,7 @@ export function createServer(
           return await handleStyleTool(name, args, ctx);
 
         case "find_contact":
+        case "resolve_recipient":
         case "set_contact":
         case "import_contacts":
           return await handleContactTool(name, args, ctx);
@@ -691,6 +694,10 @@ export function createServer(
       }
       if (error instanceof InvalidArgumentError) {
         return failed(error.message, ErrorCode.InvalidParams);
+      }
+      // A recipient that is not an address: the one shared place where suggestions are added, for every tool that takes one.
+      if (error instanceof InvalidRecipientError) {
+        return failed(error.message + (await recipientHint(ctx, args, error.invalid)));
       }
       logger.error("Tool call failed", "MCPServer", { name, error });
       if (isLikelyAuthenticationError(error)) {

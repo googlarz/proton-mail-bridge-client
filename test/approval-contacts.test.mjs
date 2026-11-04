@@ -121,3 +121,12 @@ test("import_contacts: a file rewritten after the question is not imported", asy
     assert.match(result.content[0].text, /"cards": ?1/);
   }, { answer: "accept" });
 });
+
+test("set_contact: the question lists the aliases, and an empty list is said to clear them", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "ann@example.com", aliases: ["Ania", "Anka"] });
+    await call("set_contact", { address: "ann@example.com", aliases: [] });
+    assert.equal(line(asked[0], "Aliases"), 'Aliases: "Ania", "Anka"');
+    assert.equal(line(asked[1], "Aliases"), "Aliases: cleared");
+  });
+});

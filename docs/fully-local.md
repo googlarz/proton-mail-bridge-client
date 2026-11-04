@@ -19,7 +19,7 @@ The text the model reads: every message body, subject, sender and attachment tex
 ## Settings that matter for small models
 
 - **`PROTONMAIL_MODE=read-only`.** Start here. Add `drafts` only once you trust the behaviour. Modes are in the README ("One switch").
-- **`PROTONMAIL_TOOL_TIER=core`.** Exposes 25 tools instead of 128, so far less tool-definition text for a small context window. It exists today (`src/tools/definitions.ts`).
+- **`PROTONMAIL_TOOL_TIER=core`.** Exposes 25 tools instead of 129, so far less tool-definition text for a small context window. It exists today (`src/tools/definitions.ts`).
 - **`PROTONMAIL_TOOLSET=core` or `reader`.** Available from the release that follows 2.17.7. `reader` lists only tools that change nothing in the mailbox. A profile only hides tools (and the prompts that name them); it never widens what the mode permits. Profiles are for MCP clients: the CLI always uses the full toolset.
 
 ## Judge a model yourself

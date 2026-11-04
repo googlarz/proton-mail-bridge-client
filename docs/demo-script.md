@@ -47,7 +47,7 @@ Expected, and where it comes from:
 
 ## What the recording must not say
 
-- Not "128 tools" or any count as the headline.
+- Not "129 tools" or any count as the headline.
 - Not "private" or "nothing leaves your machine" without the qualifier: the server and index are local, but the text Claude reads goes to the model provider unless the model is local.
 - Not that the audit log stops a determined local attacker; the README says it is evidence against careless or partial edits, not a defence against someone with the same file access.
 - Not that `drafts` is the default. The default is `full`; show how to set `drafts` or `read-only`.
