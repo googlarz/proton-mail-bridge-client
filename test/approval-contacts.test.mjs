@@ -597,7 +597,7 @@ test("the notes are shown up to 500 characters, and the question says when they 
   await withServer(async ({ call, asked }) => {
     await call("set_contact", { address: "a@example.com", notes: "n".repeat(600) });
     const shown = line(asked.at(-1), "Notes");
-    assert.ok(shown.includes("n".repeat(499)) && !shown.includes("n".repeat(500)), "499 characters and an ellipsis");
+    assert.ok(shown.includes("n".repeat(500)) && !shown.includes("n".repeat(501)), "500 characters");
     assert.match(shown, /\(shown cut at 500 of 600 characters; the whole text is stored, up to 2000\)$/);
     await call("set_contact", { address: "a@example.com", notes: "short note" });
     assert.equal(line(asked.at(-1), "Notes"), 'Notes: "short note"');
@@ -673,5 +673,65 @@ test("a person already over the tag limit (hand-edited store) can still be renam
     await call("set_contact", { address: "r@x.example", addTags: ["extra"] });
     const more = await call("set_contact", { address: "p@x.example", mergeWith: "r@x.example" });
     assert.equal(more.isError, true, "a merge that adds a tag to a person already over the limit is refused");
+  }, { answer: "accept" });
+});
+
+test("notes made of quote characters are cut to the room that is left and always carry the remark", async () => {
+  await withServer(async ({ call, asked }) => {
+    // Plain case: 500 quote characters (1002 once quoted) fit whole and need no remark.
+    await call("set_contact", { address: "plain@example.com", notes: '"'.repeat(500) });
+    assert.equal(line(asked.at(-1), "Notes"), `Notes: ${JSON.stringify('"'.repeat(500))}`);
+    // Worst case effect lines: the notes get what is left of the cap, say how much, and the line is whole.
+    const A = (prefix, index) => `${prefix}${String(index).padStart(2, "0")}${"x".repeat(254 - 3 - 10)}@a.example`;
+    for (const prefix of ["a", "b"]) for (let index = 1; index < 25; index += 1) await call("set_contact", { address: A(prefix, 0), mergeWith: A(prefix, index) });
+    const tags = Array.from({ length: 10 }, (_, index) => `t${index}`.padEnd(32, "z"));
+    await call("set_contact", { address: A("a", 0), addTags: tags });
+    await call("set_contact", { address: A("b", 0), addTags: Array.from({ length: 10 }, (_, index) => `u${index}`.padEnd(32, "z")) });
+    const result = await call("set_contact", {
+      address: A("a", 0), mergeWith: A("b", 0), displayName: '"'.repeat(99) + "N", aliases: Array.from({ length: 10 }, (_, index) => '"'.repeat(39) + index),
+      addTags: tags, removeTags: Array.from({ length: 20 }, (_, index) => `r${index}`.padEnd(32, "q")), notes: '"'.repeat(1500),
+    });
+    assert.ok(!result.isError, result.content[0].text);
+    const question = asked.at(-1);
+    const notes = line(question, "Notes");
+    assert.match(notes, /\(shown cut at \d+ of 1500 characters; the whole text is stored, up to 2000\)$/, "the remark is never lost");
+    const shown = Number(/shown cut at (\d+)/.exec(notes)[1]);
+    assert.ok(shown >= 1 && shown <= 500);
+    assert.ok(question.indexOf("After the call: ") < question.indexOf("Notes: "));
+    assert.ok(question.length <= 7000);
+    // What is shown is a whole number of quote characters, and it is all there.
+    assert.ok(notes.includes(JSON.stringify('"'.repeat(shown))));
+  }, { answer: "accept" });
+});
+
+test("the tag limit counts distinct tags, before and after a merge", async () => {
+  await withServer(async ({ call, dir }) => {
+    await call("set_contact", { address: "p@x.example", addTags: ["vip"] });
+    await call("set_contact", { address: "q@x.example", addTags: Array.from({ length: 12 }, (_, index) => `n${index}`) });
+    const path = join(dir, "data", "contacts.json");
+    const file = JSON.parse(await readFile(path, "utf8"));
+    // A hand-edited list with 30 entries but 10 distinct tags.
+    Object.values(file.items).find((entry) => entry.addresses.includes("p@x.example")).tags = Array.from({ length: 30 }, (_, index) => `t${index % 10}`);
+    await writeFile(path, JSON.stringify(file));
+    const refused = await call("set_contact", { address: "p@x.example", mergeWith: "q@x.example" });
+    assert.equal(refused.isError, true, "10 + 12 distinct tags is 22");
+    assert.match(refused.content[0].text, /Merging would give this person 22 tags/);
+    // Two lists that share their tags are not over the limit.
+    await call("set_contact", { address: "r@x.example", addTags: ["t1", "t2", "t3"] });
+    const fine = await call("set_contact", { address: "p@x.example", mergeWith: "r@x.example" });
+    assert.ok(!fine.isError, fine.content[0].text);
+    assert.equal(new Set((await recordOf(dir, "p@x.example")).tags).size, 10);
+  }, { answer: "accept" });
+});
+
+test("merged notes are cleaned like any notes: trimmed after the cut, and storing them again changes nothing", async () => {
+  const { cleanContactText } = await import("../dist/utils/contact-text.js");
+  await withServer(async ({ call, dir }) => {
+    await call("set_contact", { address: "a@example.com", notes: "a".repeat(1998) });
+    await call("set_contact", { address: "b@example.com", notes: "b" });
+    await call("set_contact", { address: "a@example.com", mergeWith: "b@example.com" });
+    const notes = (await recordOf(dir, "a@example.com")).notes;
+    assert.equal(notes, "a".repeat(1998), "the blank lines left by the cut are gone");
+    assert.equal(cleanContactText(notes, 2000, true), notes);
   }, { answer: "accept" });
 });

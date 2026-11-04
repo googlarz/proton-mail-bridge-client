@@ -78,6 +78,8 @@ function importRowText(row: ImportRow): string {
 
 const SHOWN_ADDRESSES = 5;
 const NOTES_SHOWN = 500;
+// Room kept for the remark that says the notes are shown cut.
+const NOTES_REMARK_ROOM = 120;
 /** The longest an address can be (RFC 5321), shown in full: an address cut short is not the address that will be used. */
 const ADDRESS_WIDTH = 254;
 const MAX_SHOWN_TAGS = 20;
@@ -444,7 +446,17 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         if (notesAdded || args.notes === undefined) return;
         notesAdded = true;
         const notes = args.notes === null || args.notes === "" ? undefined : String(args.notes);
-        add("Notes", notes === undefined ? "cleared" : `${quoted(notes, NOTES_SHOWN)}${[...notes].length > NOTES_SHOWN ? ` (shown cut at ${NOTES_SHOWN} of ${[...notes].length} characters; the whole text is stored, up to 2000)` : ""}`);
+        if (notes === undefined) {
+          add("Notes", "cleared");
+          return;
+        }
+        // As much of the notes as the room left allows (quote characters take two characters each once quoted), never more than
+        // NOTES_SHOWN, and always with the remark when it is less than what was typed.
+        const everything = [...cleanForPrompt(notes, 1_000_000)];
+        const room = MAX_CONTACT_MESSAGE_CHARS - lines.join("\n").length - "\nNotes: ".length - NOTES_REMARK_ROOM;
+        let shown = everything.slice(0, NOTES_SHOWN);
+        while (shown.length > 0 && JSON.stringify(shown.join("")).length > room) shown = shown.slice(0, Math.floor(shown.length * 0.9));
+        add("Notes", `${JSON.stringify(shown.join(""))}${shown.length < everything.length ? ` (shown cut at ${shown.length} of ${everything.length} characters; the whole text is stored, up to 2000)` : ""}`);
       };
       if (!preview) {
         // Not asked: a yes to something that cannot be shown could never be bound to what is stored, and the call would only fail afterwards.
