@@ -12,6 +12,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { FORWARD_DAILY_LIMIT, type EffectiveRule } from "../services/rules-service.js";
 import { normalizeAliases } from "../services/contact-service.js";
+import { CONTACT_NAME_MAX } from "./vcard.js";
 import type { AutoresponderRule } from "../services/autoresponder-service.js";
 import { cleanContactText, normalizeContactAddress } from "./contact-text.js";
 import { normalizeBoolean } from "./helpers.js";
@@ -59,6 +60,17 @@ export function cleanForPrompt(value: unknown, max = 120): string {
 
 const quoted = (value: unknown, max?: number) => JSON.stringify(cleanForPrompt(value, max));
 const addressSet = (values: string[]) => [...new Set(values.map((value) => value.trim().toLowerCase()))].sort().join("\n");
+const IMPORTED = "imported from a vCard file";
+
+/** A display name as the store will keep it (the same cleaning), with a note when that changed what was given. */
+function nameText(value: unknown, empty = "cleared"): string {
+  if (value === null || value === "") return empty;
+  const given = String(value);
+  const stored = cleanContactText(given, CONTACT_NAME_MAX);
+  if (!stored) return given.trim() ? `${empty} (nothing is left of it after cleaning)` : empty;
+  return quoted(stored, 80) + (stored !== given ? " (cleaned: invisible or control characters or extra spaces in what was given are not stored; shown as stored)" : "");
+}
+
 /** The aliases as the store will keep them (the same cleaning), and a note when that changed what was typed or the call will be refused. */
 function aliasesText(aliases: unknown[]): string {
   if (!aliases.length) return "cleared";
@@ -115,7 +127,7 @@ export interface ApprovalLookups {
   subject(id: string): Promise<string | undefined>;
   target(name: string, args: Record<string, unknown>): Promise<SendTarget | undefined>;
   /** The person an address belongs to in the contact store (name, aliases, addresses; the first address is the primary one), or undefined when there is none. */
-  contact(address: string, args: Record<string, unknown>): Promise<{ name?: string; aliases: string[]; addresses: string[] } | undefined>;
+  contact(address: string, args: Record<string, unknown>): Promise<{ name?: string; /** The name came from an imported vCard file, not from the user. */ nameImported?: boolean; aliases: string[]; addresses: string[] } | undefined>;
   /** How many cards the vCard file holds and a digest of its text. */
   vcard(path: string): Promise<{ cards: number; digest: string; /** The first people of the file as they would be stored (name cleaned the way a stored name is). */ people?: Array<{ name?: string; emails: string[] }> } | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
@@ -404,14 +416,14 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     }
     case "set_contact": {
       const clearable = (label: string, value: unknown) => { if (value !== undefined) add(label, value === null || value === "" ? "cleared" : quoted(value, 80)); };
-      add("Address", quoted(args.address, 80)); clearable("Display name", args.displayName);
+      add("Address", quoted(args.address, 80)); if (args.displayName !== undefined) add("Display name", nameText(args.displayName));
       for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
       if (Array.isArray(args.aliases)) add("Aliases", aliasesText(args.aliases));
       if (typeof args.mergeWith === "string" && args.mergeWith.trim()) {
         add("Merge with", quoted(args.mergeWith, 80));
         // Both people as stored, and which address ends up first: a merge decides whose name and aliases stand for which addresses.
-        const person = (info: { name?: string; aliases: string[]; addresses: string[] } | undefined) =>
-          info ? `name ${info.name ? quoted(info.name, 80) : "none"}, aliases ${info.aliases.length ? listed(info.aliases, info.aliases.length) : "none"}, addresses ${listed(info.addresses, info.addresses.length)}` : "nothing stored yet";
+        const person = (info: { name?: string; nameImported?: boolean; aliases: string[]; addresses: string[] } | undefined) =>
+          info ? `name ${info.name ? quoted(info.name, 80) + (info.nameImported ? ` (${IMPORTED})` : "") : "none"}, aliases ${info.aliases.length ? listed(info.aliases, info.aliases.length) : "none"}, addresses ${listed(info.addresses, info.addresses.length)}` : "nothing stored yet";
         const target = typeof args.address === "string" ? await within(() => lookups.contact(args.address as string, args)) : undefined;
         const other = await within(() => lookups.contact(args.mergeWith as string, args));
         add("Person of address", person(target));
@@ -419,8 +431,14 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         const primary = target ? target.addresses[0] : args.address;
         add("Primary address after the merge", quoted(primary, 80));
         // The name the call sets wins over the one the merge would keep.
-        const kept = args.displayName !== undefined ? (typeof args.displayName === "string" ? args.displayName.trim() : "") : (target?.name ?? other?.name);
-        add("Name after the merge", kept ? quoted(kept, 80) : "none");
+        if (args.displayName !== undefined) {
+          const imported = [target, other].some((info) => info?.nameImported && info.name && info.name === cleanContactText(String(args.displayName ?? ""), CONTACT_NAME_MAX));
+          const replaced = [target, other].some((info) => info?.nameImported);
+          add("Name after the merge", nameText(args.displayName, "none") + (imported ? ` (the same as the name ${IMPORTED}: it stays marked as imported)` : replaced && args.displayName ? " (set in this call: becomes a name you set yourself, no longer marked as imported)" : ""));
+        } else {
+          const from = target?.name ? target : other;
+          add("Name after the merge", from?.name ? quoted(from.name, 80) + (from.nameImported ? ` (${IMPORTED})` : "") : "none");
+        }
       }
       if (normalizeBoolean(args.unmerge, false)) {
         add("Unmerge", "yes");
@@ -431,12 +449,16 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         add("Split out", quoted(split, 80));
         add("Addresses that stay together", info ? listed(info.addresses.filter((address) => address !== split), info.addresses.length) : "unknown (no stored person for this address, or the store could not be read)");
         const named = args.displayName !== undefined;
-        const name = named ? (typeof args.displayName === "string" ? args.displayName.trim() : "") : info?.name;
         const aliasesSet = Array.isArray(args.aliases);
-        const aliases = aliasesSet ? strings(args.aliases) : info?.aliases;
-        const nameText = !named && !info ? "unknown" : name ? quoted(name, 80) : "none";
-        const aliasText = !aliasesSet && !info ? "unknown" : aliases?.length ? listed(aliases, aliases.length) : "none";
-        add("Name and aliases stay with them", `name ${nameText}, aliases ${aliasText}${named || aliasesSet ? " (as set in this call)" : ""}`);
+        let nameLine: string;
+        if (named) {
+          const same = info?.nameImported && info.name && info.name === cleanContactText(String(args.displayName ?? ""), CONTACT_NAME_MAX);
+          nameLine = nameText(args.displayName, "none") + (same ? ` (the same as the name ${IMPORTED}: it stays marked as imported)` : info?.nameImported && args.displayName ? " (set in this call: becomes a name you set yourself, no longer marked as imported)" : "");
+        } else {
+          nameLine = !info ? "unknown" : info.name ? quoted(info.name, 80) + (info.nameImported ? ` (${IMPORTED}; it stays marked as imported)` : "") : "none";
+        }
+        const aliasLine = aliasesSet ? ((args.aliases as unknown[]).length ? aliasesText(args.aliases as unknown[]) : "none") : !info ? "unknown" : info.aliases.length ? listed(info.aliases, info.aliases.length) : "none";
+        add("Name and aliases stay with them", `name ${nameLine}, aliases ${aliasLine}${named || aliasesSet ? " (as set in this call)" : ""}`);
       }
       clearable("Notes", args.notes);
       break;

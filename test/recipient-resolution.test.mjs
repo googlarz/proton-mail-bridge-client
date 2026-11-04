@@ -437,8 +437,31 @@ test("an imported name is never an exact match on its own: likely at most, until
     // An alias is always the user's own (an import never sets one): still exact. So is a name the user set.
     await person(call, "prezes@evil.example", { aliases: ["Boss"] });
     assert.equal((await call("resolve_recipient", { query: "Boss" })).candidates[0].confidence, "exact");
+    // Restating the imported name does not make it the user's: it stays marked as imported, and so stays "likely".
     await person(call, "prezes@evil.example", { displayName: "Prezes" });
-    assert.equal((await call("resolve_recipient", { query: "Prezes" })).candidates[0].confidence, "exact");
+    assert.equal((await call("resolve_recipient", { query: "Prezes" })).candidates[0].confidence, "likely");
+    // A different name set by the user is their own.
+    await person(call, "prezes@evil.example", { displayName: "Prezes Firmy" });
+    const own = (await call("resolve_recipient", { query: "Prezes Firmy" })).candidates[0];
+    assert.equal(own.confidence, "exact");
+    assert.equal(own.nameSource, "saved");
+  });
+});
+
+test("an unmerge cannot turn an imported name into a trusted one by restating it", async () => {
+  await withServer(async ({ call, raw, dir }) => {
+    const path = join(dir, "c.vcf");
+    await writeFile(path, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Prezes\r\nEMAIL:p1@evil.example\r\nEMAIL:p2@evil.example\r\nEND:VCARD\r\n");
+    await call("import_contacts", { path });
+    assert.equal((await call("resolve_recipient", { query: "Prezes" })).candidates[0].confidence, "likely");
+    const refused = await raw("set_contact", { address: "p2@evil.example", unmerge: true });
+    assert.equal(refused.isError, true);
+    // The refusal tells the caller to restate the name; doing so keeps the import mark.
+    await call("set_contact", { address: "p2@evil.example", unmerge: true, displayName: "Prezes", aliases: [] });
+    const after = (await call("resolve_recipient", { query: "Prezes" })).candidates[0];
+    assert.equal(after.address, "p1@evil.example");
+    assert.equal(after.confidence, "likely");
+    assert.equal(after.nameSource, "imported from a vCard file");
   });
 });
 

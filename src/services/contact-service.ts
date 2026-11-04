@@ -195,9 +195,11 @@ export class ContactService {
         if (patch.displayName !== undefined) {
           const name = patch.displayName === null ? "" : cleanContactText(patch.displayName, CONTACT_NAME_MAX);
           if (name) assertNameFree(store, existing, name);
+          // Restating the imported name changes nothing about where it came from; any other name is the user's own.
+          const keepsImport = Boolean(name) && name === existing.displayName && existing.displayNameFrom === "import";
           if (name) existing.displayName = name;
           else delete existing.displayName;
-          delete existing.displayNameFrom;
+          if (!keepsImport) delete existing.displayNameFrom;
         }
         if (aliases !== undefined) {
           assertAliasesFree(store, existing, aliases);
@@ -240,9 +242,11 @@ export class ContactService {
       if (patch.displayName !== undefined) {
         const name = patch.displayName === null ? "" : cleanContactText(patch.displayName, CONTACT_NAME_MAX);
         if (name) assertNameFree(store, record, name);
+        // Restating the imported name changes nothing about where it came from; any other name is the user's own.
+        const keepsImport = Boolean(name) && name === record.displayName && record.displayNameFrom === "import";
         if (name) record.displayName = name;
         else delete record.displayName;
-        delete record.displayNameFrom;
+        if (!keepsImport) delete record.displayNameFrom;
       }
       if (patch.notes !== undefined) {
         const notes = patch.notes === null ? "" : cleanContactText(patch.notes, CONTACT_NOTES_MAX, true);

@@ -135,6 +135,49 @@ test("needsApproval: an import and a set_contact that sets aliases, a name or a 
   });
 });
 
+test("set_contact: a display name is shown exactly as it will be stored, in every line that shows one", async () => {
+  await withServer(async ({ call, asked }) => {
+    const cleaned = ' (cleaned: invisible or control characters or extra spaces in what was given are not stored; shown as stored)';
+    await call("set_contact", { address: "ann@example.com", displayName: "Sze\u200bf" });
+    assert.equal(line(asked[0], "Display name"), 'Display name: "Szef"' + cleaned);
+    await call("set_contact", { address: "boss@corp.example", displayName: "Jan Boss" });
+    await call("set_contact", { address: "boss@corp.example", mergeWith: "jb@private.example", displayName: "Sze\u200bf" });
+    assert.equal(line(asked.at(-1), "Name after the merge"), 'Name after the merge: "Szef"' + cleaned);
+    await call("set_contact", { address: "jb@private.example", unmerge: true, displayName: "Sze\u200bf", aliases: ["Ma\u200dciek"] });
+    assert.equal(line(asked.at(-1), "Name and aliases stay with them"), 'Name and aliases stay with them: name "Szef"' + cleaned + ', aliases "Maciek"' + cleaned + ' (as set in this call)');
+    await call("set_contact", { address: "ann@example.com", displayName: "\u200b" });
+    assert.equal(line(asked.at(-1), "Display name"), "Display name: cleared (nothing is left of it after cleaning)");
+  }, { answer: "accept" });
+});
+
+test("set_contact: a name that came from an imported file is said to, in the merge and the unmerge questions", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const path = join(dir, "c.vcf");
+    const two = (name, a, b) => `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\nEMAIL:${a}\r\nEMAIL:${b}\r\nEND:VCARD\r\n`;
+    await writeFile(path, two("PrezesA", "a1@evil.example", "a2@evil.example") + two("PrezesB", "b1@evil.example", "b2@evil.example") + two("PrezesC", "c1@evil.example", "c2@evil.example"));
+    await call("import_contacts", { path });
+    const stays = () => line(asked.at(-1), "Name and aliases stay with them");
+    // Not restated: said to be imported (the call is refused, the question was still asked).
+    await call("set_contact", { address: "a2@evil.example", unmerge: true });
+    assert.match(stays(), /name "PrezesA" \(imported from a vCard file; it stays marked as imported\)/);
+    // Restated unchanged: stays imported.
+    await call("set_contact", { address: "b2@evil.example", unmerge: true, displayName: "PrezesB", aliases: [] });
+    assert.match(stays(), /name "PrezesB" \(the same as the name imported from a vCard file: it stays marked as imported\)/);
+    // Another name: the user's own.
+    await call("set_contact", { address: "c2@evil.example", unmerge: true, displayName: "Somebody Else", aliases: [] });
+    assert.match(stays(), /name "Somebody Else" \(set in this call: becomes a name you set yourself, no longer marked as imported\)/);
+    // Merge: each person shows where its name came from, and so does the name that remains.
+    await call("set_contact", { address: "x@example.com", mergeWith: "a1@evil.example" });
+    const question = asked.at(-1);
+    assert.match(line(question, "Person of mergeWith"), /name "PrezesA" \(imported from a vCard file\)/);
+    assert.equal(line(question, "Name after the merge"), 'Name after the merge: "PrezesA" (imported from a vCard file)');
+    await call("set_contact", { address: "y@example.com", mergeWith: "b1@evil.example", displayName: "PrezesB" });
+    assert.match(line(asked.at(-1), "Name after the merge"), /"PrezesB" \(the same as the name imported from a vCard file: it stays marked as imported\)/);
+    await call("set_contact", { address: "z@example.com", mergeWith: "b1@evil.example", displayName: "Somebody New" });
+    assert.match(line(asked.at(-1), "Name after the merge"), /"Somebody New" \(set in this call: becomes a name you set yourself/);
+  }, { answer: "accept" });
+});
+
 test("set_contact: an alias is shown exactly as it will be stored, and cleaning is flagged", async () => {
   await withServer(async ({ call, asked }) => {
     await call("set_contact", { address: "ann@example.com", aliases: ["Ma‍ciek", "  Ania  "] });
