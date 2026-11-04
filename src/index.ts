@@ -60,7 +60,8 @@ import { handleContactTool, readVcfFile } from "./tools/contacts.js";
 import { recipientHint } from "./tools/recipient-resolver.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
 import { applyApprovalPolicy, clientCanElicit, contentDigest, type ApprovalLookups } from "./utils/approval.js";
-import { parseVcf } from "./utils/vcard.js";
+import { cleanContactText } from "./utils/contact-text.js";
+import { CONTACT_NAME_MAX, parseVcf } from "./utils/vcard.js";
 import { buildEmailResourceUri, buildEventsResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
 export { mailboxChangedSinceCheckpoint } from "./tools/index-refresh.js";
@@ -116,7 +117,9 @@ function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLoo
     },
     vcard: async (path) => {
       const text = await readVcfFile(path);
-      return { cards: parseVcf(text).cards.length, digest: contentDigest(text) };
+      const parsed = parseVcf(text);
+      const people = parsed.cards.slice(0, 20).map((card) => ({ name: card.name ? cleanContactText(card.name, CONTACT_NAME_MAX) : undefined, emails: card.emails }));
+      return { cards: parsed.cards.length, digest: contentDigest(text), people };
     },
     draft: async (id) => {
       const { bundle, rest } = ctx.resolveAccountForDraftId(id);

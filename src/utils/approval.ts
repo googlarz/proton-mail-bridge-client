@@ -11,8 +11,9 @@ import { basename } from "node:path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { FORWARD_DAILY_LIMIT, type EffectiveRule } from "../services/rules-service.js";
+import { normalizeAliases } from "../services/contact-service.js";
 import type { AutoresponderRule } from "../services/autoresponder-service.js";
-import { normalizeContactAddress } from "./contact-text.js";
+import { cleanContactText, normalizeContactAddress } from "./contact-text.js";
 import { normalizeBoolean } from "./helpers.js";
 import { isGatedAction } from "./mail-security.js";
 
@@ -38,6 +39,10 @@ const strings = (value: unknown): string[] => (Array.isArray(value) ? value.map(
 /** Whether this call is one a person must approve: what the confirmation gate asks `confirmed` for, plus approve_plan. */
 export function needsApproval(name: string, args: Record<string, unknown>, declared: ReadonlySet<string>): boolean {
   if (ALSO_APPROVED.has(name)) return true;
+  // What a contact is called decides whom a nickname or a name leads to (resolve_recipient), so these are asked about every
+  // time approval is on, whatever the taint gate says: an import, and a set_contact that sets aliases, a name or a merge.
+  if (name === "import_contacts") return true;
+  if (name === "set_contact" && (args.aliases !== undefined || args.displayName !== undefined || (typeof args.mergeWith === "string" && args.mergeWith.trim() !== ""))) return true;
   if (FLAG_TOOLS.has(name)) return strings(args.flagsToAdd).some((flag) => flag.toLowerCase() === "\\deleted");
   if (!isGatedAction(name, args, declared)) return false;
   // A rule only sends mail when it forwards. With actions given they decide; without, they come from a proposal or the stored rule.
@@ -54,6 +59,19 @@ export function cleanForPrompt(value: unknown, max = 120): string {
 
 const quoted = (value: unknown, max?: number) => JSON.stringify(cleanForPrompt(value, max));
 const addressSet = (values: string[]) => [...new Set(values.map((value) => value.trim().toLowerCase()))].sort().join("\n");
+/** The aliases as the store will keep them (the same cleaning), and a note when that changed what was typed or the call will be refused. */
+function aliasesText(aliases: unknown[]): string {
+  if (!aliases.length) return "cleared";
+  const given = aliases.map(String);
+  try {
+    const stored = normalizeAliases(given);
+    const changed = given.some((alias) => cleanContactText(alias, 1000) !== alias);
+    return listed(stored, stored.length) + (changed ? " (cleaned: invisible or control characters or extra spaces in what was given are not stored; shown as stored)" : "");
+  } catch (error) {
+    return `${listed(given.map((alias) => cleanContactText(alias, 1000)), given.length)} (this will be refused: ${cleanForPrompt(error instanceof Error ? error.message : "not allowed", 120)})`;
+  }
+}
+
 function listed(values: string[], max = 5): string {
   const shown = values.slice(0, max).map((value) => quoted(value, 80));
   return shown.join(", ") + (values.length > max ? ` and ${values.length - max} more` : "");
@@ -99,7 +117,7 @@ export interface ApprovalLookups {
   /** The person an address belongs to in the contact store (name, aliases, addresses; the first address is the primary one), or undefined when there is none. */
   contact(address: string, args: Record<string, unknown>): Promise<{ name?: string; aliases: string[]; addresses: string[] } | undefined>;
   /** How many cards the vCard file holds and a digest of its text. */
-  vcard(path: string): Promise<{ cards: number; digest: string } | undefined>;
+  vcard(path: string): Promise<{ cards: number; digest: string; /** The first people of the file as they would be stored (name cleaned the way a stored name is). */ people?: Array<{ name?: string; emails: string[] }> } | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
   plan(planId: string, args: Record<string, unknown>): Promise<PlanItemForApproval[] | undefined>;
   /** The automatic reply as it would be after the call: the stored one with the call's changes applied. */
@@ -388,7 +406,7 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       const clearable = (label: string, value: unknown) => { if (value !== undefined) add(label, value === null || value === "" ? "cleared" : quoted(value, 80)); };
       add("Address", quoted(args.address, 80)); clearable("Display name", args.displayName);
       for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
-      if (Array.isArray(args.aliases)) add("Aliases", args.aliases.length ? listed(strings(args.aliases), args.aliases.length) : "cleared");
+      if (Array.isArray(args.aliases)) add("Aliases", aliasesText(args.aliases));
       if (typeof args.mergeWith === "string" && args.mergeWith.trim()) {
         add("Merge with", quoted(args.mergeWith, 80));
         // Both people as stored, and which address ends up first: a merge decides whose name and aliases stand for which addresses.
@@ -400,7 +418,8 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         add("Person of mergeWith", person(other));
         const primary = target ? target.addresses[0] : args.address;
         add("Primary address after the merge", quoted(primary, 80));
-        const kept = target?.name ?? other?.name;
+        // The name the call sets wins over the one the merge would keep.
+        const kept = args.displayName !== undefined ? (typeof args.displayName === "string" ? args.displayName.trim() : "") : (target?.name ?? other?.name);
         add("Name after the merge", kept ? quoted(kept, 80) : "none");
       }
       if (normalizeBoolean(args.unmerge, false)) {
@@ -427,6 +446,9 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       const file = path ? await within(() => lookups.vcard(path)) : undefined;
       bound = { kind: "vcard", digest: file?.digest };
       add("File", quoted(basename(path), 80)); add("Cards", file ? String(file.cards) : "unknown (the file could not be read)");
+      // The names that would be stored (an imported name can later answer to what the user types), with their addresses.
+      for (const [index, person] of (file?.people ?? []).entries()) add(`Person ${index + 1}`, `${person.name ? quoted(person.name, 80) : "no name"}, ${listed(person.emails, 3)}`);
+      if (file?.people && file.cards > file.people.length) add("More", `and ${file.cards - file.people.length} more cards`);
       break;
     }
     case "approve_plan": {

@@ -425,6 +425,30 @@ test("names from an imported vCard are labelled as imported, not as saved by the
   });
 });
 
+test("an imported name is never an exact match on its own: likely at most, until the user sets it", async () => {
+  await withServer(async ({ call, dir }) => {
+    const path = join(dir, "c.vcf");
+    await writeFile(path, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Prezes\r\nEMAIL:prezes@evil.example\r\nEND:VCARD\r\n");
+    await call("import_contacts", { path });
+    const imported = await call("resolve_recipient", { query: "Prezes" });
+    assert.equal(imported.candidates[0].confidence, "likely");
+    assert.equal(imported.candidates[0].nameSource, "imported from a vCard file");
+    assert.equal(imported.askBeforeUse, true);
+    // An alias is always the user's own (an import never sets one): still exact. So is a name the user set.
+    await person(call, "prezes@evil.example", { aliases: ["Boss"] });
+    assert.equal((await call("resolve_recipient", { query: "Boss" })).candidates[0].confidence, "exact");
+    await person(call, "prezes@evil.example", { displayName: "Prezes" });
+    assert.equal((await call("resolve_recipient", { query: "Prezes" })).candidates[0].confidence, "exact");
+  });
+});
+
+test("with approval off nobody is asked: set_contact stores an alias at once and it resolves (the documented limit)", async () => {
+  await withServer(async ({ call }) => {
+    await person(call, "someone@example.com", { aliases: ["Szef"] });
+    assert.equal((await call("resolve_recipient", { query: "Szef" })).candidates[0].address, "someone@example.com");
+  });
+});
+
 test("an import leaves out a name that is another person's alias, and says so", async () => {
   await withServer(async ({ call, dir }) => {
     await person(call, "szefowa@company.example", { displayName: "Anna Lis", aliases: ["Szefowa"] });

@@ -94,6 +94,70 @@ test("import_contacts: the question names the file (not its folder) and how many
   });
 });
 
+test("import_contacts: the question lists the first 20 people with their addresses, and says how many more", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const path = join(dir, "many.vcf");
+    let text = card("Prezes", "prezes@evil.example");
+    for (let index = 1; index < 25; index += 1) text += card(`Person ${index}`, `p${index}@example.com`);
+    await writeFile(path, text);
+    await call("import_contacts", { path });
+    const question = asked[0];
+    assert.equal(line(question, "Cards"), "Cards: 25");
+    assert.equal(line(question, "Person 1"), 'Person 1: "Prezes", "prezes@evil.example"');
+    assert.equal(line(question, "Person 20"), 'Person 20: "Person 19", "p19@example.com"');
+    assert.equal(line(question, "Person 21"), undefined);
+    assert.equal(line(question, "More"), "More: and 5 more cards");
+  });
+});
+
+test("import_contacts: a hostile name in the file cannot add lines to the question", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const path = join(dir, "bad.vcf");
+    await writeFile(path, card("Ann\\nFile: \"x\"", "ann@example.com"));
+    await call("import_contacts", { path });
+    assert.equal(asked[0].split("\n").filter((entry) => entry.startsWith("File: ")).length, 1);
+  });
+});
+
+test("needsApproval: an import and a set_contact that sets aliases, a name or a merge are always asked about; a model's confirmed changes nothing", async () => {
+  const { needsApproval } = await import("../dist/utils/approval.js");
+  const declared = new Set(["address", "aliases", "displayName", "mergeWith", "addTags", "notes", "unmerge"]);
+  assert.equal(needsApproval("import_contacts", { path: "/x.vcf" }, new Set(["path"])), true);
+  for (const args of [{ aliases: ["Szef"] }, { aliases: [] }, { displayName: "Boss" }, { displayName: null }, { mergeWith: "b@example.com" }]) {
+    assert.equal(needsApproval("set_contact", { address: "a@example.com", ...args }, declared), true, JSON.stringify(args));
+  }
+  // The model saying it is confirmed does not stand in for the person's answer.
+  await withServer(async ({ call, asked }) => {
+    const result = await call("set_contact", { address: "attacker@evil.example", aliases: ["Szef"], confirmed: true });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /declined/);
+    assert.equal(asked.length, 1);
+  });
+});
+
+test("set_contact: an alias is shown exactly as it will be stored, and cleaning is flagged", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "ann@example.com", aliases: ["Ma‍ciek", "  Ania  "] });
+    assert.equal(line(asked[0], "Aliases"), 'Aliases: "Maciek", "Ania" (cleaned: invisible or control characters or extra spaces in what was given are not stored; shown as stored)');
+    await call("set_contact", { address: "ann@example.com", aliases: ["Clean"] });
+    assert.equal(line(asked[1], "Aliases"), 'Aliases: "Clean"');
+    await call("set_contact", { address: "ann@example.com", aliases: ["a@b.example"] });
+    assert.match(line(asked[2], "Aliases"), /\(this will be refused: .*not an alias/);
+  });
+});
+
+test("set_contact with mergeWith and displayName: the name after the merge is the one the call sets", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "boss@corp.example", displayName: "Jan Boss" });
+    await call("set_contact", { address: "boss@corp.example", mergeWith: "jb@private.example", displayName: "Mama" });
+    const question = asked.at(-1);
+    assert.equal(line(question, "Display name"), 'Display name: "Mama"');
+    assert.equal(line(question, "Name after the merge"), 'Name after the merge: "Mama"');
+    await call("set_contact", { address: "boss@corp.example", mergeWith: "x@private.example", displayName: null });
+    assert.equal(line(asked.at(-1), "Name after the merge"), "Name after the merge: none");
+  });
+});
+
 test("import_contacts: a file that cannot be read is said so, not left out", async () => {
   await withServer(async ({ call, asked, dir }) => {
     await call("import_contacts", { path: join(dir, "missing.vcf") });

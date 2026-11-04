@@ -122,6 +122,9 @@ export async function resolveInAccount(bundle: AccountBundle, query: string, ctx
         const kind = nameMatch(query, text);
         if (!kind) continue;
         const scored = fromNameMatch(kind, field);
+        // A name that came from an imported file is whatever the file's author wrote (a card may call itself "Prezes"):
+        // on its own it is never an exact match, only a likely one, so it is never presented as settled.
+        if (field === "displayName" && record.displayNameFrom === "import" && scored.confidence === "exact") scored.confidence = "likely";
         // Several addresses (merged people): the name does not say which one is meant, so none is offered as the answer.
         const several = addresses.length > 1;
         consider(record.id, {

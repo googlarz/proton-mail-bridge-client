@@ -54,7 +54,7 @@ export interface ContactImportOutcome {
   /** Addresses of a card that names a known person but are not that person's yet (or belong to another one); left out. A file never attaches an address to a person: merging is set_contact's mergeWith. First 20; `conflictCount` is the total. */
   conflicts: string[];
   conflictCount: number;
-  /** Names of cards left out because the name is an alias of another person (a nickname must not become a stranger's name). The card's addresses are still imported. First 20; `nameConflictCount` is the total. */
+  /** Names of cards left out because the name is an alias of another person (a nickname must not become a stranger's name). The card is imported without the name when it has anything else worth storing (a second address, an organisation or a note); a card that is only this name and one address is not stored at all and counts as `unchanged`. First 20; `nameConflictCount` is the total. */
   nameConflicts: string[];
   nameConflictCount: number;
   /** Cards not imported because the store is full. */
@@ -89,7 +89,8 @@ function normalizeTag(value: string): string {
   return tag;
 }
 
-function normalizeAliases(values: string[]): string[] {
+/** The aliases as they are stored: cleaned, trimmed, case/accent duplicates dropped. Throws InvalidArgumentError for one that is not allowed. */
+export function normalizeAliases(values: string[]): string[] {
   const seen = new Set<string>();
   const aliases: string[] = [];
   for (const value of values) {

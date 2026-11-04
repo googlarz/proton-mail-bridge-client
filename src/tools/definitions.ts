@@ -1722,7 +1722,7 @@ export const TOOLS = [
   },
   {
     name: "set_contact",
-    description: "Change what is stored about a person in this account's local contact store: display name, aliases (nicknames that resolve_recipient and find_contact match), notes, tags (vip feeds the autoresponder's \"tag:vip\" rules), merge another address into the same person, or split an address out again (unmerge, on its own). Pass null or \"\" to clear displayName or notes. Changes nothing in the mailbox.",
+    description: "Change what is stored about a person in this account's local contact store: display name, aliases (nicknames that resolve_recipient and find_contact match), notes, tags (vip feeds the autoresponder's \"tag:vip\" rules), merge another address into the same person, or split an address out again (unmerge, on its own). Pass null or \"\" to clear displayName or notes. Changes nothing in the mailbox. Aliases and names decide whom resolve_recipient suggests: with PROTONMAIL_APPROVAL=off nobody is asked and the model's own confirmed is all there is, so use PROTONMAIL_APPROVAL=elicit or require for contacts that feed recipient suggestions.",
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1742,7 +1742,7 @@ export const TOOLS = [
   },
   {
     name: "import_contacts",
-    description: "Import people from a local vCard (.vcf) file into this account's contact store: name, addresses (a card's addresses become one person), organisation and note. Fills only what is not set yet; never changes tags, never reads CATEGORIES. Reads the file only (at most 5 MB, 5000 cards), nothing goes over the network, nothing changes in the mailbox.",
+    description: "Import people from a local vCard (.vcf) file into this account's contact store: name, addresses (a card's addresses become one person), organisation and note. Fills only what is not set yet; never changes tags, never reads CATEGORIES. Reads the file only (at most 5 MB, 5000 cards), nothing goes over the network, nothing changes in the mailbox. An imported name is never an exact match for resolve_recipient (likely at most). With PROTONMAIL_APPROVAL=off nobody is asked and the model's own confirmed is all there is; use PROTONMAIL_APPROVAL=elicit or require for contacts that feed recipient suggestions.",
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: "object",
