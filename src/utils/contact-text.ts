@@ -28,7 +28,10 @@ export function normalizeContactAddress(value: string): string | undefined {
 
 /** Case and diacritic-insensitive form of a name, for matching: "Maćka" and "MACKA" are the same. "ł" has no decomposition, so it is mapped by hand. */
 export function foldText(value: string): string {
+  // NFKC first: full-width and other compatibility forms ("ＭＡＣＩＥＫ", "ﬁ") become the plain letters. Look-alikes from
+  // another alphabet (a Cyrillic "а" for a Latin "a") are different letters and are not folded.
   return value
+    .normalize("NFKC")
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
     .replace(/[łŁ]/g, "l")

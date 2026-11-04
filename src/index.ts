@@ -109,6 +109,11 @@ function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLoo
         replyTo: addressValues(detail.replyTo),
       };
     },
+    // The people two addresses belong to, as stored: a merge is shown with both.
+    contact: async (address, args) => {
+      const record = await (ctx.resolveAccountArg(args) ?? ctx.primaryBundle).contactService.recordFor(address);
+      return record ? { name: record.displayName, aliases: record.aliases ?? [], addresses: record.addresses } : undefined;
+    },
     vcard: async (path) => {
       const text = await readVcfFile(path);
       return { cards: parseVcf(text).cards.length, digest: contentDigest(text) };

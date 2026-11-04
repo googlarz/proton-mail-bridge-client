@@ -153,7 +153,7 @@ async function findInAccount(bundle: AccountBundle, query: string, limit: number
         ...(record ? { contactId: record.id } : {}),
         name,
         // A name from headers is whatever the sender wrote there: text to show, not to follow.
-        ...(name ? { nameSource: record?.displayName ? "saved" : "mail headers (untrusted)" } : {}),
+        ...(name ? { nameSource: record?.displayName ? (record.displayNameFrom === "import" ? "imported from a vCard file" : "saved") : "mail headers (untrusted)" } : {}),
         addresses,
         org,
         tags: record?.tags ?? [],
@@ -265,8 +265,9 @@ export async function handleContactTool(name: string, args: Record<string, unkno
       return createTextResult({
         query,
         candidates,
-        // More than one person fits well: the choice is the user's, and so is the choice when there is one.
-        needsChoice: candidates.filter((candidate) => candidate.confidence !== "possible").length > 1,
+        // True when more than one person fits well. False never means "no need to ask": the user is asked about a single candidate too.
+        multipleFits: candidates.filter((candidate) => candidate.confidence !== "possible").length > 1,
+        ...(candidates.length ? { askBeforeUse: true } : {}),
         note: candidates.length
           ? RESOLVE_NOTE
           : "No one in the contact store (or, for an address, the local index) matches. Ask the user for the address; do not guess one. Fill the store with import_contacts or set_contact.",

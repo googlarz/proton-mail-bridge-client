@@ -22,6 +22,8 @@ export interface ContactRecord {
   /** Lowercased; an address belongs to at most one record. */
   addresses: string[];
   displayName?: string;
+  /** Set when the name came from an imported vCard file (text someone else wrote), absent when the user set it. */
+  displayNameFrom?: "import";
   org?: string;
   tags?: string[];
   /** Nicknames and other ways the user refers to this person; unique across the store (case and diacritics ignored). */
@@ -129,6 +131,12 @@ export class ContactService {
     return Object.values((await this.load()).items);
   }
 
+  /** The person an address belongs to, if the store has one. */
+  async recordFor(address: string): Promise<ContactRecord | undefined> {
+    const normalized = normalizeContactAddress(address);
+    return normalized ? recordOf(await this.load(), normalized) : undefined;
+  }
+
   async tagsFor(address: string): Promise<string[]> {
     const normalized = normalizeContactAddress(address);
     if (!normalized) return [];
@@ -167,11 +175,19 @@ export class ContactService {
         if (addresses.length > MAX_ADDRESSES) throw new InvalidArgumentError(`A person can have at most ${MAX_ADDRESSES} addresses.`);
         record.addresses = addresses;
         if (other) {
-          record.displayName ??= other.displayName;
+          if (!record.displayName && other.displayName) {
+            record.displayName = other.displayName;
+            if (other.displayNameFrom) record.displayNameFrom = other.displayNameFrom;
+          }
           record.org ??= other.org;
           const tags = [...new Set([...(record.tags ?? []), ...(other.tags ?? [])])];
           if (tags.length) record.tags = tags.slice(0, MAX_TAGS);
           const merged = [...new Map([...(record.aliases ?? []), ...(other.aliases ?? [])].map((alias) => [foldText(alias), alias])).values()];
+          // A merge never drops an alias quietly: when they do not all fit (and the call does not replace the list), it is refused.
+          if (merged.length > MAX_ALIASES && aliases === undefined) {
+            const overflow = merged.slice(MAX_ALIASES).map((alias) => `"${alias}"`).join(", ");
+            throw new InvalidArgumentError(`Merging would give this person ${merged.length} aliases and at most ${MAX_ALIASES} are allowed; ${overflow} would not fit. Remove aliases from one of them first (or pass aliases in this call to set the list yourself).`);
+          }
           if (merged.length) record.aliases = merged.slice(0, MAX_ALIASES);
           const notes = [record.notes, other.notes].filter(Boolean).join("\n\n");
           if (notes) record.notes = notes.slice(0, CONTACT_NOTES_MAX);
@@ -182,6 +198,7 @@ export class ContactService {
         const name = patch.displayName === null ? "" : cleanContactText(patch.displayName, CONTACT_NAME_MAX);
         if (name) record.displayName = name;
         else delete record.displayName;
+        delete record.displayNameFrom;
       }
       if (patch.notes !== undefined) {
         const notes = patch.notes === null ? "" : cleanContactText(patch.notes, CONTACT_NOTES_MAX, true);
@@ -193,6 +210,8 @@ export class ContactService {
           const key = foldText(alias);
           const owner = Object.values(store.items).find((entry) => entry.id !== record.id && entry.aliases?.some((used) => foldText(used) === key));
           if (owner) throw new InvalidArgumentError(`The alias "${alias}" is already used by ${personLabel(owner)}. Remove it there first, or pick another alias.`);
+          const named = Object.values(store.items).find((entry) => entry.id !== record.id && entry.displayName && foldText(entry.displayName) === key);
+          if (named) throw new InvalidArgumentError(`The alias "${alias}" is the name of ${personLabel(named)}; an alias that is another person's name would send mail meant for them to this person. Pick another alias.`);
         }
         if (aliases.length) record.aliases = aliases;
         else delete record.aliases;
@@ -241,7 +260,10 @@ export class ContactService {
             record.addresses.push(address);
           }
         });
-        if (card.name && !record.displayName) record.displayName = cleanContactText(card.name, CONTACT_NAME_MAX);
+        if (card.name && !record.displayName) {
+          record.displayName = cleanContactText(card.name, CONTACT_NAME_MAX);
+          if (record.displayName) record.displayNameFrom = "import";
+        }
         if (card.org && !record.org) record.org = cleanContactText(card.org, CONTACT_ORG_MAX);
         if (card.note && !record.notes) record.notes = cleanContactText(card.note, CONTACT_NOTES_MAX, true);
         if (record.addresses.length === 0 || !says(record)) {
@@ -291,7 +313,12 @@ export class ContactService {
       const items: Record<string, ContactRecord> = Object.create(null);
       for (const [id, record] of Object.entries(parsed.items)) {
         if (!record || !Array.isArray(record.addresses)) continue;
-        if (record.aliases !== undefined && !Array.isArray(record.aliases)) delete record.aliases;
+        // A hand-edited store: only text of the length set_contact allows is an alias.
+        if (record.aliases !== undefined) {
+          const usable = Array.isArray(record.aliases) ? record.aliases.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0 && alias.length <= ALIAS_MAX) : [];
+          if (usable.length) record.aliases = usable;
+          else delete record.aliases;
+        }
         items[id] = record;
       }
       return { ...createEmptyStore(), ...parsed, items };

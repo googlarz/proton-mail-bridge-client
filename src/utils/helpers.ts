@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { sep as pathSeparator } from "node:path";
+import { cleanContactText } from "./contact-text.js";
 import type { MessageAddressObject, MessageStructureObject } from "imapflow";
 import TurndownService from "turndown";
 import type {
@@ -82,7 +83,8 @@ export class InvalidRecipientError extends Error {
     readonly field: string,
     readonly invalid: string[],
   ) {
-    super(`Invalid ${field} email address(es): ${invalid.join(", ")}`);
+    // An entry can be text a mail header carried (reply_all and forward read recipients from the message): shown as one clean, short line.
+    super(`Invalid ${field} email address(es): ${invalid.map((entry) => cleanContactText(entry, 100)).join(", ")}`);
     this.name = "InvalidRecipientError";
   }
 }

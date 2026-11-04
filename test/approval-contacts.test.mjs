@@ -122,6 +122,31 @@ test("import_contacts: a file rewritten after the question is not imported", asy
   }, { answer: "accept" });
 });
 
+test("set_contact: all aliases are listed, not only the first five", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "ann@example.com", aliases: ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10"] });
+    assert.equal(line(asked[0], "Aliases"), 'Aliases: "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10"');
+  });
+});
+
+test("set_contact with mergeWith: the question shows both people, their aliases, and which address becomes primary", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss", "Szef"] });
+    await call("set_contact", { address: "attacker@evil.example", mergeWith: "boss@company.example" });
+    const question = asked[1];
+    assert.equal(line(question, "Person of address"), "Person of address: nothing stored yet");
+    assert.equal(line(question, "Person of mergeWith"), 'Person of mergeWith: name "Boss Person", aliases "Boss", "Szef", addresses "boss@company.example"');
+    assert.equal(line(question, "Primary address after the merge"), 'Primary address after the merge: "attacker@evil.example"');
+    assert.equal(line(question, "Name after the merge"), 'Name after the merge: "Boss Person"');
+    // Both people stored: the first address of the target stays first.
+    await call("set_contact", { address: "ann@example.com", displayName: "Ann", aliases: ["Ania"] });
+    await call("set_contact", { address: "ann@example.com", mergeWith: "boss@company.example" });
+    const second = asked.at(-1);
+    assert.equal(line(second, "Person of address"), 'Person of address: name "Ann", aliases "Ania", addresses "ann@example.com"');
+    assert.equal(line(second, "Primary address after the merge"), 'Primary address after the merge: "ann@example.com"');
+  }, { answer: "accept" });
+});
+
 test("set_contact: the question lists the aliases, and an empty list is said to clear them", async () => {
   await withServer(async ({ call, asked }) => {
     await call("set_contact", { address: "ann@example.com", aliases: ["Ania", "Anka"] });

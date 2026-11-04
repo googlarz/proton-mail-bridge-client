@@ -95,6 +95,8 @@ export interface ApprovalLookups {
   account(args: Record<string, unknown>): string;
   subject(id: string): Promise<string | undefined>;
   target(name: string, args: Record<string, unknown>): Promise<SendTarget | undefined>;
+  /** The person an address belongs to in the contact store (name, aliases, addresses; the first address is the primary one), or undefined when there is none. */
+  contact(address: string, args: Record<string, unknown>): Promise<{ name?: string; aliases: string[]; addresses: string[] } | undefined>;
   /** How many cards the vCard file holds and a digest of its text. */
   vcard(path: string): Promise<{ cards: number; digest: string } | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
@@ -385,8 +387,21 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       const clearable = (label: string, value: unknown) => { if (value !== undefined) add(label, value === null || value === "" ? "cleared" : quoted(value, 80)); };
       add("Address", quoted(args.address, 80)); clearable("Display name", args.displayName);
       for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
-      if (Array.isArray(args.aliases)) add("Aliases", args.aliases.length ? listed(strings(args.aliases)) : "cleared");
-      if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, 80));
+      if (Array.isArray(args.aliases)) add("Aliases", args.aliases.length ? listed(strings(args.aliases), args.aliases.length) : "cleared");
+      if (typeof args.mergeWith === "string" && args.mergeWith.trim()) {
+        add("Merge with", quoted(args.mergeWith, 80));
+        // Both people as stored, and which address ends up first: a merge decides whose name and aliases stand for which addresses.
+        const person = (info: { name?: string; aliases: string[]; addresses: string[] } | undefined) =>
+          info ? `name ${info.name ? quoted(info.name, 80) : "none"}, aliases ${info.aliases.length ? listed(info.aliases, info.aliases.length) : "none"}, addresses ${listed(info.addresses, info.addresses.length)}` : "nothing stored yet";
+        const target = typeof args.address === "string" ? await within(() => lookups.contact(args.address as string, args)) : undefined;
+        const other = await within(() => lookups.contact(args.mergeWith as string, args));
+        add("Person of address", person(target));
+        add("Person of mergeWith", person(other));
+        const primary = target ? target.addresses[0] : args.address;
+        add("Primary address after the merge", quoted(primary, 80));
+        const kept = target?.name ?? other?.name;
+        add("Name after the merge", kept ? quoted(kept, 80) : "none");
+      }
       if (normalizeBoolean(args.unmerge, false)) add("Unmerge", "yes");
       clearable("Notes", args.notes);
       break;
