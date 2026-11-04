@@ -263,7 +263,8 @@ export async function handleContactTool(name: string, args: Record<string, unkno
       const order = { exact: 0, likely: 1, possible: 2 };
       const candidates = found.sort((a, b) => order[a.confidence] - order[b.confidence]).slice(0, limit);
       return createTextResult({
-        query,
+        // Echoed as clean text: the query can carry anything a message header did.
+        query: cleanContactText(query, 200),
         candidates,
         // True when more than one person fits well. False never means "no need to ask": the user is asked about a single candidate too.
         multipleFits: candidates.filter((candidate) => candidate.confidence !== "possible").length > 1,

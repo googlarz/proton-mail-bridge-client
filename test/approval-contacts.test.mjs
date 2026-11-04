@@ -147,6 +147,21 @@ test("set_contact with mergeWith: the question shows both people, their aliases,
   }, { answer: "accept" });
 });
 
+test("set_contact unmerge: the question lists the addresses that stay together and says the name and aliases stay with them", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss"] });
+    await call("set_contact", { address: "attacker@evil.example", mergeWith: "boss@company.example" });
+    await call("set_contact", { address: "boss@company.example", unmerge: true });
+    const question = asked.at(-1);
+    assert.equal(line(question, "Unmerge"), "Unmerge: yes");
+    assert.equal(line(question, "Split out"), 'Split out: "boss@company.example"');
+    assert.equal(line(question, "Addresses that stay together"), 'Addresses that stay together: "attacker@evil.example"');
+    assert.equal(line(question, "Name and aliases stay with them"), 'Name and aliases stay with them: name "Boss Person", aliases "Boss"');
+    await call("set_contact", { address: "boss@company.example", unmerge: true, displayName: null, aliases: [] });
+    assert.equal(line(asked.at(-1), "Name and aliases stay with them"), 'Name and aliases stay with them: name none, aliases none (as set in this call)');
+  }, { answer: "accept" });
+});
+
 test("set_contact: the question lists the aliases, and an empty list is said to clear them", async () => {
   await withServer(async ({ call, asked }) => {
     await call("set_contact", { address: "ann@example.com", aliases: ["Ania", "Anka"] });

@@ -402,7 +402,19 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         const kept = target?.name ?? other?.name;
         add("Name after the merge", kept ? quoted(kept, 80) : "none");
       }
-      if (normalizeBoolean(args.unmerge, false)) add("Unmerge", "yes");
+      if (normalizeBoolean(args.unmerge, false)) {
+        add("Unmerge", "yes");
+        // The name and aliases stay with the addresses that remain, not with the one split out.
+        const info = typeof args.address === "string" ? await within(() => lookups.contact(args.address as string, args)) : undefined;
+        if (info) {
+          const target = (args.address as string).trim().toLowerCase();
+          add("Addresses that stay together", listed(info.addresses.filter((address) => address !== target), info.addresses.length));
+          const name = args.displayName !== undefined ? (args.displayName === null || args.displayName === "" ? undefined : String(args.displayName)) : info.name;
+          const aliases = Array.isArray(args.aliases) ? strings(args.aliases) : info.aliases;
+          add("Name and aliases stay with them", `name ${name ? quoted(name, 80) : "none"}, aliases ${aliases.length ? listed(aliases, aliases.length) : "none"}${args.displayName !== undefined || Array.isArray(args.aliases) ? " (as set in this call)" : ""}`);
+          add("Split out", quoted(target, 80));
+        }
+      }
       clearable("Notes", args.notes);
       break;
     }

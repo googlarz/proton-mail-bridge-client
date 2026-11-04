@@ -101,7 +101,7 @@ const annMail = () => [
 ];
 
 test("find_contact returns one identity, merge joins two addresses and unmerge splits them again", async () => {
-  await withServer({}, async ({ call, accountManager }) => {
+  await withServer({}, async ({ call, raw, accountManager }) => {
     await seed(accountManager.primary(), annMail());
 
     const before = await call("find_contact", { query: "smith" });
@@ -131,7 +131,11 @@ test("find_contact returns one identity, merge joins two addresses and unmerge s
     assert.deepEqual(one[0].tags, ["vip"]);
     assert.equal((await call("find_contact", { query: "ann.smith@gmail.com" })).contacts[0].contactId, merged.contact.id, "either address finds the person");
 
-    const split = await call("set_contact", { address: "ann.smith@gmail.com", unmerge: true });
+    // The name stays with the remaining address, so a split has to restate it (an unmerge that leaves a name behind unasked is refused).
+    const refused = await raw("set_contact", { address: "ann.smith@gmail.com", unmerge: true });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /pass displayName and aliases/);
+    const split = await call("set_contact", { address: "ann.smith@gmail.com", unmerge: true, displayName: "Ann Smith", aliases: [] });
     assert.deepEqual(split.splitFrom.addresses, ["ann@acme.co.uk"]);
     assert.deepEqual(split.splitFrom.tags, ["vip"], "what was set stays with the remaining address");
     const home = (await call("find_contact", { query: "ann.smith@gmail.com" })).contacts[0];

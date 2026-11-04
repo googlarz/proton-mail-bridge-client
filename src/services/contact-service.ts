@@ -111,6 +111,25 @@ function personLabel(record: ContactRecord): string {
   return record.displayName ? `${record.displayName} (${record.addresses[0]})` : record.addresses[0];
 }
 
+// Aliases and display names of two people must not collide (either way round): a nickname that is another person's name
+// would send mail meant for them to someone else.
+function assertAliasesFree(store: ContactFile, record: ContactRecord, aliases: string[]): void {
+  const others = Object.values(store.items).filter((entry) => entry.id !== record.id);
+  for (const alias of aliases) {
+    const key = foldText(alias);
+    const owner = others.find((entry) => entry.aliases?.some((used) => foldText(used) === key));
+    if (owner) throw new InvalidArgumentError(`The alias "${alias}" is already used by ${personLabel(owner)}. Remove it there first, or pick another alias.`);
+    const named = others.find((entry) => entry.displayName && foldText(entry.displayName) === key);
+    if (named) throw new InvalidArgumentError(`The alias "${alias}" is the name of ${personLabel(named)}; an alias that is another person's name would send mail meant for them to this person. Pick another alias.`);
+  }
+}
+
+function assertNameFree(store: ContactFile, record: ContactRecord, name: string): void {
+  const key = foldText(name);
+  const owner = Object.values(store.items).find((entry) => entry.id !== record.id && entry.aliases?.some((used) => foldText(used) === key));
+  if (owner) throw new InvalidArgumentError(`The name "${name}" is an alias of ${personLabel(owner)}; a name that is another person's alias would send mail meant for them to this person. Pick another name, or remove the alias there first.`);
+}
+
 function recordOf(store: ContactFile, address: string): ContactRecord | undefined {
   return Object.values(store.items).find((record) => record.addresses.includes(address));
 }
@@ -151,8 +170,8 @@ export class ContactService {
     const aliases = patch.aliases !== undefined ? normalizeAliases(patch.aliases) : undefined;
     const mergeWith = patch.mergeWith !== undefined ? requireContactAddress(patch.mergeWith, "mergeWith") : undefined;
     if (mergeWith === target) throw new InvalidArgumentError("mergeWith must be another address than address.");
-    if (patch.unmerge && (mergeWith || addTags.length || removeTags.length || patch.displayName !== undefined || patch.notes !== undefined || aliases !== undefined)) {
-      throw new InvalidArgumentError("unmerge is done on its own; change the other fields in a second call.");
+    if (patch.unmerge && (mergeWith || addTags.length || removeTags.length || patch.notes !== undefined)) {
+      throw new InvalidArgumentError("unmerge is done on its own; only displayName and aliases may be given with it (see below). Change the other fields in a second call.");
     }
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
@@ -161,7 +180,27 @@ export class ContactService {
 
       if (patch.unmerge) {
         if (!existing || existing.addresses.length < 2) throw new InvalidArgumentError(`${target} is not merged with another address.`);
-        existing.addresses = existing.addresses.filter((entry) => entry !== target);
+        const staying = existing.addresses.filter((entry) => entry !== target);
+        // The name and aliases stay with the addresses that remain in the record. Splitting one address out must not leave
+        // them quietly on whoever is left (after the real address of "Boss" is split out, a merged-in address would be "Boss"):
+        // the call has to say what the remaining person is called, or clear it.
+        if ((existing.displayName && patch.displayName === undefined) || (existing.aliases?.length && aliases === undefined)) {
+          const held = [existing.displayName ? `the name "${existing.displayName}"` : "", existing.aliases?.length ? `the aliases ${existing.aliases.map((alias) => `"${alias}"`).join(", ")}` : ""].filter(Boolean).join(" and ");
+          throw new InvalidArgumentError(`${staying.join(", ")} would keep ${held}. Say who they are: pass displayName and aliases in the same call (the current values to keep them, or null and [] to clear them).`);
+        }
+        if (patch.displayName !== undefined) {
+          const name = patch.displayName === null ? "" : cleanContactText(patch.displayName, CONTACT_NAME_MAX);
+          if (name) assertNameFree(store, existing, name);
+          if (name) existing.displayName = name;
+          else delete existing.displayName;
+          delete existing.displayNameFrom;
+        }
+        if (aliases !== undefined) {
+          assertAliasesFree(store, existing, aliases);
+          if (aliases.length) existing.aliases = aliases;
+          else delete existing.aliases;
+        }
+        existing.addresses = staying;
         existing.updatedAt = now;
         if (!says(existing)) delete store.items[existing.id];
         await this.save(store);
@@ -196,6 +235,7 @@ export class ContactService {
       }
       if (patch.displayName !== undefined) {
         const name = patch.displayName === null ? "" : cleanContactText(patch.displayName, CONTACT_NAME_MAX);
+        if (name) assertNameFree(store, record, name);
         if (name) record.displayName = name;
         else delete record.displayName;
         delete record.displayNameFrom;
@@ -206,13 +246,7 @@ export class ContactService {
         else delete record.notes;
       }
       if (aliases !== undefined) {
-        for (const alias of aliases) {
-          const key = foldText(alias);
-          const owner = Object.values(store.items).find((entry) => entry.id !== record.id && entry.aliases?.some((used) => foldText(used) === key));
-          if (owner) throw new InvalidArgumentError(`The alias "${alias}" is already used by ${personLabel(owner)}. Remove it there first, or pick another alias.`);
-          const named = Object.values(store.items).find((entry) => entry.id !== record.id && entry.displayName && foldText(entry.displayName) === key);
-          if (named) throw new InvalidArgumentError(`The alias "${alias}" is the name of ${personLabel(named)}; an alias that is another person's name would send mail meant for them to this person. Pick another alias.`);
-        }
+        assertAliasesFree(store, record, aliases);
         if (aliases.length) record.aliases = aliases;
         else delete record.aliases;
       }
@@ -313,9 +347,20 @@ export class ContactService {
       const items: Record<string, ContactRecord> = Object.create(null);
       for (const [id, record] of Object.entries(parsed.items)) {
         if (!record || !Array.isArray(record.addresses)) continue;
-        // A hand-edited store: only text of the length set_contact allows is an alias.
+        // A hand-edited store: a name or alias is cleaned like one set through the tools (no control, bidi or invisible
+        // characters, one line), and an alias is dropped when it is not text, is empty after that, or is too long.
+        if (record.displayName !== undefined) {
+          const name = typeof record.displayName === "string" ? cleanContactText(record.displayName, CONTACT_NAME_MAX) : "";
+          if (name) record.displayName = name;
+          else delete record.displayName;
+        }
         if (record.aliases !== undefined) {
-          const usable = Array.isArray(record.aliases) ? record.aliases.filter((alias): alias is string => typeof alias === "string" && alias.trim().length > 0 && alias.length <= ALIAS_MAX) : [];
+          const usable = Array.isArray(record.aliases)
+            ? record.aliases.flatMap((alias) => {
+                const cleaned = typeof alias === "string" ? cleanContactText(alias, 1000) : "";
+                return cleaned && cleaned.length <= ALIAS_MAX && !cleaned.includes("@") ? [cleaned] : [];
+              })
+            : [];
           if (usable.length) record.aliases = usable;
           else delete record.aliases;
         }

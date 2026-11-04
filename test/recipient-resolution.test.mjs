@@ -129,10 +129,10 @@ test("aliases: at most 10, 1-40 characters, no address, and one person per alias
   });
 });
 
-test("set_contact with only aliases counts as a change, and aliases cannot ride along with unmerge", async () => {
+test("set_contact with only aliases counts as a change, and tags and notes cannot ride along with unmerge", async () => {
   await withServer(async ({ call, raw }) => {
     await person(call, "a@example.com", { mergeWith: "b@example.com" });
-    const result = await raw("set_contact", { address: "b@example.com", unmerge: true, aliases: ["B"] });
+    const result = await raw("set_contact", { address: "b@example.com", unmerge: true, notes: "B" });
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /unmerge is done on its own/);
     const none = await raw("set_contact", { address: "a@example.com" });
@@ -493,4 +493,150 @@ test("a malformed recipient from a mail header is data: one clean short line, in
     assert.ok(long.content[0].text.length < 1500);
     assert.doesNotMatch(long.content[0].text, /y{120}/);
   });
+});
+
+// What a forged or hostile message can put in the index: an owner address in From, bidi characters in a header address,
+// a Spam message that is also in a label folder.
+const SPOOF_MAILS = () => [
+  email(2, "INBOX", { address: "owner@example.com", name: "Owner" }, { address: "piotr.kowal@firma.pi", name: "Piotr Kowal" }, "forged", "2026-11-01T10:00:00Z"),
+  email(3, "INBOX", { address: "Owner@Example.com" }, { address: "ceo@corp.co‮m", name: "CEO‮" }, "forged", "2026-11-01T10:00:00Z"),
+  { ...email(4, "Spam", { address: "zofia.lis@bank.pi", name: "Zofia" }, OWNER, "Win", "2026-11-01T10:00:00Z"), messageId: "<dup@x>" },
+  { ...email(5, "Labels/x", { address: "zofia.lis@bank.pi", name: "Zofia" }, OWNER, "Win", "2026-11-01T10:00:00Z"), messageId: "<dup@x>" },
+];
+
+async function seedSpoof(bundle) {
+  const folder = (path, specialUse) => ({ path, name: path, delimiter: "/", specialUse, listed: true, subscribed: true, flags: [], messages: 0, unseen: 0 });
+  await bundle.localIndexService.recordSnapshot({
+    syncedAt: new Date().toISOString(),
+    folders: [folder("INBOX", "\\Inbox"), folder("Sent", "\\Sent"), folder("Spam", "\\Junk"), folder("Labels/x")],
+    folderListComplete: true,
+    folderStats: [{ folder: "INBOX", fetched: 2, total: 2 }, { folder: "Spam", fetched: 1, total: 1 }, { folder: "Labels/x", fetched: 1, total: 1 }],
+    emails: SPOOF_MAILS(),
+  });
+}
+
+test("a forged From: owner in the INBOX does not make an address 'written to'", async () => {
+  await withServer(async ({ call, accountManager }) => {
+    await seedSpoof(accountManager.primary());
+    const all = async (query) => (await call("resolve_recipient", { query })).candidates;
+    // The stranger the forged mail names is only seen: never exact, and the unknown valid address is not corrected to it.
+    const typed = await all("piotr.kowal@firma.pi");
+    assert.equal(typed[0].confidence, "possible");
+    assert.deepEqual(await all("piotr.kowal@firma.pl"), []);
+    for (const candidate of await all("piotr.kowal@@firma.pi")) assert.equal(candidate.confidence, "possible");
+    // The same address in a message that really is in the Sent folder counts.
+    await seed(accountManager.primary(), [email(9, "Sent", OWNER, { address: "real.person@firma.pi" }, "Hi", "2026-11-01T10:00:00Z")]);
+    assert.equal((await all("real.person@firma.pi"))[0].confidence, "exact");
+  });
+});
+
+test("a Spam message that is also in a label folder never counts", async () => {
+  await withServer(async ({ call, accountManager }) => {
+    await seedSpoof(accountManager.primary());
+    assert.deepEqual((await call("resolve_recipient", { query: "zofia.lis@@bank.pi" })).candidates, []);
+    assert.deepEqual((await call("resolve_recipient", { query: "zofia.lis@bank.pi" })).candidates, []);
+  });
+});
+
+test("an address with control, bidi or invisible characters never appears in a result or a hint", async () => {
+  await withServer(async ({ call, raw, accountManager }) => {
+    await seedSpoof(accountManager.primary());
+    await seed(accountManager.primary(), [email(8, "Sent", OWNER, { address: "ceo@corp.co‮m", name: "CEO" }, "Hi", "2026-11-01T10:00:00Z")]);
+    const hidden = (text) => [...text].some((ch) => { const c = ch.codePointAt(0); return (c < 32 && ![9, 10, 13].includes(c)) || (c >= 0x7f && c <= 0x9f) || (c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2060 && c <= 0x206f) || c === 0xfeff; });
+    for (const query of ["ceo@corp.com", "ceo@corp.co‮m", "ceo@@corp.com"]) {
+      const text = JSON.stringify((await call("resolve_recipient", { query })));
+      assert.equal(hidden(text), false, query);
+    }
+    const hint = await raw("create_draft", { to: "ceo@@corp.com", subject: "x", body: "y" });
+    assert.equal(hint.isError, true);
+    assert.equal(hidden(hint.content[0].text), false);
+    // A store address with such a character is left out too, by name.
+    await person(call, "good@corp.example", { displayName: "Gus Hidden", mergeWith: "bad@corp.ex‮ample" });
+    const named = JSON.stringify(await call("resolve_recipient", { query: "Gus Hidden" }));
+    assert.equal(hidden(named), false);
+    assert.match(named, /good@corp\.example/);
+  });
+});
+
+test("unmerging leaves no name or aliases behind on the remaining person unless the same call says so", async () => {
+  await withServer(async ({ call, raw }) => {
+    await boss(call);
+    await person(call, "attacker@evil.example", { mergeWith: "boss@company.example" });
+    // The attack: split the real address out and the attacker's address is left holding "Boss".
+    const refused = await raw("set_contact", { address: "boss@company.example", unmerge: true });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /attacker@evil\.example/);
+    assert.match(refused.content[0].text, /Boss Person/);
+    assert.match(refused.content[0].text, /pass displayName and aliases/);
+    assert.equal((await call("resolve_recipient", { query: "Boss" })).candidates[0].addresses.length, 2, "nothing was split");
+    // Only one of the two is not enough.
+    const half = await raw("set_contact", { address: "boss@company.example", unmerge: true, displayName: null });
+    assert.equal(half.isError, true);
+    // Clearing both in the same call splits them; the attacker's address is anonymous.
+    const done = await call("set_contact", { address: "boss@company.example", unmerge: true, displayName: null, aliases: [] });
+    assert.equal(done.splitFrom, null);
+    assert.deepEqual((await call("resolve_recipient", { query: "Boss" })).candidates, []);
+  });
+});
+
+test("undoing a merge the right way round keeps the name when the call restates it", async () => {
+  await withServer(async ({ call }) => {
+    await boss(call);
+    await person(call, "attacker@evil.example", { mergeWith: "boss@company.example" });
+    const done = await call("set_contact", { address: "attacker@evil.example", unmerge: true, displayName: "Boss Person", aliases: ["Boss", "Szef"] });
+    assert.deepEqual(done.splitFrom.addresses, ["boss@company.example"]);
+    const found = await call("resolve_recipient", { query: "Boss" });
+    assert.equal(found.candidates[0].address, "boss@company.example");
+    assert.equal(found.candidates[0].needsAddressChoice, undefined);
+  });
+});
+
+test("a display name equal to another person's alias is refused, naming that person", async () => {
+  await withServer(async ({ call, raw }) => {
+    await person(call, "a@company.example", { aliases: ["Szefowa"] });
+    const refused = await raw("set_contact", { address: "b@company.example", displayName: "SZEFOWA" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /is an alias of a@company\.example/);
+    // The person's own alias is fine as their name.
+    assert.ok(!(await raw("set_contact", { address: "a@company.example", displayName: "Szefowa" })).isError);
+    assert.equal((await call("resolve_recipient", { query: "Szefowa" })).candidates.length, 1);
+  });
+});
+
+test("a hand-edited store: control and bidi characters in names and aliases are cleaned on load", async () => {
+  await withServer(
+    async ({ call }) => {
+      const found = await call("resolve_recipient", { query: "Okevil" });
+      assert.equal(found.candidates[0].name, "Nm");
+      assert.deepEqual(found.candidates[0].aliases, ["Okevil", "Line Two"]);
+      assert.doesNotMatch(JSON.stringify(found), /[\u0000-\u001f\u007f-\u009f‪-‮]/u);
+    },
+    {
+      before: async (dir) => {
+        const record = { id: "A", addresses: ["a@example.com"], displayName: "Nm\u0007‮", aliases: ["Ok‮evil", "Line\nTwo", "‮"], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" };
+        await writeFile(join(dir, "contacts.json"), JSON.stringify({ version: 1, items: { A: record } }));
+      },
+    },
+  );
+});
+
+test("with two accounts a hint never offers the other account's addresses", async () => {
+  await withServer(
+    async ({ call, raw }) => {
+      await call("set_contact", { address: "maciek@owner.example", displayName: "Maciej Domowy", aliases: ["Maciek"] });
+      await call("set_contact", { account: "work", address: "maciek@work.example", displayName: "Maciej Praca", aliases: ["Maciek"] });
+      const fromWork = await raw("create_draft", { to: "Maciek", from: "work@example.org", subject: "x", body: "y" });
+      assert.match(fromWork.content[0].text, /maciek@work\.example/);
+      assert.doesNotMatch(fromWork.content[0].text, /owner\.example/);
+      const primary = await raw("create_draft", { to: "Maciek", subject: "x", body: "y" });
+      assert.match(primary.content[0].text, /maciek@owner\.example/);
+      assert.doesNotMatch(primary.content[0].text, /work\.example/);
+      const named = await raw("create_draft", { account: "work", to: "Maciek", subject: "x", body: "y" });
+      assert.doesNotMatch(named.content[0].text, /owner\.example/);
+      // The tool, without `account`, asks both and labels each candidate.
+      const both = await call("resolve_recipient", { query: "Maciek" });
+      assert.deepEqual(new Set(both.candidates.map((candidate) => candidate.account)), new Set(["owner@example.com", "work@example.org"]));
+    },
+    { accounts: 2 },
+  );
 });

@@ -43,7 +43,23 @@ const HINT_SUGGESTIONS = 3;
 const QUERY_SHOWN = 80;
 const RANK: Record<Confidence, number> = { exact: 0, likely: 1, possible: 2 };
 // Mail in these folders is not what the user chose to write to or hear from: it never counts as a known address.
-const IGNORED_ROLES = new Set(["spam", "trash"]);
+const IGNORED_ROLES = new Set(["spam", "trash", "junk"]);
+
+// An address that can appear in a result: plain ASCII and a valid address, so no control, bidi or invisible character
+// (a header or a store file can carry any text) can reach the output through it.
+const usable = (addresses: string[]) => addresses.filter((address) => isValidEmail(address));
+
+// A message counts as Spam or Trash when any folder it is in is one, not only the folder the index lists it under.
+function inIgnoredFolder(message: { mailboxRole: string; locations: Array<{ folder: string; specialUse?: string }> }): boolean {
+  if (IGNORED_ROLES.has(message.mailboxRole)) return true;
+  return message.locations.some((location) => location.specialUse === "\\Junk" || location.specialUse === "\\Trash" || (!location.specialUse && IGNORED_ROLES.has(location.folder.toLowerCase())));
+}
+
+// Written to means: the message is in the Sent folder. A From header says nothing (anyone can put the user's address
+// in one), so mail in the INBOX or anywhere else never makes its recipients "written to".
+function inSentFolder(message: { mailboxRole: string; locations: Array<{ folder: string; specialUse?: string }> }): boolean {
+  return message.mailboxRole === "sent" || message.locations.some((location) => location.specialUse === "\\Sent");
+}
 
 function fromNameMatch(kind: NameMatchKind, field: "displayName" | "alias"): { confidence: Confidence; matchedBy: MatchedBy; score: number } {
   switch (kind) {
@@ -72,11 +88,11 @@ async function indexedAddresses(bundle: AccountBundle): Promise<Map<string, Know
   const isOwn = (address: string) => bundle.ownAddresses.some((own) => isSelfAddress(address, own));
   const messages = await bundle.localIndexService.listRecentMessages(INDEX_SCAN_LIMIT);
   for (const message of messages) {
-    if (IGNORED_ROLES.has(message.mailboxRole)) continue;
-    const written = message.mailboxRole !== "drafts" && message.from.some((entry) => isOwn(lowerAscii((entry.address ?? "").trim())));
+    if (inIgnoredFolder(message)) continue;
+    const written = inSentFolder(message);
     for (const entry of [...message.from, ...message.to, ...message.cc, ...message.bcc]) {
       const address = lowerAscii((entry.address ?? "").trim());
-      if (!address?.includes("@") || isOwn(address)) continue;
+      if (!isValidEmail(address) || isOwn(address)) continue;
       const name = cleanContactText(entry.name ?? "", CONTACT_NAME_MAX).replace(/^["']+|["']+$/g, "").trim();
       const headerName = name && !normalizeContactAddress(name) ? name : undefined;
       const sentTo = written && !message.from.some((from) => lowerAscii((from.address ?? "").trim()) === address);
@@ -119,13 +135,13 @@ export async function resolveInAccount(bundle: AccountBundle, query: string, ctx
   if (query.includes("@")) {
     const wanted = lowerAscii(query.trim().replace(/^mailto:/i, "").replace(/^<|>$/g, "").trim());
     const byAddress = new Map<string, ContactRecord>();
-    for (const record of records) for (const address of record.addresses) byAddress.set(address, record);
+    for (const record of records) for (const address of usable(record.addresses)) byAddress.set(address, record);
     const known = new Map<string, KnownAddress>();
     for (const address of byAddress.keys()) known.set(address, { trust: "store" });
     if (options.useIndex) for (const [address, entry] of await indexedAddresses(bundle)) if (!known.has(address)) known.set(address, entry);
     const person = (address: string, entry: KnownAddress) => {
       const record = byAddress.get(address);
-      return { addresses: record ? record.addresses : [address], ...describe(record, entry.name) };
+      return { addresses: record ? usable(record.addresses) : [address], ...describe(record, entry.name) };
     };
     const hit = known.get(wanted);
     if (hit) {
@@ -152,6 +168,8 @@ export async function resolveInAccount(bundle: AccountBundle, query: string, ctx
     }
   } else {
     for (const record of records) {
+      const addresses = usable(record.addresses);
+      if (!addresses.length) continue;
       const fields: Array<{ text: string; field: "displayName" | "alias" }> = [
         ...(record.displayName ? [{ text: record.displayName, field: "displayName" as const }] : []),
         ...(record.aliases ?? []).map((text) => ({ text, field: "alias" as const })),
@@ -161,15 +179,15 @@ export async function resolveInAccount(bundle: AccountBundle, query: string, ctx
         if (!kind) continue;
         const scored = fromNameMatch(kind, field);
         // Several addresses (merged people): the name does not say which one is meant, so none is offered as the answer.
-        const several = record.addresses.length > 1;
+        const several = addresses.length > 1;
         consider(record.id, {
           score: scored.score,
           candidate: {
             confidence: scored.confidence,
             matchedBy: scored.matchedBy,
             matchedText: text,
-            ...(several ? { needsAddressChoice: true as const } : { address: record.addresses[0] }),
-            addresses: record.addresses,
+            ...(several ? { needsAddressChoice: true as const } : { address: addresses[0] }),
+            addresses,
             ...describe(record),
           },
         });
