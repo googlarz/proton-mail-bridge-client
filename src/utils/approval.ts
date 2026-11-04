@@ -70,21 +70,29 @@ function storedName(person: PersonView | undefined): string {
 function importRowText(row: ImportRow): string {
   const left = [
     row.nameLeftOut ? `name left out because it is an alias of another person: ${quoted(row.nameLeftOut, CONTACT_NAME_MAX)}` : "",
-    row.addressesLeftOut.length ? `addresses not attached because they belong to another person: ${listed(row.addressesLeftOut, 3)}` : "",
+    row.addressesLeftOut.length ? `addresses not attached because they belong to another person: ${listed(row.addressesLeftOut, 3, ADDRESS_WIDTH)}` : "",
   ].filter(Boolean);
-  return `${personText(row.person, "nothing is stored for this card", 3)} - ${row.status}${left.length ? `; ${left.join("; ")}` : ""}`;
+  return `${personText(row.person, "nothing is stored for this card", true)} - ${row.status}${left.length ? `; ${left.join("; ")}` : ""}`;
 }
 
 const SHOWN_ADDRESSES = 5;
+/** The longest an address can be (RFC 5321), shown in full: an address cut short is not the address that will be used. */
+const ADDRESS_WIDTH = 254;
+const MAX_SHOWN_TAGS = 20;
 
-/** A person as the store would hold them after the call. At most `maxAddresses` addresses are listed (and 5 tags), the rest counted. */
-function personText(person: PersonView | undefined, absent: string, maxAddresses = SHOWN_ADDRESSES): string {
+/**
+ * A person as the store would hold them after the call. In an effect line every alias and tag is listed (the store allows 10
+ * and 20) and up to 5 addresses in full, the rest counted; in an import row (`compact`) 3 of each.
+ */
+function personText(person: PersonView | undefined, absent: string, compact = false): string {
   if (!person) return absent;
-  return `name ${storedName(person)}, aliases ${person.aliases.length ? listed(person.aliases, maxAddresses === SHOWN_ADDRESSES ? person.aliases.length : 3) : "none"}, tags ${person.tags.length ? listed(person.tags, 5) : "none"}, addresses ${listed(person.addresses, maxAddresses)}`;
+  const aliases = person.aliases.length ? listed(person.aliases, compact ? 3 : person.aliases.length) : "none";
+  const tags = person.tags.length ? listed(person.tags, compact ? 3 : MAX_SHOWN_TAGS) : "none";
+  return `name ${storedName(person)}, aliases ${aliases}, tags ${tags}, addresses ${listed(person.addresses, compact ? 3 : SHOWN_ADDRESSES, ADDRESS_WIDTH)}`;
 }
 
-function listed(values: string[], max = 5): string {
-  const shown = values.slice(0, max).map((value) => quoted(value, 80));
+function listed(values: string[], max = 5, width = 80): string {
+  const shown = values.slice(0, max).map((value) => quoted(value, width));
   return shown.join(", ") + (values.length > max ? ` and ${values.length - max} more` : "");
 }
 
@@ -200,7 +208,7 @@ const MAX_LONG_MESSAGE_CHARS = 2500;
 // A contact question puts what the call does first and the people it started from last, so that a cut only ever takes the
 // tail; an import lists up to 20 cards after its summary and may still be cut in the rows (the summary, the effect and the
 // "More" line come before them).
-const MAX_CONTACT_MESSAGE_CHARS = 4000;
+const MAX_CONTACT_MESSAGE_CHARS = 6000;
 const MAX_IMPORT_MESSAGE_CHARS = 5000;
 
 function whenText(when: unknown): string {
@@ -421,15 +429,19 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       break;
     }
     case "set_contact": {
-      add("Address", quoted(args.address, 80));
+      add("Address", quoted(args.address, ADDRESS_WIDTH));
       for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
-      if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, 80));
+      if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, ADDRESS_WIDTH));
+      // The notes are typed text: before the part that can run long, so a length cut never takes them.
+      if (args.notes !== undefined) add("Notes", args.notes === null || args.notes === "" ? "cleared" : quoted(args.notes, 80));
       // Everything below is what the contact store itself says it would store: the same code as the call, run on a copy.
       const preview: ContactPreview | undefined = await within(() => lookups.contactPreview(args));
       bound = { kind: "contact", digest: preview && !preview.refused ? contactPreviewDigest(preview) : undefined };
       const unmerge = normalizeBoolean(args.unmerge, false);
       if (!preview) {
-        add("Effect", "unknown (the contact store could not be read); the call is refused unless the store is as it will be read then");
+        // Not asked: a yes to something that cannot be shown could never be bound to what is stored, and the call would only fail afterwards.
+        refused = "what this call would store could not be worked out (the contact store could not be read, or it is locked by another process), so there is nothing to show you and nothing was changed.";
+        add("Effect", "unknown (the contact store could not be read)");
         // What was typed, as given: all there is to show.
         if (args.displayName !== undefined) add("Display name given", args.displayName === null ? "null (clear it)" : quoted(args.displayName, CONTACT_NAME_MAX));
         if (Array.isArray(args.aliases)) add("Aliases given", args.aliases.length ? listed(strings(args.aliases), args.aliases.length) : "[] (clear them)");
@@ -451,12 +463,12 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         // The effect first (it must never be what a length cut takes away), the people it started from last.
         const merging = typeof args.mergeWith === "string" && args.mergeWith.trim() !== "";
         if (merging) {
-          add("Primary address after the merge", holder?.addresses[0] ? quoted(holder.addresses[0], 80) : "none");
+          add("Primary address after the merge", holder?.addresses[0] ? quoted(holder.addresses[0], ADDRESS_WIDTH) : "none");
           add("Name after the merge", storedName(holder));
         }
         if (unmerge) {
           add("Unmerge", "yes");
-          add("Split out", quoted(preview.target ?? args.address, 80));
+          add("Split out", quoted(preview.target ?? args.address, ADDRESS_WIDTH));
           add("Stays behind", personText(preview.after.splitFrom, "no one: nothing is left to store for the remaining address"));
         } else {
           add("After the call", personText(preview.after.contact, "nothing is stored for this address any more"));
@@ -466,7 +478,6 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
           add("Person of mergeWith", personText(preview.before.mergeWith, "nothing stored yet"));
         }
       }
-      if (args.notes !== undefined) add("Notes", args.notes === null || args.notes === "" ? "cleared" : quoted(args.notes, 80));
       break;
     }
     case "import_contacts": {
@@ -474,12 +485,23 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       const file = path ? await within(() => lookups.vcard(path, args)) : undefined;
       bound = { kind: "vcard", digest: file?.digest, store: file ? importPreviewDigest(file) : undefined };
       add("File", quoted(basename(path), 80)); add("Cards", file ? String(file.cards) : "unknown (the file could not be read)");
-      if (file) {
+      if (!file) {
+        // As for set_contact: nothing to show, nothing to bind a yes to.
+        refused = "the file could not be read, or what it would add to the contacts could not be worked out, so there is nothing to show you and nothing was imported.";
+      } else {
         add("Effect", `adds ${file.outcome.added} people, adds to ${file.outcome.updated} existing ones, leaves ${file.outcome.unchanged} cards as they are`);
-        // The "More" line comes before the rows: a cut in a long list takes rows, never the summary.
-        if (file.total > file.rows.length) add("More", `and ${file.total - file.rows.length} more cards after the first ${file.rows.length}`);
+        // The rows that fit under the cap are listed and counted; the "More" line, before them, counts the rest of the cards.
+        const rows = file.rows.map((row, index) => `Person ${index + 1}: ${importRowText(row)}`);
+        let room = MAX_IMPORT_MESSAGE_CHARS - lines.join("\n").length - 120;
+        let shown = 0;
+        for (const row of rows) {
+          if (room < row.length + 1) break;
+          room -= row.length + 1;
+          shown += 1;
+        }
+        if (file.total > shown) add("More", `and ${file.total - shown} more cards after the first ${shown}`);
         // The first people as the store would hold them after the import (from the contact service's own dry run).
-        for (const [index, row] of file.rows.entries()) add(`Person ${index + 1}`, importRowText(row));
+        lines.push(...rows.slice(0, shown));
       }
       break;
     }

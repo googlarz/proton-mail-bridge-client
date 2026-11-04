@@ -127,10 +127,16 @@ test("needsApproval: an import and a set_contact that sets aliases, a name or a 
 
 test("import_contacts: a file that cannot be read is said so, not left out", async () => {
   await withServer(async ({ call, asked, dir }) => {
-    await call("import_contacts", { path: join(dir, "missing.vcf") });
-    assert.equal(line(asked[0], "File"), 'File: "missing.vcf"');
-    assert.match(line(asked[0], "Cards"), /^Cards: unknown/);
+    const result = await call("import_contacts", { path: join(dir, "missing.vcf") });
+    // Nothing to show means nothing to ask: refused, with the reason, and no question.
+    assert.equal(asked.length, 0);
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /would be refused, so the user was not asked: the file could not be read/);
   });
+  const { buildApprovalMessage } = await import("../dist/utils/approval.js");
+  const question = await buildApprovalMessage("import_contacts", { path: "/x/missing.vcf" }, { account: () => "owner@example.com", vcard: async () => { throw new Error("gone"); } });
+  assert.equal(line(question, "File"), 'File: "missing.vcf"');
+  assert.match(line(question, "Cards"), /^Cards: unknown/);
 });
 
 test("import_contacts: a file rewritten after the question is not imported", async () => {
@@ -443,8 +449,83 @@ test("an import question with long rows keeps its summary, effect and More line,
     const question = asked[0];
     assert.ok(question.length <= 5000);
     assert.match(line(question, "Effect"), /adds 30 people/);
-    assert.equal(line(question, "More"), "More: and 10 more cards after the first 20");
+    // The rows that fit are listed and the More line counts the rest by what is really shown.
+    const shown = question.split("\n").filter((entry) => /^Person \d+: /.test(entry)).length;
+    assert.ok(shown > 0 && shown <= 20);
+    assert.equal(line(question, "More"), `More: and ${30 - shown} more cards after the first ${shown}`);
     assert.ok(question.indexOf("Effect: ") < question.indexOf("More: ") && question.indexOf("More: ") < question.indexOf("Person 1: "));
     assert.match(line(question, "Person 1"), /addresses "[^"]+", "[^"]+", "[^"]+" and 7 more - new person$/, "three addresses per row, the rest counted");
   }, { answer: "accept" });
+});
+
+test("a question shows addresses in full (up to 254 characters), and every tag a merge carries over", async () => {
+  await withServer(async ({ call, asked }) => {
+    const long = `boss@${"a".repeat(60)}.${"b".repeat(60)}.${"c".repeat(60)}.evil.example`;
+    assert.ok(long.length > 80 && long.length < 254);
+    await call("set_contact", { address: "boss@company.example", addTags: ["t1", "t2", "t3", "t4", "t5"], notes: "x" });
+    await call("set_contact", { address: long, addTags: ["vip"], notes: "y" });
+    await call("set_contact", { address: "boss@company.example", mergeWith: long });
+    const question = asked.at(-1);
+    assert.ok(question.includes(`"${long}"`), "the long address appears whole");
+    assert.equal(line(question, "Merge with"), `Merge with: "${long}"`);
+    assert.match(line(question, "After the call"), /tags "t1", "t2", "t3", "t4", "t5", "vip", addresses/, "the carried-over vip tag is in the effect line");
+  }, { answer: "accept" });
+});
+
+test("the notes are shown before the people a merge started from, so a long merge cannot cut them", async () => {
+  await withServer(async ({ call, asked }) => {
+    const addr = (p, i) => `${p}${i}@${"d".repeat(60)}.${"e".repeat(30)}.example`;
+    const make = async (p, name) => {
+      for (let index = 1; index < 6; index += 1) await call("set_contact", { address: addr(p, 0), mergeWith: addr(p, index) });
+      await call("set_contact", {
+        address: addr(p, 0),
+        displayName: name + "N".repeat(90),
+        aliases: Array.from({ length: 10 }, (_, index) => `${p}${"q".repeat(36)}${index}`),
+        addTags: Array.from({ length: 8 }, (_, index) => `${p}tag${"z".repeat(25)}${index}`),
+      });
+    };
+    await make("a", "Alpha");
+    await make("b", "Beta");
+    const result = await call("set_contact", { address: addr("a", 0), mergeWith: addr("b", 0), aliases: [], notes: "IMPORTANT-NOTE" });
+    assert.ok(!result.isError, result.content[0].text);
+    const question = asked.at(-1);
+    assert.match(line(question, "Notes"), /IMPORTANT-NOTE/);
+    assert.ok(question.indexOf("Notes: ") < question.indexOf("Person of address: "), "notes come before the people the merge started from");
+    assert.match(line(question, "After the call"), /tags .*addresses/);
+  }, { answer: "accept" });
+});
+
+test("an import's More line counts the rows really shown", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const card = (name, emails) => `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\n${emails.map((email) => `EMAIL:${email}\r\n`).join("")}END:VCARD\r\n`;
+    const long = (i, j) => `p${i}x${j}@${"d".repeat(60)}.example`;
+    let text = "";
+    for (let index = 0; index < 25; index += 1) text += card(`Person ${index} ${"L".repeat(85)}`, [long(index, 0), long(index, 1), long(index, 2)]);
+    const path = join(dir, "c.vcf");
+    await writeFile(path, text);
+    await call("import_contacts", { path });
+    const question = asked[0];
+    const shown = question.split("\n").filter((entry) => /^Person \d+: /.test(entry)).length;
+    assert.ok(shown < 20, "long rows: fewer than 20 fit");
+    assert.equal(line(question, "More"), `More: and ${25 - shown} more cards after the first ${shown}`);
+    assert.ok(question.length <= 5000);
+  }, { answer: "accept" });
+});
+
+test("when what a call would store cannot be worked out, it is refused without a question and with honest wording", async () => {
+  // The contact store held by another process (the lookup times out) is the reviewer's case; here the lookup fails.
+  const { applyApprovalPolicy } = await import("../dist/utils/approval.js");
+  let asked = 0;
+  const server = { getClientCapabilities: () => ({ elicitation: {} }), elicitInput: async () => { asked += 1; return { action: "accept" }; } };
+  const args = { address: "a@example.com", displayName: "Ann" };
+  await assert.rejects(
+    applyApprovalPolicy({ mode: "elicit", server, name: "set_contact", args, declared: new Set(["address", "displayName"]), lookups: { account: () => "owner@example.com", contactPreview: async () => { throw new Error("locked"); } } }),
+    (error) => {
+      assert.match(error.message, /set_contact would be refused, so the user was not asked: what this call would store could not be worked out/);
+      assert.doesNotMatch(error.message, /unless the store is as it will be read then/);
+      return true;
+    },
+  );
+  assert.equal(asked, 0);
+  assert.equal(args.confirmed, undefined);
 });

@@ -361,8 +361,10 @@ test("approval: the question for a reply shows the address the reply will really
 test("approval: the question for set_contact / import_contacts says what is being changed", async () => {
   await withServer({ approval: "require", answer: "decline" }, async ({ call, asked }) => {
     await call("set_contact", { address: "victim@example.com", addTags: ["vip"] });
-    await call("import_contacts", { vcard: "BEGIN:VCARD\nFN:A\nEMAIL:a@example.com\nEND:VCARD" });
-    assert.equal(asked.length, 2);
+    // An import whose file cannot be read has nothing to show: it is refused without a question.
+    const unreadable = await call("import_contacts", { vcard: "BEGIN:VCARD\nFN:A\nEMAIL:a@example.com\nEND:VCARD" });
+    assert.equal(unreadable.isError, true);
+    assert.equal(asked.length, 1);
     for (const message of asked) assert.match(message, /victim@example\.com|a@example\.com|vcard|contact/i, message);
   });
 });
