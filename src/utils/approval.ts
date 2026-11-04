@@ -210,7 +210,7 @@ const MAX_LONG_MESSAGE_CHARS = 2500;
 // A contact question puts what the call does first and the people it started from last, so that a cut only ever takes the
 // tail; an import lists up to 20 cards after its summary and may still be cut in the rows (the summary, the effect and the
 // "More" line come before them).
-const MAX_CONTACT_MESSAGE_CHARS = 6000;
+const MAX_CONTACT_MESSAGE_CHARS = 7000;
 const MAX_IMPORT_MESSAGE_CHARS = 5000;
 
 function whenText(when: unknown): string {
@@ -434,15 +434,18 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       add("Address", quoted(args.address, ADDRESS_WIDTH));
       for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
       if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, ADDRESS_WIDTH));
-      // The notes are typed text: before the part that can run long, so a length cut never takes them.
-      if (args.notes !== undefined) {
-        const notes = args.notes === null || args.notes === "" ? undefined : String(args.notes);
-        add("Notes", notes === undefined ? "cleared" : `${quoted(notes, NOTES_SHOWN)}${[...notes].length > NOTES_SHOWN ? ` (shown cut at ${NOTES_SHOWN} of ${[...notes].length} characters; the whole text is stored, up to 2000)` : ""}`);
-      }
       // Everything below is what the contact store itself says it would store: the same code as the call, run on a copy.
       const preview: ContactPreview | undefined = await within(() => lookups.contactPreview(args));
       bound = { kind: "contact", digest: preview && !preview.refused ? contactPreviewDigest(preview) : undefined };
       const unmerge = normalizeBoolean(args.unmerge, false);
+      // The notes are typed text with a length of their own: after the effect lines (which are never cut) and before the people the call started from.
+      let notesAdded = false;
+      const addNotes = () => {
+        if (notesAdded || args.notes === undefined) return;
+        notesAdded = true;
+        const notes = args.notes === null || args.notes === "" ? undefined : String(args.notes);
+        add("Notes", notes === undefined ? "cleared" : `${quoted(notes, NOTES_SHOWN)}${[...notes].length > NOTES_SHOWN ? ` (shown cut at ${NOTES_SHOWN} of ${[...notes].length} characters; the whole text is stored, up to 2000)` : ""}`);
+      };
       if (!preview) {
         // Not asked: a yes to something that cannot be shown could never be bound to what is stored, and the call would only fail afterwards.
         refused = "what this call would store could not be worked out (the contact store could not be read, or it is locked by another process), so there is nothing to show you and nothing was changed.";
@@ -478,11 +481,13 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         } else {
           add("After the call", personText(preview.after.contact, "nothing is stored for this address any more"));
         }
+        addNotes();
         if (merging) {
           add("Person of address", personText(preview.before.address, "nothing stored yet"));
           add("Person of mergeWith", personText(preview.before.mergeWith, "nothing stored yet"));
         }
       }
+      addNotes();
       break;
     }
     case "import_contacts": {

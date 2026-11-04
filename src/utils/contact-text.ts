@@ -11,13 +11,18 @@ export function wellFormed(value: string): string {
   return value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
 }
 
+/** The first `max` UTF-16 units of `text` without a cut-through surrogate pair at the end (a half of an emoji is not text). Cleaning what it returns changes nothing. */
+export function cutText(text: string, max: number): string {
+  return text.slice(0, max).replace(/[\uD800-\uDBFF]$/, "");
+}
+
 /** Without control, bidi and zero-width characters, whitespace collapsed (newlines kept only when asked), at most `max` characters. */
 export function cleanContactText(value: string, max: number, keepNewlines = false): string {
   const text = wellFormed(value).replace(/\r\n?/g, "\n").replace(INVISIBLE, "");
   const cleaned = keepNewlines
     ? text.split("\n").map((line) => line.replace(CONTROL, " ").replace(/\s+/g, " ").trim()).join("\n").replace(/\n{3,}/g, "\n\n").trim()
     : text.replace(CONTROL, " ").replace(/\s+/g, " ").trim();
-  return cleaned.slice(0, max).trim();
+  return cutText(cleaned, max).trim();
 }
 
 /** Lowercases ASCII letters only: toLowerCase() would turn the Kelvin sign (U+212A) into "k" and make two different addresses one. */

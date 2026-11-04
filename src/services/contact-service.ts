@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import type { ProtonMailConfig } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import { writeFileAtomic } from "../utils/atomic-write.js";
-import { cleanContactText, foldText, normalizeContactAddress } from "../utils/contact-text.js";
+import { cleanContactText, cutText, foldText, normalizeContactAddress } from "../utils/contact-text.js";
 import { isFileNotFound, setAsideCorruptStore } from "../utils/corrupt-store.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { InvalidArgumentError } from "../utils/helpers.js";
@@ -253,12 +253,15 @@ function applyPatch(store: ContactFile, address: string, patch: ContactPatch, no
   const record: ContactRecord = existing ?? { id: randomUUID(), addresses: [target], createdAt: now, updatedAt: now };
   // Names that came from an imported file and are part of this call: the person's own and the one of the person merged in.
   const imported = new Set(importedNamesOf(existing));
+  let didMerge = false;
+  const tagsBefore = existing?.tags?.length ?? 0;
   if (mergeWith && !record.addresses.includes(mergeWith)) {
     const other = recordOf(store, mergeWith);
     const addresses = [...new Set([...record.addresses, ...(other?.addresses ?? [mergeWith])])];
     if (addresses.length > MAX_ADDRESSES) throw new InvalidArgumentError(`A person can have at most ${MAX_ADDRESSES} addresses.`);
     record.addresses = addresses;
     if (other) {
+      didMerge = true;
       for (const name of importedNamesOf(other)) imported.add(name);
       if (!record.displayName && other.displayName) {
         record.displayName = other.displayName;
@@ -276,7 +279,7 @@ function applyPatch(store: ContactFile, address: string, patch: ContactPatch, no
       }
       if (merged.length) record.aliases = merged.slice(0, MAX_ALIASES);
       const notes = [record.notes, other.notes].filter(Boolean).join("\n\n");
-      if (notes) record.notes = notes.slice(0, CONTACT_NOTES_MAX);
+      if (notes) record.notes = cutText(notes, CONTACT_NOTES_MAX);
       delete store.items[other.id];
     }
   }
@@ -297,7 +300,8 @@ function applyPatch(store: ContactFile, address: string, patch: ContactPatch, no
     if (tags.length) record.tags = tags;
     else delete record.tags;
   }
-  if ((record.tags?.length ?? 0) > MAX_TAGS) {
+  // Only a merge can push a person over the limit here; a person already over it (a hand-edited store) is left alone by other edits.
+  if (didMerge && (record.tags?.length ?? 0) > MAX_TAGS && (record.tags?.length ?? 0) > tagsBefore) {
     const overflow = (record.tags ?? []).slice(MAX_TAGS).map((tag) => `"${tag}"`).join(", ");
     throw new InvalidArgumentError(`Merging would give this person ${record.tags?.length} tags and at most ${MAX_TAGS} are allowed; ${overflow} would not fit. Remove tags from one of them first (or pass removeTags in this call).`);
   }

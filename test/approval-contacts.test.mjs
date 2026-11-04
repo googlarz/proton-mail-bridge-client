@@ -603,3 +603,75 @@ test("the notes are shown up to 500 characters, and the question says when they 
     assert.equal(line(asked.at(-1), "Notes"), 'Notes: "short note"');
   }, { answer: "accept" });
 });
+
+test("the worst-case merge question keeps its whole effect line, with the notes after it", async () => {
+  await withServer(async ({ call, asked }) => {
+    const A = (prefix, index) => `${prefix}${String(index).padStart(2, "0")}${"x".repeat(254 - 3 - 10)}@a.example`;
+    assert.equal(A("a", 1).length, 254);
+    const tags = Array.from({ length: 10 }, (_, index) => `t${index}`.padEnd(32, "z"));
+    const tagsB = Array.from({ length: 10 }, (_, index) => `u${index}`.padEnd(32, "z"));
+    for (const prefix of ["a", "b"]) for (let index = 1; index < 25; index += 1) {
+      const result = await call("set_contact", { address: A(prefix, 0), mergeWith: A(prefix, index) });
+      assert.ok(!result.isError, result.content[0].text);
+    }
+    await call("set_contact", { address: A("a", 0), addTags: tags });
+    await call("set_contact", { address: A("b", 0), addTags: tagsB });
+    const aliases = Array.from({ length: 10 }, (_, index) => '"'.repeat(39) + index);
+    const result = await call("set_contact", {
+      address: A("a", 0), mergeWith: A("b", 0), displayName: '"'.repeat(99) + "N", aliases, addTags: tags,
+      removeTags: Array.from({ length: 20 }, (_, index) => `r${index}`.padEnd(32, "q")), notes: "n".repeat(500),
+    });
+    assert.ok(!result.isError, result.content[0].text);
+    const question = asked.at(-1);
+    const effect = line(question, "After the call");
+    assert.ok(effect.endsWith(" and 45 more"), `the addresses are counted, not cut: ${effect.slice(-40)}`);
+    assert.equal((effect.match(new RegExp(`"[ab]\\d\\d${"x".repeat(241)}@a\\.example"`, "g")) ?? []).length, 5, "five whole addresses");
+    // The cap may still take the end (the people the call started from), never the effect or the notes before them.
+    assert.ok(question.length <= 7000);
+    assert.ok(!question.endsWith("…") || question.lastIndexOf("Person of") > question.indexOf("Notes: "), "a cut falls only in the Person-of lines");
+    assert.ok(question.indexOf("After the call: ") < question.indexOf("Notes: ") && question.indexOf("Notes: ") < question.indexOf("Person of address: "), "effect, notes, then the people it started from");
+    assert.equal(line(question, "Notes"), `Notes: "${"n".repeat(500)}"`);
+  }, { answer: "accept" });
+});
+
+test("cleaning text is idempotent, and a name cut through an emoji keeps its import mark when restated", async () => {
+  const { cleanContactText, cutText } = await import("../dist/utils/contact-text.js");
+  for (const value of ["a".repeat(99) + "😀", "a".repeat(98) + "😀b", "x\ud800y", "\udc00" + "a".repeat(120), " pad ​ ed ", "note\n\n\n\nmore😀".repeat(300)]) {
+    for (const [max, keep] of [[100, false], [40, false], [2000, true]]) {
+      const once = cleanContactText(value, max, keep);
+      assert.equal(cleanContactText(once, max, keep), once, JSON.stringify([value.slice(0, 12), max]));
+      assert.doesNotMatch(once, /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/, "no lone surrogate is stored");
+    }
+  }
+  assert.equal(cutText("ab😀", 3), "ab", "a pair is not cut in half");
+  await withServer(async ({ call, dir }) => {
+    const name = "a".repeat(99) + "😀";
+    await writeFile(join(dir, "c.vcf"), `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\nEMAIL:p1@evil.example\r\nEMAIL:p2@evil.example\r\nEND:VCARD\r\n`);
+    await call("import_contacts", { path: join(dir, "c.vcf") });
+    const imported = (await stored(dir, "p1@evil.example"));
+    assert.equal(imported.name, "a".repeat(99), "cut before the emoji, no half of it");
+    assert.equal(imported.source, "imported from a vCard file");
+    // Restating the stored name (an unmerge asks for it) keeps the import mark.
+    await call("set_contact", { address: "p2@evil.example", unmerge: true, displayName: imported.name, aliases: [] });
+    assert.equal((await stored(dir, "p1@evil.example")).source, "imported from a vCard file");
+  }, { answer: "accept" });
+});
+
+test("a person already over the tag limit (hand-edited store) can still be renamed; only a merge is checked", async () => {
+  await withServer(async ({ call, dir }) => {
+    await call("set_contact", { address: "p@x.example", addTags: ["vip"] });
+    const path = join(dir, "data", "contacts.json");
+    const file = JSON.parse(await readFile(path, "utf8"));
+    Object.values(file.items)[0].tags = Array.from({ length: 21 }, (_, index) => `t${index}`);
+    await writeFile(path, JSON.stringify(file));
+    const renamed = await call("set_contact", { address: "p@x.example", displayName: "Pat" });
+    assert.ok(!renamed.isError, renamed.content[0].text);
+    assert.equal((await recordOf(dir, "p@x.example")).displayName, "Pat");
+    await call("set_contact", { address: "q@x.example", notes: "no tags" });
+    const merge = await call("set_contact", { address: "p@x.example", mergeWith: "q@x.example" });
+    assert.ok(!merge.isError, "merging in a person with no tags adds none: allowed");
+    await call("set_contact", { address: "r@x.example", addTags: ["extra"] });
+    const more = await call("set_contact", { address: "p@x.example", mergeWith: "r@x.example" });
+    assert.equal(more.isError, true, "a merge that adds a tag to a person already over the limit is refused");
+  }, { answer: "accept" });
+});
