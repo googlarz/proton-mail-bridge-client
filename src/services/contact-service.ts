@@ -138,6 +138,220 @@ function recordOf(store: ContactFile, address: string): ContactRecord | undefine
   return Object.values(store.items).find((record) => record.addresses.includes(address));
 }
 
+/** A person as the store holds them, for showing: the name and where it came from, the aliases and every address. */
+export interface PersonView {
+  name?: string;
+  /** "imported": the name came from an imported vCard file; "you": the user set it. */
+  nameSource?: "imported" | "you";
+  aliases: string[];
+  addresses: string[];
+}
+
+export interface ContactPreview {
+  /** The address the call is about, as the store would read it (lowercased, mailto: and brackets removed). */
+  target?: string;
+  /** Why the call would be refused (the error it would raise); nothing else is meaningful then. */
+  refused?: string;
+  /** The people the call names, as stored now. */
+  before: { address?: PersonView; mergeWith?: PersonView };
+  /** What would be stored: the person holding `address` afterwards (none when nothing is stored for it) and, after an unmerge, the person who stays behind. */
+  after: { contact?: PersonView; splitFrom?: PersonView };
+}
+
+export interface ImportRow {
+  /** The person the card ends up as in the store (name, source, aliases, addresses), none when nothing is stored for it. */
+  person?: PersonView;
+  status: "new person" | "adds to an existing person" | "nothing new to store" | "nothing to store" | "not stored: the store is full";
+  /** The card's name, left out because it is an alias of another person. */
+  nameLeftOut?: string;
+  /** Addresses of the card that are not attached because they belong to another person (or to the known person the card names). */
+  addressesLeftOut: string[];
+}
+
+export function personView(record: ContactRecord | undefined): PersonView | undefined {
+  if (!record) return undefined;
+  return {
+    ...(record.displayName ? { name: record.displayName, nameSource: record.displayNameFrom === "import" ? ("imported" as const) : ("you" as const) } : {}),
+    aliases: [...(record.aliases ?? [])],
+    addresses: [...record.addresses],
+  };
+}
+
+// The one place a set_contact is carried out: update() stores its result, preview() shows it without storing.
+function applyPatch(store: ContactFile, address: string, patch: ContactPatch, now: string): { contact?: ContactRecord; splitFrom?: ContactRecord } {
+  const target = requireContactAddress(address);
+  const addTags = (patch.addTags ?? []).map(normalizeTag);
+  const removeTags = (patch.removeTags ?? []).map(normalizeTag);
+  const aliases = patch.aliases !== undefined ? normalizeAliases(patch.aliases) : undefined;
+  const mergeWith = patch.mergeWith !== undefined ? requireContactAddress(patch.mergeWith, "mergeWith") : undefined;
+  if (mergeWith === target) throw new InvalidArgumentError("mergeWith must be another address than address.");
+  if (patch.unmerge && (mergeWith || addTags.length || removeTags.length || patch.notes !== undefined)) {
+    throw new InvalidArgumentError("unmerge is done on its own; only displayName and aliases may be given with it (see below). Change the other fields in a second call.");
+  }
+  const existing = recordOf(store, target);
+
+  if (patch.unmerge) {
+    if (!existing || existing.addresses.length < 2) throw new InvalidArgumentError(`${target} is not merged with another address.`);
+    const staying = existing.addresses.filter((entry) => entry !== target);
+    // The name and aliases stay with the addresses that remain in the record. Splitting one address out must not leave
+    // them quietly on whoever is left (after the real address of "Boss" is split out, a merged-in address would be "Boss"):
+    // the call has to say what the remaining person is called, or clear it.
+    if ((existing.displayName && patch.displayName === undefined) || (existing.aliases?.length && aliases === undefined)) {
+      const held = [existing.displayName ? `the name "${existing.displayName}"` : "", existing.aliases?.length ? `the aliases ${existing.aliases.map((alias) => `"${alias}"`).join(", ")}` : ""].filter(Boolean).join(" and ");
+      throw new InvalidArgumentError(`${staying.join(", ")} would stay behind holding ${held}. Check whose they are: the name and aliases may belong to the address you are splitting out, or to no one you know. Clear them by passing displayName: null and aliases: [] in the same call, then set them again where they belong (passing the same values only keeps them with ${staying.join(", ")}).`);
+    }
+    if (patch.displayName !== undefined) setDisplayName(store, existing, patch.displayName, new Set(importedNamesOf(existing)));
+    if (aliases !== undefined) {
+      assertAliasesFree(store, existing, aliases);
+      if (aliases.length) existing.aliases = aliases;
+      else delete existing.aliases;
+    }
+    existing.addresses = staying;
+    existing.updatedAt = now;
+    if (!says(existing)) delete store.items[existing.id];
+    return { splitFrom: says(existing) ? existing : undefined };
+  }
+
+  const record: ContactRecord = existing ?? { id: randomUUID(), addresses: [target], createdAt: now, updatedAt: now };
+  // Names that came from an imported file and are part of this call: the person's own and the one of the person merged in.
+  const imported = new Set(importedNamesOf(existing));
+  if (mergeWith && !record.addresses.includes(mergeWith)) {
+    const other = recordOf(store, mergeWith);
+    const addresses = [...new Set([...record.addresses, ...(other?.addresses ?? [mergeWith])])];
+    if (addresses.length > MAX_ADDRESSES) throw new InvalidArgumentError(`A person can have at most ${MAX_ADDRESSES} addresses.`);
+    record.addresses = addresses;
+    if (other) {
+      for (const name of importedNamesOf(other)) imported.add(name);
+      if (!record.displayName && other.displayName) {
+        record.displayName = other.displayName;
+        if (other.displayNameFrom) record.displayNameFrom = other.displayNameFrom;
+      }
+      record.org ??= other.org;
+      const tags = [...new Set([...(record.tags ?? []), ...(other.tags ?? [])])];
+      if (tags.length) record.tags = tags.slice(0, MAX_TAGS);
+      const merged = [...new Map([...(record.aliases ?? []), ...(other.aliases ?? [])].map((alias) => [foldText(alias), alias])).values()];
+      // A merge never drops an alias quietly: when they do not all fit (and the call does not replace the list), it is refused.
+      if (merged.length > MAX_ALIASES && aliases === undefined) {
+        const overflow = merged.slice(MAX_ALIASES).map((alias) => `"${alias}"`).join(", ");
+        throw new InvalidArgumentError(`Merging would give this person ${merged.length} aliases and at most ${MAX_ALIASES} are allowed; ${overflow} would not fit. Remove aliases from one of them first (or pass aliases in this call to set the list yourself).`);
+      }
+      if (merged.length) record.aliases = merged.slice(0, MAX_ALIASES);
+      const notes = [record.notes, other.notes].filter(Boolean).join("\n\n");
+      if (notes) record.notes = notes.slice(0, CONTACT_NOTES_MAX);
+      delete store.items[other.id];
+    }
+  }
+  if (patch.displayName !== undefined) setDisplayName(store, record, patch.displayName, imported);
+  if (patch.notes !== undefined) {
+    const notes = patch.notes === null ? "" : cleanContactText(patch.notes, CONTACT_NOTES_MAX, true);
+    if (notes) record.notes = notes;
+    else delete record.notes;
+  }
+  if (aliases !== undefined) {
+    assertAliasesFree(store, record, aliases);
+    if (aliases.length) record.aliases = aliases;
+    else delete record.aliases;
+  }
+  if (addTags.length || removeTags.length) {
+    const tags = [...new Set([...(record.tags ?? []), ...addTags])].filter((tag) => !removeTags.includes(tag));
+    if (tags.length > MAX_TAGS) throw new InvalidArgumentError(`A person can have at most ${MAX_TAGS} tags.`);
+    if (tags.length) record.tags = tags;
+    else delete record.tags;
+  }
+  record.updatedAt = now;
+  if (says(record)) {
+    if (!existing && Object.keys(store.items).length >= MAX_CONTACTS) throw new InvalidArgumentError(`The contact store is full (${MAX_CONTACTS} people).`);
+    store.items[record.id] = record;
+  } else {
+    delete store.items[record.id];
+  }
+  return { contact: says(record) ? record : undefined };
+}
+
+function importedNamesOf(record: ContactRecord | undefined): string[] {
+  return record?.displayName && record.displayNameFrom === "import" ? [record.displayName] : [];
+}
+
+// Sets (or clears) a display name. The name keeps its "imported" mark only when it is exactly a name that came from an
+// imported file and is part of this call (the person's own or the one merged in); any other name is the user's own.
+function setDisplayName(store: ContactFile, record: ContactRecord, value: string | null, importedNames: ReadonlySet<string>): void {
+  const name = value === null ? "" : cleanContactText(value, CONTACT_NAME_MAX);
+  if (name) assertNameFree(store, record, name);
+  if (name) record.displayName = name;
+  else delete record.displayName;
+  if (name && importedNames.has(name)) record.displayNameFrom = "import";
+  else delete record.displayNameFrom;
+}
+
+// The one place a vCard import is carried out: importCards() stores its result, previewImport() shows it without storing.
+function applyCards(store: ContactFile, cards: ParsedVCard[], now: string, trace?: { rows: ImportRow[]; limit: number }): ContactImportOutcome {
+  const outcome: ContactImportOutcome = { added: 0, updated: 0, unchanged: 0, conflicts: [], conflictCount: 0, nameConflicts: [], nameConflictCount: 0, overLimit: 0 };
+  // Thousands of cards against thousands of records: looked up in a map, not by scanning the store per address.
+  const byAddress = new Map<string, ContactRecord>();
+  const aliasOwners = new Map<string, ContactRecord>();
+  for (const record of Object.values(store.items)) {
+    for (const address of record.addresses) byAddress.set(address, record);
+    for (const alias of record.aliases ?? []) aliasOwners.set(foldText(alias), record);
+  }
+  for (const card of cards) {
+    const row: ImportRow = { status: "nothing to store", addressesLeftOut: [] };
+    const note = (status: ImportRow["status"], record?: ContactRecord) => {
+      if (!trace || trace.rows.length >= trace.limit) return;
+      trace.rows.push({ ...row, status, ...(record ? { person: personView(record) } : {}) });
+    };
+    const owners = card.emails.map((address) => byAddress.get(address));
+    const existing = owners.find(Boolean);
+    if (!existing && Object.keys(store.items).length >= MAX_CONTACTS) {
+      outcome.overLimit += 1;
+      note("not stored: the store is full");
+      continue;
+    }
+    const record: ContactRecord = existing ?? { id: randomUUID(), addresses: [], createdAt: now, updatedAt: now };
+    const before = JSON.stringify(record);
+    card.emails.forEach((address, index) => {
+      if (existing && owners[index] !== record) {
+        outcome.conflictCount += 1;
+        row.addressesLeftOut.push(address);
+        if (outcome.conflicts.length < 20) outcome.conflicts.push(address);
+      } else if (!record.addresses.includes(address) && record.addresses.length < MAX_ADDRESSES) {
+        record.addresses.push(address);
+      }
+    });
+    if (card.name && !record.displayName) {
+      const name = cleanContactText(card.name, CONTACT_NAME_MAX);
+      // The same rule as set_contact: a name that is another person's alias would send mail meant for them to this person.
+      const owner = name ? aliasOwners.get(foldText(name)) : undefined;
+      if (owner && owner !== record) {
+        outcome.nameConflictCount += 1;
+        row.nameLeftOut = name;
+        if (outcome.nameConflicts.length < 20) outcome.nameConflicts.push(name);
+      } else if (name) {
+        record.displayName = name;
+        record.displayNameFrom = "import";
+      }
+    }
+    if (card.org && !record.org) record.org = cleanContactText(card.org, CONTACT_ORG_MAX);
+    if (card.note && !record.notes) record.notes = cleanContactText(card.note, CONTACT_NOTES_MAX, true);
+    if (record.addresses.length === 0 || !says(record)) {
+      outcome.unchanged += 1;
+      note("nothing to store");
+      continue;
+    }
+    if (JSON.stringify(record) === before) {
+      outcome.unchanged += 1;
+      note("nothing new to store", record);
+      continue;
+    }
+    record.updatedAt = now;
+    store.items[record.id] = record;
+    for (const address of record.addresses) byAddress.set(address, record);
+    if (existing) outcome.updated += 1;
+    else outcome.added += 1;
+    note(existing ? "adds to an existing person" : "new person", record);
+  }
+  return outcome;
+}
+
 export class ContactService {
   private readonly storePath: string;
   private _lock: Promise<void> = Promise.resolve();
@@ -168,175 +382,48 @@ export class ContactService {
 
   /** Applies the patch to the person `address` belongs to. Returns the record now holding `address` (none when nothing is stored for it) and, after an unmerge, the record it was split from. */
   async update(address: string, patch: ContactPatch): Promise<{ contact?: ContactRecord; splitFrom?: ContactRecord }> {
-    const target = requireContactAddress(address);
-    const addTags = (patch.addTags ?? []).map(normalizeTag);
-    const removeTags = (patch.removeTags ?? []).map(normalizeTag);
-    const aliases = patch.aliases !== undefined ? normalizeAliases(patch.aliases) : undefined;
-    const mergeWith = patch.mergeWith !== undefined ? requireContactAddress(patch.mergeWith, "mergeWith") : undefined;
-    if (mergeWith === target) throw new InvalidArgumentError("mergeWith must be another address than address.");
-    if (patch.unmerge && (mergeWith || addTags.length || removeTags.length || patch.notes !== undefined)) {
-      throw new InvalidArgumentError("unmerge is done on its own; only displayName and aliases may be given with it (see below). Change the other fields in a second call.");
-    }
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const now = new Date().toISOString();
-      const existing = recordOf(store, target);
-
-      if (patch.unmerge) {
-        if (!existing || existing.addresses.length < 2) throw new InvalidArgumentError(`${target} is not merged with another address.`);
-        const staying = existing.addresses.filter((entry) => entry !== target);
-        // The name and aliases stay with the addresses that remain in the record. Splitting one address out must not leave
-        // them quietly on whoever is left (after the real address of "Boss" is split out, a merged-in address would be "Boss"):
-        // the call has to say what the remaining person is called, or clear it.
-        if ((existing.displayName && patch.displayName === undefined) || (existing.aliases?.length && aliases === undefined)) {
-          const held = [existing.displayName ? `the name "${existing.displayName}"` : "", existing.aliases?.length ? `the aliases ${existing.aliases.map((alias) => `"${alias}"`).join(", ")}` : ""].filter(Boolean).join(" and ");
-          throw new InvalidArgumentError(`${staying.join(", ")} would stay behind holding ${held}. Check whose they are: the name and aliases may belong to the address you are splitting out, or to no one you know. Clear them by passing displayName: null and aliases: [] in the same call, then set them again where they belong (passing the same values only keeps them with ${staying.join(", ")}).`);
-        }
-        if (patch.displayName !== undefined) {
-          const name = patch.displayName === null ? "" : cleanContactText(patch.displayName, CONTACT_NAME_MAX);
-          if (name) assertNameFree(store, existing, name);
-          // Restating the imported name changes nothing about where it came from; any other name is the user's own.
-          const keepsImport = Boolean(name) && name === existing.displayName && existing.displayNameFrom === "import";
-          if (name) existing.displayName = name;
-          else delete existing.displayName;
-          if (!keepsImport) delete existing.displayNameFrom;
-        }
-        if (aliases !== undefined) {
-          assertAliasesFree(store, existing, aliases);
-          if (aliases.length) existing.aliases = aliases;
-          else delete existing.aliases;
-        }
-        existing.addresses = staying;
-        existing.updatedAt = now;
-        if (!says(existing)) delete store.items[existing.id];
-        await this.save(store);
-        return { splitFrom: says(existing) ? existing : undefined };
-      }
-
-      const record: ContactRecord = existing ?? { id: randomUUID(), addresses: [target], createdAt: now, updatedAt: now };
-      if (mergeWith && !record.addresses.includes(mergeWith)) {
-        const other = recordOf(store, mergeWith);
-        const addresses = [...new Set([...record.addresses, ...(other?.addresses ?? [mergeWith])])];
-        if (addresses.length > MAX_ADDRESSES) throw new InvalidArgumentError(`A person can have at most ${MAX_ADDRESSES} addresses.`);
-        record.addresses = addresses;
-        if (other) {
-          if (!record.displayName && other.displayName) {
-            record.displayName = other.displayName;
-            if (other.displayNameFrom) record.displayNameFrom = other.displayNameFrom;
-          }
-          record.org ??= other.org;
-          const tags = [...new Set([...(record.tags ?? []), ...(other.tags ?? [])])];
-          if (tags.length) record.tags = tags.slice(0, MAX_TAGS);
-          const merged = [...new Map([...(record.aliases ?? []), ...(other.aliases ?? [])].map((alias) => [foldText(alias), alias])).values()];
-          // A merge never drops an alias quietly: when they do not all fit (and the call does not replace the list), it is refused.
-          if (merged.length > MAX_ALIASES && aliases === undefined) {
-            const overflow = merged.slice(MAX_ALIASES).map((alias) => `"${alias}"`).join(", ");
-            throw new InvalidArgumentError(`Merging would give this person ${merged.length} aliases and at most ${MAX_ALIASES} are allowed; ${overflow} would not fit. Remove aliases from one of them first (or pass aliases in this call to set the list yourself).`);
-          }
-          if (merged.length) record.aliases = merged.slice(0, MAX_ALIASES);
-          const notes = [record.notes, other.notes].filter(Boolean).join("\n\n");
-          if (notes) record.notes = notes.slice(0, CONTACT_NOTES_MAX);
-          delete store.items[other.id];
-        }
-      }
-      if (patch.displayName !== undefined) {
-        const name = patch.displayName === null ? "" : cleanContactText(patch.displayName, CONTACT_NAME_MAX);
-        if (name) assertNameFree(store, record, name);
-        // Restating the imported name changes nothing about where it came from; any other name is the user's own.
-        const keepsImport = Boolean(name) && name === record.displayName && record.displayNameFrom === "import";
-        if (name) record.displayName = name;
-        else delete record.displayName;
-        if (!keepsImport) delete record.displayNameFrom;
-      }
-      if (patch.notes !== undefined) {
-        const notes = patch.notes === null ? "" : cleanContactText(patch.notes, CONTACT_NOTES_MAX, true);
-        if (notes) record.notes = notes;
-        else delete record.notes;
-      }
-      if (aliases !== undefined) {
-        assertAliasesFree(store, record, aliases);
-        if (aliases.length) record.aliases = aliases;
-        else delete record.aliases;
-      }
-      if (addTags.length || removeTags.length) {
-        const tags = [...new Set([...(record.tags ?? []), ...addTags])].filter((tag) => !removeTags.includes(tag));
-        if (tags.length > MAX_TAGS) throw new InvalidArgumentError(`A person can have at most ${MAX_TAGS} tags.`);
-        if (tags.length) record.tags = tags;
-        else delete record.tags;
-      }
-      record.updatedAt = now;
-      if (says(record)) {
-        if (!existing && Object.keys(store.items).length >= MAX_CONTACTS) throw new InvalidArgumentError(`The contact store is full (${MAX_CONTACTS} people).`);
-        store.items[record.id] = record;
-      } else {
-        delete store.items[record.id];
-      }
+      const result = applyPatch(store, address, patch, new Date().toISOString());
       await this.save(store);
-      return { contact: says(record) ? record : undefined };
+      return result;
     });
+  }
+
+  /**
+   * What `update(address, patch)` would store, without storing anything: it runs the very same code on a copy of the store.
+   * The approval question is built from this and nothing else, so what it says is what ends up in the file.
+   */
+  async preview(address: string, patch: ContactPatch): Promise<ContactPreview> {
+    const store = await this.load();
+    const target = normalizeContactAddress(address);
+    const other = patch.mergeWith ? normalizeContactAddress(patch.mergeWith) : undefined;
+    const before = { address: personView(target ? recordOf(store, target) : undefined), mergeWith: personView(other ? recordOf(store, other) : undefined) };
+    try {
+      const result = applyPatch(structuredClone(store), address, patch, new Date().toISOString());
+      return { target: target ?? undefined, before, after: { contact: personView(result.contact), splitFrom: personView(result.splitFrom) } };
+    } catch (error) {
+      if (error instanceof InvalidArgumentError) return { target: target ?? undefined, refused: error.message, before, after: {} };
+      throw error;
+    }
   }
 
   /** Adds the people of a vCard file. Fills only what is not set yet. A card that names a known person never adds an address to them: a file could otherwise give its own address that person's tags (vip changes the autoresponder). */
   async importCards(cards: ParsedVCard[]): Promise<ContactImportOutcome> {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
-      const now = new Date().toISOString();
-      const outcome: ContactImportOutcome = { added: 0, updated: 0, unchanged: 0, conflicts: [], conflictCount: 0, nameConflicts: [], nameConflictCount: 0, overLimit: 0 };
-      // Thousands of cards against thousands of records: looked up in a map, not by scanning the store per address.
-      const byAddress = new Map<string, ContactRecord>();
-      const aliasOwners = new Map<string, ContactRecord>();
-      for (const record of Object.values(store.items)) {
-        for (const address of record.addresses) byAddress.set(address, record);
-        for (const alias of record.aliases ?? []) aliasOwners.set(foldText(alias), record);
-      }
-      for (const card of cards) {
-        const owners = card.emails.map((address) => byAddress.get(address));
-        const existing = owners.find(Boolean);
-        if (!existing && Object.keys(store.items).length >= MAX_CONTACTS) {
-          outcome.overLimit += 1;
-          continue;
-        }
-        const record: ContactRecord = existing ?? { id: randomUUID(), addresses: [], createdAt: now, updatedAt: now };
-        const before = JSON.stringify(record);
-        card.emails.forEach((address, index) => {
-          if (existing && owners[index] !== record) {
-            outcome.conflictCount += 1;
-            if (outcome.conflicts.length < 20) outcome.conflicts.push(address);
-          } else if (!record.addresses.includes(address) && record.addresses.length < MAX_ADDRESSES) {
-            record.addresses.push(address);
-          }
-        });
-        if (card.name && !record.displayName) {
-          const name = cleanContactText(card.name, CONTACT_NAME_MAX);
-          // The same rule as set_contact: a name that is another person's alias would send mail meant for them to this person.
-          const owner = name ? aliasOwners.get(foldText(name)) : undefined;
-          if (owner && owner !== record) {
-            outcome.nameConflictCount += 1;
-            if (outcome.nameConflicts.length < 20) outcome.nameConflicts.push(name);
-          } else if (name) {
-            record.displayName = name;
-            record.displayNameFrom = "import";
-          }
-        }
-        if (card.org && !record.org) record.org = cleanContactText(card.org, CONTACT_ORG_MAX);
-        if (card.note && !record.notes) record.notes = cleanContactText(card.note, CONTACT_NOTES_MAX, true);
-        if (record.addresses.length === 0 || !says(record)) {
-          outcome.unchanged += 1;
-          continue;
-        }
-        if (JSON.stringify(record) === before) {
-          outcome.unchanged += 1;
-          continue;
-        }
-        record.updatedAt = now;
-        store.items[record.id] = record;
-        for (const address of record.addresses) byAddress.set(address, record);
-        if (existing) outcome.updated += 1;
-        else outcome.added += 1;
-      }
+      const outcome = applyCards(store, cards, new Date().toISOString());
       if (outcome.added || outcome.updated) await this.save(store);
       return outcome;
     });
+  }
+
+  /** What `importCards(cards)` would store, card by card (the first `rows`), by running the same code on a copy of the store. */
+  async previewImport(cards: ParsedVCard[], rows = 20): Promise<{ outcome: ContactImportOutcome; rows: ImportRow[] }> {
+    const store = structuredClone(await this.load());
+    const trace: ImportRow[] = [];
+    const outcome = applyCards(store, cards, new Date().toISOString(), { rows: trace, limit: rows });
+    return { outcome, rows: trace };
   }
 
   // See TemplateService.withLock: the in-process chain plus a lock across processes sharing this dataDir.

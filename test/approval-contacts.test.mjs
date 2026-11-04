@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -47,7 +47,7 @@ test("set_contact: the question names the address, name, tags, merge target and 
     const question = asked[0];
     assert.match(question, /^Approve set_contact\?\nAccount: "owner@example\.com"\n/);
     assert.equal(line(question, "Address"), 'Address: "ann@example.com"');
-    assert.equal(line(question, "Display name"), 'Display name: "Ann Author"');
+    assert.equal(line(question, "Display name"), 'Display name: "Ann Author" (set by you)');
     assert.equal(line(question, "Add tags"), 'Add tags: "vip", "work"');
     assert.equal(line(question, "Remove tags"), 'Remove tags: "old"');
     assert.equal(line(question, "Merge with"), 'Merge with: "ann.private@example.com"');
@@ -62,7 +62,7 @@ test("set_contact: clearing a name or notes and splitting an address are said as
     await call("set_contact", { address: "ann@example.com", addTags: ["vip"] });
     assert.equal(line(asked[0], "Display name"), "Display name: cleared");
     assert.equal(line(asked[0], "Notes"), "Notes: cleared");
-    assert.equal(line(asked[1], "Unmerge"), "Unmerge: yes");
+    assert.match(line(asked[1], "This call will be refused"), /not merged with another address/);
     assert.equal(line(asked[2], "Display name"), undefined);
     assert.equal(line(asked[2], "Notes"), undefined);
     assert.equal(line(asked[2], "Unmerge"), undefined);
@@ -94,22 +94,6 @@ test("import_contacts: the question names the file (not its folder) and how many
   });
 });
 
-test("import_contacts: the question lists the first 20 people with their addresses, and says how many more", async () => {
-  await withServer(async ({ call, asked, dir }) => {
-    const path = join(dir, "many.vcf");
-    let text = card("Prezes", "prezes@evil.example");
-    for (let index = 1; index < 25; index += 1) text += card(`Person ${index}`, `p${index}@example.com`);
-    await writeFile(path, text);
-    await call("import_contacts", { path });
-    const question = asked[0];
-    assert.equal(line(question, "Cards"), "Cards: 25");
-    assert.equal(line(question, "Person 1"), 'Person 1: "Prezes", "prezes@evil.example"');
-    assert.equal(line(question, "Person 20"), 'Person 20: "Person 19", "p19@example.com"');
-    assert.equal(line(question, "Person 21"), undefined);
-    assert.equal(line(question, "More"), "More: and 5 more cards");
-  });
-});
-
 test("import_contacts: a hostile name in the file cannot add lines to the question", async () => {
   await withServer(async ({ call, asked, dir }) => {
     const path = join(dir, "bad.vcf");
@@ -132,72 +116,6 @@ test("needsApproval: an import and a set_contact that sets aliases, a name or a 
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /declined/);
     assert.equal(asked.length, 1);
-  });
-});
-
-test("set_contact: a display name is shown exactly as it will be stored, in every line that shows one", async () => {
-  await withServer(async ({ call, asked }) => {
-    const cleaned = ' (cleaned: invisible or control characters or extra spaces in what was given are not stored; shown as stored)';
-    await call("set_contact", { address: "ann@example.com", displayName: "Sze\u200bf" });
-    assert.equal(line(asked[0], "Display name"), 'Display name: "Szef"' + cleaned);
-    await call("set_contact", { address: "boss@corp.example", displayName: "Jan Boss" });
-    await call("set_contact", { address: "boss@corp.example", mergeWith: "jb@private.example", displayName: "Sze\u200bf" });
-    assert.equal(line(asked.at(-1), "Name after the merge"), 'Name after the merge: "Szef"' + cleaned);
-    await call("set_contact", { address: "jb@private.example", unmerge: true, displayName: "Sze\u200bf", aliases: ["Ma\u200dciek"] });
-    assert.equal(line(asked.at(-1), "Name and aliases stay with them"), 'Name and aliases stay with them: name "Szef"' + cleaned + ', aliases "Maciek"' + cleaned + ' (as set in this call)');
-    await call("set_contact", { address: "ann@example.com", displayName: "\u200b" });
-    assert.equal(line(asked.at(-1), "Display name"), "Display name: cleared (nothing is left of it after cleaning)");
-  }, { answer: "accept" });
-});
-
-test("set_contact: a name that came from an imported file is said to, in the merge and the unmerge questions", async () => {
-  await withServer(async ({ call, asked, dir }) => {
-    const path = join(dir, "c.vcf");
-    const two = (name, a, b) => `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\nEMAIL:${a}\r\nEMAIL:${b}\r\nEND:VCARD\r\n`;
-    await writeFile(path, two("PrezesA", "a1@evil.example", "a2@evil.example") + two("PrezesB", "b1@evil.example", "b2@evil.example") + two("PrezesC", "c1@evil.example", "c2@evil.example"));
-    await call("import_contacts", { path });
-    const stays = () => line(asked.at(-1), "Name and aliases stay with them");
-    // Not restated: said to be imported (the call is refused, the question was still asked).
-    await call("set_contact", { address: "a2@evil.example", unmerge: true });
-    assert.match(stays(), /name "PrezesA" \(imported from a vCard file; it stays marked as imported\)/);
-    // Restated unchanged: stays imported.
-    await call("set_contact", { address: "b2@evil.example", unmerge: true, displayName: "PrezesB", aliases: [] });
-    assert.match(stays(), /name "PrezesB" \(the same as the name imported from a vCard file: it stays marked as imported\)/);
-    // Another name: the user's own.
-    await call("set_contact", { address: "c2@evil.example", unmerge: true, displayName: "Somebody Else", aliases: [] });
-    assert.match(stays(), /name "Somebody Else" \(set in this call: becomes a name you set yourself, no longer marked as imported\)/);
-    // Merge: each person shows where its name came from, and so does the name that remains.
-    await call("set_contact", { address: "x@example.com", mergeWith: "a1@evil.example" });
-    const question = asked.at(-1);
-    assert.match(line(question, "Person of mergeWith"), /name "PrezesA" \(imported from a vCard file\)/);
-    assert.equal(line(question, "Name after the merge"), 'Name after the merge: "PrezesA" (imported from a vCard file)');
-    await call("set_contact", { address: "y@example.com", mergeWith: "b1@evil.example", displayName: "PrezesB" });
-    assert.match(line(asked.at(-1), "Name after the merge"), /"PrezesB" \(the same as the name imported from a vCard file: it stays marked as imported\)/);
-    await call("set_contact", { address: "z@example.com", mergeWith: "b1@evil.example", displayName: "Somebody New" });
-    assert.match(line(asked.at(-1), "Name after the merge"), /"Somebody New" \(set in this call: becomes a name you set yourself/);
-  }, { answer: "accept" });
-});
-
-test("set_contact: an alias is shown exactly as it will be stored, and cleaning is flagged", async () => {
-  await withServer(async ({ call, asked }) => {
-    await call("set_contact", { address: "ann@example.com", aliases: ["Ma‍ciek", "  Ania  "] });
-    assert.equal(line(asked[0], "Aliases"), 'Aliases: "Maciek", "Ania" (cleaned: invisible or control characters or extra spaces in what was given are not stored; shown as stored)');
-    await call("set_contact", { address: "ann@example.com", aliases: ["Clean"] });
-    assert.equal(line(asked[1], "Aliases"), 'Aliases: "Clean"');
-    await call("set_contact", { address: "ann@example.com", aliases: ["a@b.example"] });
-    assert.match(line(asked[2], "Aliases"), /\(this will be refused: .*not an alias/);
-  });
-});
-
-test("set_contact with mergeWith and displayName: the name after the merge is the one the call sets", async () => {
-  await withServer(async ({ call, asked }) => {
-    await call("set_contact", { address: "boss@corp.example", displayName: "Jan Boss" });
-    await call("set_contact", { address: "boss@corp.example", mergeWith: "jb@private.example", displayName: "Mama" });
-    const question = asked.at(-1);
-    assert.equal(line(question, "Display name"), 'Display name: "Mama"');
-    assert.equal(line(question, "Name after the merge"), 'Name after the merge: "Mama"');
-    await call("set_contact", { address: "boss@corp.example", mergeWith: "x@private.example", displayName: null });
-    assert.equal(line(asked.at(-1), "Name after the merge"), "Name after the merge: none");
   });
 });
 
@@ -236,55 +154,6 @@ test("set_contact: all aliases are listed, not only the first five", async () =>
   });
 });
 
-test("set_contact with mergeWith: the question shows both people, their aliases, and which address becomes primary", async () => {
-  await withServer(async ({ call, asked }) => {
-    await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss", "Szef"] });
-    await call("set_contact", { address: "attacker@evil.example", mergeWith: "boss@company.example" });
-    const question = asked[1];
-    assert.equal(line(question, "Person of address"), "Person of address: nothing stored yet");
-    assert.equal(line(question, "Person of mergeWith"), 'Person of mergeWith: name "Boss Person", aliases "Boss", "Szef", addresses "boss@company.example"');
-    assert.equal(line(question, "Primary address after the merge"), 'Primary address after the merge: "attacker@evil.example"');
-    assert.equal(line(question, "Name after the merge"), 'Name after the merge: "Boss Person"');
-    // Both people stored: the first address of the target stays first.
-    await call("set_contact", { address: "ann@example.com", displayName: "Ann", aliases: ["Ania"] });
-    await call("set_contact", { address: "ann@example.com", mergeWith: "boss@company.example" });
-    const second = asked.at(-1);
-    assert.equal(line(second, "Person of address"), 'Person of address: name "Ann", aliases "Ania", addresses "ann@example.com"');
-    assert.equal(line(second, "Primary address after the merge"), 'Primary address after the merge: "ann@example.com"');
-  }, { answer: "accept" });
-});
-
-test("set_contact unmerge: the question lists the addresses that stay together and says the name and aliases stay with them", async () => {
-  await withServer(async ({ call, asked }) => {
-    await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss"] });
-    await call("set_contact", { address: "attacker@evil.example", mergeWith: "boss@company.example" });
-    await call("set_contact", { address: "boss@company.example", unmerge: true });
-    const question = asked.at(-1);
-    assert.equal(line(question, "Unmerge"), "Unmerge: yes");
-    assert.equal(line(question, "Split out"), 'Split out: "boss@company.example"');
-    assert.equal(line(question, "Addresses that stay together"), 'Addresses that stay together: "attacker@evil.example"');
-    assert.equal(line(question, "Name and aliases stay with them"), 'Name and aliases stay with them: name "Boss Person", aliases "Boss"');
-    await call("set_contact", { address: "boss@company.example", unmerge: true, displayName: null, aliases: [] });
-    assert.equal(line(asked.at(-1), "Name and aliases stay with them"), 'Name and aliases stay with them: name none, aliases none (as set in this call)');
-  }, { answer: "accept" });
-});
-
-test("set_contact unmerge: a blank name counts as cleared, the address is normalised, and an unknown person is said to be unknown", async () => {
-  await withServer(async ({ call, asked }) => {
-    await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss"], mergeWith: "other@company.example" });
-    await call("set_contact", { address: "mailto:<Boss@Company.example>", unmerge: true, displayName: "   ", aliases: [] });
-    const question = asked.at(-1);
-    assert.equal(line(question, "Split out"), 'Split out: "boss@company.example"');
-    assert.equal(line(question, "Addresses that stay together"), 'Addresses that stay together: "other@company.example"');
-    assert.equal(line(question, "Name and aliases stay with them"), "Name and aliases stay with them: name none, aliases none (as set in this call)");
-    // No stored person for the address: the lines are still there, and say what is not known.
-    await call("set_contact", { address: "nobody@company.example", unmerge: true });
-    const unknown = asked.at(-1);
-    assert.match(line(unknown, "Addresses that stay together"), /unknown \(no stored person for this address, or the store could not be read\)/);
-    assert.equal(line(unknown, "Name and aliases stay with them"), "Name and aliases stay with them: name unknown, aliases unknown");
-  }, { answer: "accept" });
-});
-
 test("set_contact: the question lists the aliases, and an empty list is said to clear them", async () => {
   await withServer(async ({ call, asked }) => {
     await call("set_contact", { address: "ann@example.com", aliases: ["Ania", "Anka"] });
@@ -292,4 +161,165 @@ test("set_contact: the question lists the aliases, and an empty list is said to 
     assert.equal(line(asked[0], "Aliases"), 'Aliases: "Ania", "Anka"');
     assert.equal(line(asked[1], "Aliases"), "Aliases: cleared");
   });
+});
+
+// The question is built from the contact service's own dry run, so it must say what the store holds after the call.
+const QUOTED = '"(?:[^"\\\\]|\\\\.)*"';
+function parsePerson(text) {
+  const match = new RegExp(`^name (none|(${QUOTED}) \\((imported from a vCard file|set by you)\\)), aliases (none|${QUOTED}(?:, ${QUOTED})*), addresses (${QUOTED}(?:, ${QUOTED})*)$`).exec(text ?? "");
+  assert.ok(match, `not a person line: ${text}`);
+  const list = (value) => (value === "none" ? [] : [...value.matchAll(new RegExp(QUOTED, "g"))].map((entry) => JSON.parse(entry[0])));
+  return { name: match[2] ? JSON.parse(match[2]) : undefined, source: match[3], aliases: list(match[4]), addresses: list(match[5]) };
+}
+const lineValue = (question, label) => line(question, label)?.slice(label.length + 2);
+async function stored(dir, address) {
+  const file = JSON.parse(await readFile(join(dir, "data", "contacts.json"), "utf8"));
+  const record = Object.values(file.items).find((entry) => entry.addresses.includes(address));
+  if (!record) return undefined;
+  return { name: record.displayName, source: record.displayName ? (record.displayNameFrom === "import" ? "imported from a vCard file" : "set by you") : undefined, aliases: record.aliases ?? [], addresses: record.addresses };
+}
+
+test("the question shows exactly what is stored after the call, for a table of set, merge, unmerge and import cases", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const two = (name, a, b) => `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\nEMAIL:${a}\r\n${b ? `EMAIL:${b}\r\n` : ""}END:VCARD\r\n`;
+    const path = join(dir, "people.vcf");
+    await writeFile(path, two("Prezes", "p@evil.example") + two("Alpha", "q1@evil.example", "q2@evil.example") + two("Beta", "r@evil.example") + two("Gamma", "s1@evil.example", "s2@evil.example") + two("Delta", "t1@evil.example", "t2@evil.example") + two("Pre؀zes2", "u0@evil.example"));
+    // Import: every "Person n" line equals the person stored for that card.
+    await call("import_contacts", { path });
+    const importQuestion = asked.at(-1);
+    for (const [index, first] of ["p@evil.example", "q1@evil.example", "r@evil.example", "s1@evil.example", "t1@evil.example", "u0@evil.example"].entries()) {
+      const shown = parsePerson(lineValue(importQuestion, `Person ${index + 1}`).split(" - ")[0]);
+      assert.deepEqual(shown, await stored(dir, first), `import row ${index + 1}`);
+    }
+    assert.equal(parsePerson(lineValue(importQuestion, "Person 6").split(" - ")[0]).name, "Prezes2", "the U+0600 mark is not stored, and so not shown");
+
+    const steps = [
+      { label: "set a name", args: { address: "jan@example.com", displayName: "Jan" }, holder: "jan@example.com", source: "set by you" },
+      { label: "restate an imported name", args: { address: "p@evil.example", displayName: "Prezes" }, holder: "p@evil.example", source: "imported from a vCard file" },
+      { label: "merge, the target keeps its own name", args: { address: "jan@example.com", mergeWith: "r@evil.example" }, holder: "jan@example.com", source: "set by you" },
+      { label: "merge, the name comes from the imported person", args: { address: "x@example.com", mergeWith: "s1@evil.example" }, holder: "x@example.com", source: "imported from a vCard file" },
+      { label: "merge, the call restates the imported name of the other person", args: { address: "jan@example.com", mergeWith: "p@evil.example", displayName: "Prezes" }, holder: "jan@example.com" },
+      { label: "merge of two imported names", args: { address: "q1@evil.example", mergeWith: "t1@evil.example" }, holder: "q1@evil.example", source: "imported from a vCard file" },
+      { label: "unmerge, the imported name restated", args: { address: "s2@evil.example", unmerge: true, displayName: "Gamma", aliases: [] }, holder: "x@example.com", stays: true, source: "imported from a vCard file" },
+      { label: "unmerge, a different name", args: { address: "t2@evil.example", unmerge: true, displayName: "Somebody Else", aliases: [] }, holder: "q1@evil.example", stays: true, source: "set by you" },
+      { label: "unmerge, the name and aliases cleared", args: { address: "t1@evil.example", unmerge: true, displayName: null, aliases: [] }, holder: "q1@evil.example", stays: true, source: undefined },
+      { label: "aliases with zero-width characters and a duplicate", args: { address: "jan@example.com", aliases: ["Ma‍ciek", "  Ania ", "maciek"] }, holder: "jan@example.com" },
+      { label: "a name with a format character", args: { address: "u@example.com", displayName: "Pre؀zes3" }, holder: "u@example.com", source: "set by you" },
+      { label: "a name of 100 characters", args: { address: "long@example.com", displayName: "n".repeat(100) }, holder: "long@example.com", source: "set by you" },
+    ];
+    for (const step of steps) {
+      await call("set_contact", step.args);
+      const question = asked.at(-1);
+      const shown = parsePerson(lineValue(question, step.stays ? "Stays behind" : "After the call"));
+      assert.deepEqual(shown, await stored(dir, step.holder), step.label);
+      if ("source" in step) assert.equal(shown.source, step.source, step.label);
+    }
+    // Spot checks on what the table shows: where the repro landed, and the cleaning notes.
+    const repro = await stored(dir, "jan@example.com");
+    assert.equal(repro.name, "Prezes");
+    assert.equal(repro.source, "imported from a vCard file", "a name equal to the imported one of the merged person stays marked as imported");
+    assert.deepEqual(repro.aliases, ["Maciek", "Ania"]);
+    assert.equal((await stored(dir, "long@example.com")).name.length, 100, "the full name is stored, and shown in full");
+
+    // A refused call says so, and the store is untouched.
+    const before = await stored(dir, "jan@example.com");
+    const refused = await call("set_contact", { address: "jan@example.com", aliases: ["a@b.example"] });
+    assert.equal(refused.isError, true);
+    assert.match(line(asked.at(-1), "This call will be refused"), /not an alias/);
+    assert.equal(line(asked.at(-1), "After the call"), undefined);
+    assert.deepEqual(await stored(dir, "jan@example.com"), before);
+  }, { answer: "accept" });
+});
+
+test("the question says when what was typed is not what is stored", async () => {
+  await withServer(async ({ call, asked }) => {
+    const changed = " (what was given was changed before it is stored: cleaned or duplicates removed; shown as stored)";
+    await call("set_contact", { address: "ann@example.com", displayName: "Sze​f" });
+    assert.equal(line(asked.at(-1), "Display name"), 'Display name: "Szef" (set by you)' + changed);
+    await call("set_contact", { address: "ann@example.com", displayName: "Pre؀zes" });
+    assert.equal(line(asked.at(-1), "Display name"), 'Display name: "Prezes" (set by you)' + changed);
+    await call("set_contact", { address: "ann@example.com", displayName: "Clean" });
+    assert.equal(line(asked.at(-1), "Display name"), 'Display name: "Clean" (set by you)');
+    await call("set_contact", { address: "ann@example.com", aliases: ["Ma‍ciek", "  Ania  "] });
+    assert.equal(line(asked.at(-1), "Aliases"), 'Aliases: "Maciek", "Ania"' + changed);
+    await call("set_contact", { address: "ann@example.com", aliases: ["Clean"] });
+    assert.equal(line(asked.at(-1), "Aliases"), 'Aliases: "Clean"');
+    await call("set_contact", { address: "ann@example.com", displayName: "​" });
+    assert.equal(line(asked.at(-1), "Display name"), "Display name: cleared" + changed);
+    await call("set_contact", { address: "ann@example.com", aliases: ["a@b.example"] });
+    assert.match(line(asked.at(-1), "This call will be refused"), /not an alias/);
+  });
+});
+
+test("set_contact with mergeWith: both people, which address is first, and the name that remains", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss", "Szef"] });
+    await call("set_contact", { address: "attacker@evil.example", mergeWith: "boss@company.example" });
+    const question = asked.at(-1);
+    assert.equal(line(question, "Person of address"), "Person of address: nothing stored yet");
+    assert.equal(line(question, "Person of mergeWith"), 'Person of mergeWith: name "Boss Person" (set by you), aliases "Boss", "Szef", addresses "boss@company.example"');
+    assert.equal(line(question, "Primary address after the merge"), 'Primary address after the merge: "attacker@evil.example"');
+    assert.equal(line(question, "Name after the merge"), 'Name after the merge: "Boss Person" (set by you)');
+    await call("set_contact", { address: "ann@example.com", displayName: "Ann", aliases: ["Ania"] });
+    await call("set_contact", { address: "ann@example.com", mergeWith: "boss@company.example", displayName: "Mama" });
+    const second = asked.at(-1);
+    assert.equal(line(second, "Person of address"), 'Person of address: name "Ann" (set by you), aliases "Ania", addresses "ann@example.com"');
+    assert.equal(line(second, "Display name"), 'Display name: "Mama" (set by you)');
+    assert.equal(line(second, "Name after the merge"), 'Name after the merge: "Mama" (set by you)');
+    assert.equal(line(second, "Primary address after the merge"), 'Primary address after the merge: "ann@example.com"');
+  }, { answer: "accept" });
+});
+
+test("set_contact unmerge: who stays behind, with the name's source; a blank name is cleared", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss"], mergeWith: "other@company.example" });
+    await call("set_contact", { address: "mailto:<Boss@Company.example>", unmerge: true });
+    const refused = asked.at(-1);
+    assert.equal(line(refused, "Split out"), undefined, "a refused call shows the refusal, not a result");
+    assert.match(line(refused, "This call will be refused"), /would stay behind holding the name/);
+    await call("set_contact", { address: "mailto:<Boss@Company.example>", unmerge: true, displayName: "   ", aliases: [] });
+    const done = asked.at(-1);
+    assert.equal(line(done, "Split out"), 'Split out: "boss@company.example"');
+    // One address is left and nothing is set for it: the store keeps no record for it.
+    assert.equal(line(done, "Stays behind"), "Stays behind: no one: nothing is left to store for the remaining address");
+    await call("set_contact", { address: "a@company.example", displayName: "Aa", mergeWith: "b@company.example" });
+    await call("set_contact", { address: "a@company.example", mergeWith: "c@company.example" });
+    await call("set_contact", { address: "c@company.example", unmerge: true, displayName: "Aa", aliases: [] });
+    assert.equal(line(asked.at(-1), "Stays behind"), 'Stays behind: name "Aa" (set by you), aliases none, addresses "a@company.example", "b@company.example"');
+  }, { answer: "accept" });
+});
+
+test("set_contact: when the contact store cannot be read the question says the effect is unknown", async () => {
+  const { buildApprovalMessage } = await import("../dist/utils/approval.js");
+  const question = await buildApprovalMessage("set_contact", { address: "a@example.com", displayName: "X" }, { account: () => "owner@example.com", contactPreview: async () => { throw new Error("unreadable"); } });
+  assert.match(question, /Effect: unknown \(the contact store could not be read\)/);
+});
+
+test("import_contacts: the first 20 people as they would be stored, the effect, and how many more", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const path = join(dir, "many.vcf");
+    let text = card("Prezes", "prezes@evil.example");
+    for (let index = 1; index < 25; index += 1) text += card(`Person ${index}`, `p${index}@example.com`);
+    await writeFile(path, text);
+    await call("import_contacts", { path });
+    const question = asked[0];
+    assert.equal(line(question, "Cards"), "Cards: 25");
+    assert.equal(line(question, "Effect"), "Effect: adds 25 people, adds to 0 existing ones, leaves 0 cards as they are");
+    assert.equal(line(question, "Person 1"), 'Person 1: name "Prezes" (imported from a vCard file), aliases none, addresses "prezes@evil.example" - new person');
+    assert.equal(line(question, "Person 20"), 'Person 20: name "Person 19" (imported from a vCard file), aliases none, addresses "p19@example.com" - new person');
+    assert.equal(line(question, "Person 21"), undefined);
+    assert.equal(line(question, "More"), "More: and 5 more cards");
+  });
+});
+
+test("import_contacts: a name that is another person's alias, and addresses of a known person, are said to be left out", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    await call("set_contact", { address: "szefowa@company.example", displayName: "Anna Lis", aliases: ["Szefowa"] });
+    const path = join(dir, "clash.vcf");
+    await writeFile(path, `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:SZEFOWA\r\nEMAIL:stranger@evil.example\r\nEMAIL:second@evil.example\r\nEND:VCARD\r\nBEGIN:VCARD\r\nVERSION:3.0\r\nFN:Anna Lis\r\nEMAIL:szefowa@company.example\r\nEMAIL:new@evil.example\r\nEND:VCARD\r\n`);
+    await call("import_contacts", { path });
+    const question = asked.at(-1);
+    assert.match(line(question, "Person 1"), /name none, aliases none, addresses "stranger@evil\.example", "second@evil\.example" - new person; name left out because it is an alias of another person: "SZEFOWA"/);
+    assert.match(line(question, "Person 2"), /addresses not attached because they belong to another person: "new@evil\.example"/);
+  }, { answer: "accept" });
 });

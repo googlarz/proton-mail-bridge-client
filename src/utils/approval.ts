@@ -11,10 +11,9 @@ import { basename } from "node:path";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { FORWARD_DAILY_LIMIT, type EffectiveRule } from "../services/rules-service.js";
-import { normalizeAliases } from "../services/contact-service.js";
+import type { ContactPreview, ImportRow, PersonView } from "../services/contact-service.js";
 import { CONTACT_NAME_MAX } from "./vcard.js";
 import type { AutoresponderRule } from "../services/autoresponder-service.js";
-import { cleanContactText, normalizeContactAddress } from "./contact-text.js";
 import { normalizeBoolean } from "./helpers.js";
 import { isGatedAction } from "./mail-security.js";
 
@@ -60,28 +59,26 @@ export function cleanForPrompt(value: unknown, max = 120): string {
 
 const quoted = (value: unknown, max?: number) => JSON.stringify(cleanForPrompt(value, max));
 const addressSet = (values: string[]) => [...new Set(values.map((value) => value.trim().toLowerCase()))].sort().join("\n");
-const IMPORTED = "imported from a vCard file";
+const NAME_SOURCE = { imported: "imported from a vCard file", you: "set by you" } as const;
+const CHANGED = " (what was given was changed before it is stored: cleaned or duplicates removed; shown as stored)";
 
-/** A display name as the store will keep it (the same cleaning), with a note when that changed what was given. */
-function nameText(value: unknown, empty = "cleared"): string {
-  if (value === null || value === "") return empty;
-  const given = String(value);
-  const stored = cleanContactText(given, CONTACT_NAME_MAX);
-  if (!stored) return given.trim() ? `${empty} (nothing is left of it after cleaning)` : empty;
-  return quoted(stored, 80) + (stored !== given ? " (cleaned: invisible or control characters or extra spaces in what was given are not stored; shown as stored)" : "");
+/** A stored name with where it came from. Always the store's own result (the contact preview), never worked out here. */
+function storedName(person: PersonView | undefined): string {
+  return person?.name ? `${quoted(person.name, CONTACT_NAME_MAX)} (${NAME_SOURCE[person.nameSource ?? "you"]})` : "none";
 }
 
-/** The aliases as the store will keep them (the same cleaning), and a note when that changed what was typed or the call will be refused. */
-function aliasesText(aliases: unknown[]): string {
-  if (!aliases.length) return "cleared";
-  const given = aliases.map(String);
-  try {
-    const stored = normalizeAliases(given);
-    const changed = given.some((alias) => cleanContactText(alias, 1000) !== alias);
-    return listed(stored, stored.length) + (changed ? " (cleaned: invisible or control characters or extra spaces in what was given are not stored; shown as stored)" : "");
-  } catch (error) {
-    return `${listed(given.map((alias) => cleanContactText(alias, 1000)), given.length)} (this will be refused: ${cleanForPrompt(error instanceof Error ? error.message : "not allowed", 120)})`;
-  }
+function importRowText(row: ImportRow): string {
+  const left = [
+    row.nameLeftOut ? `name left out because it is an alias of another person: ${quoted(row.nameLeftOut, CONTACT_NAME_MAX)}` : "",
+    row.addressesLeftOut.length ? `addresses not attached because they belong to another person: ${listed(row.addressesLeftOut, 5)}` : "",
+  ].filter(Boolean);
+  return `${personText(row.person, "nothing is stored for this card")} - ${row.status}${left.length ? `; ${left.join("; ")}` : ""}`;
+}
+
+/** A person as the store would hold them after the call. */
+function personText(person: PersonView | undefined, absent: string): string {
+  if (!person) return absent;
+  return `name ${storedName(person)}, aliases ${person.aliases.length ? listed(person.aliases, person.aliases.length) : "none"}, addresses ${listed(person.addresses, person.addresses.length)}`;
 }
 
 function listed(values: string[], max = 5): string {
@@ -126,10 +123,10 @@ export interface ApprovalLookups {
   account(args: Record<string, unknown>): string;
   subject(id: string): Promise<string | undefined>;
   target(name: string, args: Record<string, unknown>): Promise<SendTarget | undefined>;
-  /** The person an address belongs to in the contact store (name, aliases, addresses; the first address is the primary one), or undefined when there is none. */
-  contact(address: string, args: Record<string, unknown>): Promise<{ name?: string; /** The name came from an imported vCard file, not from the user. */ nameImported?: boolean; aliases: string[]; addresses: string[] } | undefined>;
-  /** How many cards the vCard file holds and a digest of its text. */
-  vcard(path: string): Promise<{ cards: number; digest: string; /** The first people of the file as they would be stored (name cleaned the way a stored name is). */ people?: Array<{ name?: string; emails: string[] }> } | undefined>;
+  /** What a set_contact call would store (names with their source, aliases, addresses, or why it is refused), from the contact service's own dry run. */
+  contactPreview(args: Record<string, unknown>): Promise<ContactPreview | undefined>;
+  /** What an import would store, card by card, from the contact service's own dry run, with the file's card count and a digest of its text. */
+  vcard(path: string, args: Record<string, unknown>): Promise<{ cards: number; digest: string; rows: ImportRow[]; total: number; outcome: { added: number; updated: number; unchanged: number } } | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
   plan(planId: string, args: Record<string, unknown>): Promise<PlanItemForApproval[] | undefined>;
   /** The automatic reply as it would be after the call: the stored one with the call's changes applied. */
@@ -197,6 +194,8 @@ const MAX_MESSAGE_CHARS = 1500;
 // These carry a block (the reply text, a rule's conditions and actions) that the person needs to read in full.
 const LONG_QUESTIONS = new Set(["set_autoresponder", "set_rule", "apply_rules"]);
 const MAX_LONG_MESSAGE_CHARS = 2500;
+// An import lists up to 20 people, each with their addresses: room for all of them, so the "More" line is not cut off.
+const MAX_IMPORT_MESSAGE_CHARS = 5000;
 
 function whenText(when: unknown): string {
   if (!isRecord(when)) return "no condition";
@@ -415,62 +414,55 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       break;
     }
     case "set_contact": {
-      const clearable = (label: string, value: unknown) => { if (value !== undefined) add(label, value === null || value === "" ? "cleared" : quoted(value, 80)); };
-      add("Address", quoted(args.address, 80)); if (args.displayName !== undefined) add("Display name", nameText(args.displayName));
+      add("Address", quoted(args.address, 80));
       for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
-      if (Array.isArray(args.aliases)) add("Aliases", aliasesText(args.aliases));
-      if (typeof args.mergeWith === "string" && args.mergeWith.trim()) {
-        add("Merge with", quoted(args.mergeWith, 80));
-        // Both people as stored, and which address ends up first: a merge decides whose name and aliases stand for which addresses.
-        const person = (info: { name?: string; nameImported?: boolean; aliases: string[]; addresses: string[] } | undefined) =>
-          info ? `name ${info.name ? quoted(info.name, 80) + (info.nameImported ? ` (${IMPORTED})` : "") : "none"}, aliases ${info.aliases.length ? listed(info.aliases, info.aliases.length) : "none"}, addresses ${listed(info.addresses, info.addresses.length)}` : "nothing stored yet";
-        const target = typeof args.address === "string" ? await within(() => lookups.contact(args.address as string, args)) : undefined;
-        const other = await within(() => lookups.contact(args.mergeWith as string, args));
-        add("Person of address", person(target));
-        add("Person of mergeWith", person(other));
-        const primary = target ? target.addresses[0] : args.address;
-        add("Primary address after the merge", quoted(primary, 80));
-        // The name the call sets wins over the one the merge would keep.
+      if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, 80));
+      // Everything below is what the contact store itself says it would store: the same code as the call, run on a copy.
+      const preview: ContactPreview | undefined = await within(() => lookups.contactPreview(args));
+      const unmerge = normalizeBoolean(args.unmerge, false);
+      if (!preview) {
+        add("Effect", "unknown (the contact store could not be read)");
+      } else if (preview.refused) {
+        add("This call will be refused", quoted(preview.refused, 400));
+      } else {
+        const holder = unmerge ? preview.after.splitFrom : preview.after.contact;
         if (args.displayName !== undefined) {
-          const imported = [target, other].some((info) => info?.nameImported && info.name && info.name === cleanContactText(String(args.displayName ?? ""), CONTACT_NAME_MAX));
-          const replaced = [target, other].some((info) => info?.nameImported);
-          add("Name after the merge", nameText(args.displayName, "none") + (imported ? ` (the same as the name ${IMPORTED}: it stays marked as imported)` : replaced && args.displayName ? " (set in this call: becomes a name you set yourself, no longer marked as imported)" : ""));
+          const typed = typeof args.displayName === "string" ? args.displayName : "";
+          add("Display name", `${holder?.name ? storedName(holder) : "cleared"}${typed !== (holder?.name ?? "") ? CHANGED : ""}`);
+        }
+        if (Array.isArray(args.aliases)) {
+          const stored = holder?.aliases ?? [];
+          const typed = args.aliases.map(String);
+          add("Aliases", `${stored.length ? listed(stored, stored.length) : "cleared"}${JSON.stringify(typed) !== JSON.stringify(stored) ? CHANGED : ""}`);
+        }
+        if (typeof args.mergeWith === "string" && args.mergeWith.trim()) {
+          add("Person of address", personText(preview.before.address, "nothing stored yet"));
+          add("Person of mergeWith", personText(preview.before.mergeWith, "nothing stored yet"));
+          add("Primary address after the merge", holder?.addresses[0] ? quoted(holder.addresses[0], 80) : "none");
+          add("Name after the merge", storedName(holder));
+        }
+        if (unmerge) {
+          add("Unmerge", "yes");
+          add("Split out", quoted(preview.target ?? args.address, 80));
+          add("Stays behind", personText(preview.after.splitFrom, "no one: nothing is left to store for the remaining address"));
         } else {
-          const from = target?.name ? target : other;
-          add("Name after the merge", from?.name ? quoted(from.name, 80) + (from.nameImported ? ` (${IMPORTED})` : "") : "none");
+          add("After the call", personText(preview.after.contact, "nothing is stored for this address any more"));
         }
       }
-      if (normalizeBoolean(args.unmerge, false)) {
-        add("Unmerge", "yes");
-        // The name and aliases stay with the addresses that remain, not with the one split out. When the store cannot be read
-        // the question still says that, and says the people and their names are unknown, rather than leaving the lines out.
-        const split = typeof args.address === "string" ? (normalizeContactAddress(args.address) ?? args.address.trim().toLowerCase()) : "";
-        const info = typeof args.address === "string" ? await within(() => lookups.contact(args.address as string, args)) : undefined;
-        add("Split out", quoted(split, 80));
-        add("Addresses that stay together", info ? listed(info.addresses.filter((address) => address !== split), info.addresses.length) : "unknown (no stored person for this address, or the store could not be read)");
-        const named = args.displayName !== undefined;
-        const aliasesSet = Array.isArray(args.aliases);
-        let nameLine: string;
-        if (named) {
-          const same = info?.nameImported && info.name && info.name === cleanContactText(String(args.displayName ?? ""), CONTACT_NAME_MAX);
-          nameLine = nameText(args.displayName, "none") + (same ? ` (the same as the name ${IMPORTED}: it stays marked as imported)` : info?.nameImported && args.displayName ? " (set in this call: becomes a name you set yourself, no longer marked as imported)" : "");
-        } else {
-          nameLine = !info ? "unknown" : info.name ? quoted(info.name, 80) + (info.nameImported ? ` (${IMPORTED}; it stays marked as imported)` : "") : "none";
-        }
-        const aliasLine = aliasesSet ? ((args.aliases as unknown[]).length ? aliasesText(args.aliases as unknown[]) : "none") : !info ? "unknown" : info.aliases.length ? listed(info.aliases, info.aliases.length) : "none";
-        add("Name and aliases stay with them", `name ${nameLine}, aliases ${aliasLine}${named || aliasesSet ? " (as set in this call)" : ""}`);
-      }
-      clearable("Notes", args.notes);
+      if (args.notes !== undefined) add("Notes", args.notes === null || args.notes === "" ? "cleared" : quoted(args.notes, 80));
       break;
     }
     case "import_contacts": {
       const path = typeof args.path === "string" ? args.path : "";
-      const file = path ? await within(() => lookups.vcard(path)) : undefined;
+      const file = path ? await within(() => lookups.vcard(path, args)) : undefined;
       bound = { kind: "vcard", digest: file?.digest };
       add("File", quoted(basename(path), 80)); add("Cards", file ? String(file.cards) : "unknown (the file could not be read)");
-      // The names that would be stored (an imported name can later answer to what the user types), with their addresses.
-      for (const [index, person] of (file?.people ?? []).entries()) add(`Person ${index + 1}`, `${person.name ? quoted(person.name, 80) : "no name"}, ${listed(person.emails, 3)}`);
-      if (file?.people && file.cards > file.people.length) add("More", `and ${file.cards - file.people.length} more cards`);
+      if (file) {
+        add("Effect", `adds ${file.outcome.added} people, adds to ${file.outcome.updated} existing ones, leaves ${file.outcome.unchanged} cards as they are`);
+        // The first people as the store would hold them after the import (from the contact service's own dry run).
+        for (const [index, row] of file.rows.entries()) add(`Person ${index + 1}`, importRowText(row));
+        if (file.total > file.rows.length) add("More", `and ${file.total - file.rows.length} more cards`);
+      }
       break;
     }
     case "approve_plan": {
@@ -493,7 +485,7 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     }
   }
   const text = lines.join("\n");
-  const cap = LONG_QUESTIONS.has(name) ? MAX_LONG_MESSAGE_CHARS : MAX_MESSAGE_CHARS;
+  const cap = name === "import_contacts" ? MAX_IMPORT_MESSAGE_CHARS : LONG_QUESTIONS.has(name) ? MAX_LONG_MESSAGE_CHARS : MAX_MESSAGE_CHARS;
   return { message: text.length > cap ? `${text.slice(0, cap - 1)}…` : text, bound };
 }
 

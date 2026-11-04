@@ -359,6 +359,7 @@ test("cleanContactText removes invisible characters that can smuggle text or fil
   assert.equal(cleanContactText("A\u{E0100}n\uFE0Fn\u00ADa\u3164\u2800\u115F\u1160\uFFA0 B", 100), "Anna B");
   assert.equal(cleanContactText("Ann\u200B Lee\u202E", 100), "Ann Lee");
   assert.equal(cleanContactText("Zoë Nowak, Müller", 100), "Zoë Nowak, Müller", "ordinary accents and umlauts stay");
+  assert.equal(cleanContactText("Pre\u0600zes2", 100), "Prezes2", "any format character (category Cf) is dropped, not only the listed ones");
 });
 
 test("a hidden instruction in a displayName is not stored", async () => {

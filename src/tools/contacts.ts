@@ -3,14 +3,14 @@ import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import type { AccountBundle } from "../services/account-manager.js";
-import type { ContactRecord } from "../services/contact-service.js";
+import type { ContactPatch, ContactRecord } from "../services/contact-service.js";
 import type { EmailAddress, EmailSummary } from "../types/index.js";
 import { cleanContactText, foldText, lowerAscii, normalizeContactAddress } from "../utils/contact-text.js";
 import { InvalidArgumentError, isSelfAddress, isValidEmail, normalizeBoolean, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
 import { assertApprovedContentUnchanged, contentDigest } from "../utils/approval.js";
 import { assessMail } from "../utils/mail-security.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
-import { CONTACT_NAME_MAX, parseVcf } from "../utils/vcard.js";
+import { CONTACT_NAME_MAX, parseVcf, type ParsedVCard } from "../utils/vcard.js";
 import { requireString } from "./args.js";
 import { withAudit } from "./audit.js";
 import type { ToolContext } from "./context.js";
@@ -223,6 +223,31 @@ function clearableText(value: unknown, key: string): string | null | undefined {
   return value;
 }
 
+/** The address and the patch a set_contact call stands for: the one reading of its arguments, shared by the tool and the approval question. */
+export function contactPatchFromArgs(args: Record<string, unknown>): { address: string; patch: ContactPatch } {
+  const address = requireString(args, "address");
+  const patch: ContactPatch = {
+    displayName: clearableText(args.displayName, "displayName"),
+    notes: clearableText(args.notes, "notes"),
+    addTags: tagList(args.addTags, "addTags"),
+    removeTags: tagList(args.removeTags, "removeTags"),
+    aliases: aliasList(args.aliases),
+    mergeWith: typeof args.mergeWith === "string" && args.mergeWith.trim() ? args.mergeWith : undefined,
+    unmerge: normalizeBoolean(args.unmerge, false),
+  };
+  if (!patch.unmerge && !patch.mergeWith && !patch.addTags?.length && !patch.removeTags?.length && patch.displayName === undefined && patch.notes === undefined && patch.aliases === undefined) {
+    throw new InvalidArgumentError("Nothing to change: pass displayName, notes, aliases, addTags, removeTags, mergeWith or unmerge.");
+  }
+  return { address, patch };
+}
+
+/** The cards an import stores: the account's own addresses are not a contact of it, and a card left without an address is dropped. */
+export function cardsForImport(cards: ParsedVCard[], ownAddresses: string[]): ParsedVCard[] {
+  return cards
+    .map((card) => ({ ...card, emails: card.emails.filter((email) => !ownAddresses.some((address) => isSelfAddress(email, address))) }))
+    .filter((card) => card.emails.length > 0);
+}
+
 export async function handleContactTool(name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const { config, resolveAccountArg, primaryBundle, selectedBundles } = ctx;
   switch (name) {
@@ -273,19 +298,7 @@ export async function handleContactTool(name: string, args: Record<string, unkno
       // A local store, not the mailbox: gated like templates and rules, so a read-only server changes nothing.
       ensureMailboxWriteAllowed(config.runtime);
       const target = resolveAccountArg(args) ?? primaryBundle;
-      const address = requireString(args, "address");
-      const patch = {
-        displayName: clearableText(args.displayName, "displayName"),
-        notes: clearableText(args.notes, "notes"),
-        addTags: tagList(args.addTags, "addTags"),
-        removeTags: tagList(args.removeTags, "removeTags"),
-        aliases: aliasList(args.aliases),
-        mergeWith: typeof args.mergeWith === "string" && args.mergeWith.trim() ? args.mergeWith : undefined,
-        unmerge: normalizeBoolean(args.unmerge, false),
-      };
-      if (!patch.unmerge && !patch.mergeWith && !patch.addTags?.length && !patch.removeTags?.length && patch.displayName === undefined && patch.notes === undefined && patch.aliases === undefined) {
-        throw new InvalidArgumentError("Nothing to change: pass displayName, notes, aliases, addTags, removeTags, mergeWith or unmerge.");
-      }
+      const { address, patch } = contactPatchFromArgs(args);
       const outcome = await withAudit(target.auditService, name, args, async () => target.contactService.update(address, patch));
       return createTextResult({
         account: target.account.address,
@@ -305,9 +318,7 @@ export async function handleContactTool(name: string, args: Record<string, unkno
         // The person was told how many cards this file held when asked; a file rewritten since is not imported.
         assertApprovedContentUnchanged(args, "vcard", contentDigest(text), name);
         const parsed = parseVcf(text);
-        // The account's own addresses are not a contact of it.
-        const others = parsed.cards.map((card) => ({ ...card, emails: card.emails.filter((email) => !target.ownAddresses.some((address) => isSelfAddress(email, address))) }));
-        const stored = await target.contactService.importCards(others.filter((card) => card.emails.length > 0));
+        const stored = await target.contactService.importCards(cardsForImport(parsed.cards, target.ownAddresses));
         return { cards: parsed.cards.length, withoutAddress: parsed.skipped, truncated: parsed.truncated, ...stored };
       });
       return createTextResult({

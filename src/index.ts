@@ -56,12 +56,11 @@ import { EventsNotifier, eventsResourceText, handleEventsTool } from "./tools/ev
 import { handleCommitmentTool } from "./tools/commitments.js";
 import { handleStyleTool } from "./tools/style.js";
 import { handleDelegationTool } from "./tools/delegation.js";
-import { handleContactTool, readVcfFile } from "./tools/contacts.js";
+import { cardsForImport, contactPatchFromArgs, handleContactTool, readVcfFile } from "./tools/contacts.js";
 import { recipientHint } from "./tools/recipient-resolver.js";
 import { assessMail, isGatedAction, withRiskScan } from "./utils/mail-security.js";
 import { applyApprovalPolicy, clientCanElicit, contentDigest, type ApprovalLookups } from "./utils/approval.js";
-import { cleanContactText } from "./utils/contact-text.js";
-import { CONTACT_NAME_MAX, parseVcf } from "./utils/vcard.js";
+import { parseVcf } from "./utils/vcard.js";
 import { buildEmailResourceUri, buildEventsResourceUri, buildThreadResourceUri, buildDraftResourceUri, formatEmailResource, formatThreadResource, formatDraftResource, parseResourceUri } from "./tools/resources.js";
 import { MissingCredentialsError, buildConfigFromEnv } from "./config-env.js";
 export { mailboxChangedSinceCheckpoint } from "./tools/index-refresh.js";
@@ -110,16 +109,23 @@ function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLoo
         replyTo: addressValues(detail.replyTo),
       };
     },
-    // The people two addresses belong to, as stored: a merge is shown with both.
-    contact: async (address, args) => {
-      const record = await (ctx.resolveAccountArg(args) ?? ctx.primaryBundle).contactService.recordFor(address);
-      return record ? { name: record.displayName, nameImported: record.displayNameFrom === "import", aliases: record.aliases ?? [], addresses: record.addresses } : undefined;
+    // What the call would store, from the contact service itself (the same code path as the call, on a copy of the store).
+    contactPreview: async (args) => {
+      try {
+        const { address, patch } = contactPatchFromArgs(args);
+        return await (ctx.resolveAccountArg(args) ?? ctx.primaryBundle).contactService.preview(address, patch);
+      } catch (error) {
+        if (error instanceof InvalidArgumentError) return { refused: error.message, before: {}, after: {} };
+        throw error;
+      }
     },
-    vcard: async (path) => {
+    vcard: async (path, args) => {
       const text = await readVcfFile(path);
       const parsed = parseVcf(text);
-      const people = parsed.cards.slice(0, 20).map((card) => ({ name: card.name ? cleanContactText(card.name, CONTACT_NAME_MAX) : undefined, emails: card.emails }));
-      return { cards: parsed.cards.length, digest: contentDigest(text), people };
+      const bundle = ctx.resolveAccountArg(args) ?? ctx.primaryBundle;
+      const cards = cardsForImport(parsed.cards, bundle.ownAddresses);
+      const preview = await bundle.contactService.previewImport(cards);
+      return { cards: parsed.cards.length, digest: contentDigest(text), rows: preview.rows, total: cards.length, outcome: preview.outcome };
     },
     draft: async (id) => {
       const { bundle, rest } = ctx.resolveAccountForDraftId(id);
