@@ -134,7 +134,7 @@ test("find_contact returns one identity, merge joins two addresses and unmerge s
     // The name stays with the remaining address, so a split has to restate it (an unmerge that leaves a name behind unasked is refused).
     const refused = await raw("set_contact", { address: "ann.smith@gmail.com", unmerge: true });
     assert.equal(refused.isError, true);
-    assert.match(refused.content[0].text, /pass displayName and aliases/);
+    assert.match(refused.content[0].text, /displayName: null and aliases: \[\]/);
     const split = await call("set_contact", { address: "ann.smith@gmail.com", unmerge: true, displayName: "Ann Smith", aliases: [] });
     assert.deepEqual(split.splitFrom.addresses, ["ann@acme.co.uk"]);
     assert.deepEqual(split.splitFrom.tags, ["vip"], "what was set stays with the remaining address");

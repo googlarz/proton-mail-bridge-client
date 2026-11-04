@@ -162,6 +162,22 @@ test("set_contact unmerge: the question lists the addresses that stay together a
   }, { answer: "accept" });
 });
 
+test("set_contact unmerge: a blank name counts as cleared, the address is normalised, and an unknown person is said to be unknown", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "boss@company.example", displayName: "Boss Person", aliases: ["Boss"], mergeWith: "other@company.example" });
+    await call("set_contact", { address: "mailto:<Boss@Company.example>", unmerge: true, displayName: "   ", aliases: [] });
+    const question = asked.at(-1);
+    assert.equal(line(question, "Split out"), 'Split out: "boss@company.example"');
+    assert.equal(line(question, "Addresses that stay together"), 'Addresses that stay together: "other@company.example"');
+    assert.equal(line(question, "Name and aliases stay with them"), "Name and aliases stay with them: name none, aliases none (as set in this call)");
+    // No stored person for the address: the lines are still there, and say what is not known.
+    await call("set_contact", { address: "nobody@company.example", unmerge: true });
+    const unknown = asked.at(-1);
+    assert.match(line(unknown, "Addresses that stay together"), /unknown \(no stored person for this address, or the store could not be read\)/);
+    assert.equal(line(unknown, "Name and aliases stay with them"), "Name and aliases stay with them: name unknown, aliases unknown");
+  }, { answer: "accept" });
+});
+
 test("set_contact: the question lists the aliases, and an empty list is said to clear them", async () => {
   await withServer(async ({ call, asked }) => {
     await call("set_contact", { address: "ann@example.com", aliases: ["Ania", "Anka"] });

@@ -323,7 +323,7 @@ proton-mail-bridge-client categorize-inbox                     # a preview; --ar
 proton-mail-bridge-client correct-category INBOX::123 Receipts
 proton-mail-bridge-client get-follow-up-candidates
 proton-mail-bridge-client find-contact "Pat"                   # a person by name or address: addresses, tags, notes, counts, last subjects
-proton-mail-bridge-client resolve-recipient "Maćka"            # who a name, nickname or mistyped address means: candidates with confidence; never picks one for you
+proton-mail-bridge-client resolve-recipient "Maćka"            # who a name, nickname or mistyped address means, among your saved contacts only: candidates with confidence; never picks one for you
 proton-mail-bridge-client set-contact pat@client.example --args '{"addTags":["vip"]}'
 proton-mail-bridge-client set-contact pat@client.example --args '{"aliases":["Patrick","Paddy"]}'   # nicknames for resolve-recipient and find-contact; [] clears them
 proton-mail-bridge-client set-contact pat@client.example --args '{"mergeWith":"pat@home.example"}'

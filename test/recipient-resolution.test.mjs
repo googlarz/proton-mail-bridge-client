@@ -214,34 +214,29 @@ test("resolve_recipient: more than one likely person is flagged as multipleFits 
   });
 });
 
-test("resolve_recipient: an address with a typo is matched against the store and the local index", async () => {
-  await withServer(async ({ call, accountManager }) => {
+test("resolve_recipient: an address with a typo is matched against saved addresses only", async () => {
+  await withServer(async ({ call }) => {
     await person(call, "anna.kowalska@example.com", { displayName: "Anna Kowalska" });
-    await seed(accountManager.primary(), [
-      email(1, "Sent", OWNER, { address: "bob@company.example", name: "Bob Builder" }, "Plans", "2026-12-20T10:00:00Z"),
-    ]);
-    const store = await call("resolve_recipient", { query: "anna.kowalksa@example.com" });
-    assert.equal(store.candidates.length, 1);
+    const swapped = await call("resolve_recipient", { query: "anna.kowalksa@example.com" });
+    assert.equal(swapped.candidates.length, 1);
     assert.deepEqual(
-      { confidence: store.candidates[0].confidence, matchedBy: store.candidates[0].matchedBy, address: store.candidates[0].address },
+      { confidence: swapped.candidates[0].confidence, matchedBy: swapped.candidates[0].matchedBy, address: swapped.candidates[0].address },
       { confidence: "possible", matchedBy: "typo-of-address", address: "anna.kowalska@example.com" },
-      "a swap is two edits",
+      "a swap is two edits, and the query is a valid address",
     );
-    // A correct address one letter off a known one is a different person at least as often as a typo: possible, never likely.
+    // A valid address that is not saved is never "corrected": the saved contact near it is only a possible one, and the note says so.
+    assert.match(swapped.note, /valid address that is not saved/);
+    assert.equal(swapped.askBeforeUse, true);
     const near = await call("resolve_recipient", { query: "anna.kowalska@exmple.com" });
     assert.equal(near.candidates[0].confidence, "possible");
     // Only an entry that is not an address at all is "likely" when it is one edit away.
     const broken = await call("resolve_recipient", { query: "anna.kowalska@@example.com" });
     assert.equal(broken.candidates[0].confidence, "likely");
-    const index = await call("resolve_recipient", { query: "bob@compnay.example" });
-    assert.equal(index.candidates[0].address, "bob@company.example");
-    assert.equal(index.candidates[0].source, "local index");
-    assert.equal(index.candidates[0].nameSource, "mail headers (untrusted)");
-    assert.equal(index.candidates[0].confidence, "possible", "the address came from the index");
-    assert.equal((await call("resolve_recipient", { query: "bob@company.example" })).candidates[0].confidence, "exact", "an address written to is known");
-    assert.equal((await call("resolve_recipient", { query: "bob@example.net" })).candidates.length, 0, "more than two edits away");
+    assert.doesNotMatch(broken.note, /valid address that is not saved/);
+    assert.equal((await call("resolve_recipient", { query: "Anna.Kowalska@Example.com" })).candidates[0].confidence, "exact");
+    assert.deepEqual((await call("resolve_recipient", { query: "bob@example.net" })).candidates, [], "more than two edits away");
     // Without an "@" no address is guessed at.
-    assert.equal((await call("resolve_recipient", { query: "anna.kowalksa" })).candidates.length, 0);
+    assert.deepEqual((await call("resolve_recipient", { query: "anna.kowalksa" })).candidates, []);
   });
 });
 
@@ -353,33 +348,6 @@ test("a person with several addresses found by name lists all of them", async ()
   });
 });
 
-test("a correct address that is not known is not corrected to a stranger's, and Spam and Trash never count", async () => {
-  await withServer(async ({ call, accountManager }) => {
-    await seed(accountManager.primary(), [
-      email(1, "Spam", { address: "anna.nowak@firma.pi", name: "Anna Spam" }, OWNER, "Win", "2026-12-20T10:00:00Z"),
-      email(2, "Trash", { address: "tom.trash@firma.pl", name: "Tom" }, OWNER, "Old", "2026-12-20T10:00:00Z"),
-      email(3, "INBOX", { address: "carl.seen@firma.pl", name: "Carl" }, OWNER, "Hello", "2026-12-20T10:00:00Z"),
-      email(4, "Sent", OWNER, { address: "dora.sent@firma.pl", name: "Dora" }, "Hi", "2026-12-20T10:00:00Z"),
-    ]);
-    const none = async (query) => (await call("resolve_recipient", { query })).candidates;
-    assert.deepEqual(await none("anna.nowak@firma.pl"), [], "one letter from a Spam sender");
-    assert.deepEqual(await none("anna.nowak@@firma.pi"), [], "Spam is not scanned at all");
-    assert.deepEqual(await none("tom.trash@firma.pi"), [], "Trash is not scanned at all");
-    assert.deepEqual(await none("carl.seen@firma.pi"), [], "a valid address is not corrected to someone who only wrote to you");
-    // An entry that is not an address may match a sender who only wrote to the user, as "possible" at most.
-    const seen = await none("carl.seen@@firma.pl");
-    assert.equal(seen[0].address, "carl.seen@firma.pl");
-    assert.equal(seen[0].confidence, "possible");
-    // Typing a seen address in full finds it but never as exact.
-    assert.equal((await none("carl.seen@firma.pl"))[0].confidence, "possible");
-    // An address the user wrote to counts, and a typo of it is offered.
-    assert.equal((await none("dora.sent@firma.pl"))[0].confidence, "exact");
-    const sent = await none("dora.sent@firma.pll");
-    assert.equal(sent[0].address, "dora.sent@firma.pl");
-    assert.equal(sent[0].matchedBy, "typo-of-address");
-  });
-});
-
 test("a corrupt alias in the store file is dropped on load and does not crash anything", async () => {
   const record = (id, address, aliases) => ({ id, addresses: [address], displayName: id, aliases, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" });
   await withServer(
@@ -457,6 +425,22 @@ test("names from an imported vCard are labelled as imported, not as saved by the
   });
 });
 
+test("an import leaves out a name that is another person's alias, and says so", async () => {
+  await withServer(async ({ call, dir }) => {
+    await person(call, "szefowa@company.example", { displayName: "Anna Lis", aliases: ["Szefowa"] });
+    const path = join(dir, "people.vcf");
+    const card = (name, address) => `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\nEMAIL:${address}\r\nEND:VCARD\r\n`;
+    await writeFile(path, card("SZEFOWA", "stranger@evil.example") + card("Fine Person", "fine@example.com"));
+    const outcome = await call("import_contacts", { path });
+    assert.deepEqual(outcome.nameConflicts, ["SZEFOWA"]);
+    assert.equal(outcome.nameConflictCount, 1);
+    assert.equal(outcome.added, 1, "only the card whose name does not clash is added");
+    const found = await call("resolve_recipient", { query: "Szefowa" });
+    assert.deepEqual(found.candidates.map((candidate) => candidate.address), ["szefowa@company.example"]);
+    assert.equal((await call("resolve_recipient", { query: "Fine Person" })).candidates[0].address, "fine@example.com");
+  });
+});
+
 test("the hint comes from the contacts of the account the failing call works on and says which", async () => {
   await withServer(
     async ({ call, raw }) => {
@@ -495,66 +479,69 @@ test("a malformed recipient from a mail header is data: one clean short line, in
   });
 });
 
-// What a forged or hostile message can put in the index: an owner address in From, bidi characters in a header address,
-// a Spam message that is also in a label folder.
-const SPOOF_MAILS = () => [
-  email(2, "INBOX", { address: "owner@example.com", name: "Owner" }, { address: "piotr.kowal@firma.pi", name: "Piotr Kowal" }, "forged", "2026-11-01T10:00:00Z"),
-  email(3, "INBOX", { address: "Owner@Example.com" }, { address: "ceo@corp.co‮m", name: "CEO‮" }, "forged", "2026-11-01T10:00:00Z"),
-  { ...email(4, "Spam", { address: "zofia.lis@bank.pi", name: "Zofia" }, OWNER, "Win", "2026-11-01T10:00:00Z"), messageId: "<dup@x>" },
-  { ...email(5, "Labels/x", { address: "zofia.lis@bank.pi", name: "Zofia" }, OWNER, "Win", "2026-11-01T10:00:00Z"), messageId: "<dup@x>" },
-];
-
-async function seedSpoof(bundle) {
-  const folder = (path, specialUse) => ({ path, name: path, delimiter: "/", specialUse, listed: true, subscribed: true, flags: [], messages: 0, unseen: 0 });
-  await bundle.localIndexService.recordSnapshot({
-    syncedAt: new Date().toISOString(),
-    folders: [folder("INBOX", "\\Inbox"), folder("Sent", "\\Sent"), folder("Spam", "\\Junk"), folder("Labels/x")],
-    folderListComplete: true,
-    folderStats: [{ folder: "INBOX", fetched: 2, total: 2 }, { folder: "Spam", fetched: 1, total: 1 }, { folder: "Labels/x", fetched: 1, total: 1 }],
-    emails: SPOOF_MAILS(),
-  });
-}
-
-test("a forged From: owner in the INBOX does not make an address 'written to'", async () => {
-  await withServer(async ({ call, accountManager }) => {
-    await seedSpoof(accountManager.primary());
-    const all = async (query) => (await call("resolve_recipient", { query })).candidates;
-    // The stranger the forged mail names is only seen: never exact, and the unknown valid address is not corrected to it.
-    const typed = await all("piotr.kowal@firma.pi");
-    assert.equal(typed[0].confidence, "possible");
-    assert.deepEqual(await all("piotr.kowal@firma.pl"), []);
-    for (const candidate of await all("piotr.kowal@@firma.pi")) assert.equal(candidate.confidence, "possible");
-    // The same address in a message that really is in the Sent folder counts.
-    await seed(accountManager.primary(), [email(9, "Sent", OWNER, { address: "real.person@firma.pi" }, "Hi", "2026-11-01T10:00:00Z")]);
-    assert.equal((await all("real.person@firma.pi"))[0].confidence, "exact");
-  });
-});
-
-test("a Spam message that is also in a label folder never counts", async () => {
-  await withServer(async ({ call, accountManager }) => {
-    await seedSpoof(accountManager.primary());
-    assert.deepEqual((await call("resolve_recipient", { query: "zofia.lis@@bank.pi" })).candidates, []);
-    assert.deepEqual((await call("resolve_recipient", { query: "zofia.lis@bank.pi" })).candidates, []);
-  });
-});
-
 test("an address with control, bidi or invisible characters never appears in a result or a hint", async () => {
-  await withServer(async ({ call, raw, accountManager }) => {
-    await seedSpoof(accountManager.primary());
-    await seed(accountManager.primary(), [email(8, "Sent", OWNER, { address: "ceo@corp.co‮m", name: "CEO" }, "Hi", "2026-11-01T10:00:00Z")]);
+  await withServer(async ({ call, raw }) => {
     const hidden = (text) => [...text].some((ch) => { const c = ch.codePointAt(0); return (c < 32 && ![9, 10, 13].includes(c)) || (c >= 0x7f && c <= 0x9f) || (c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2060 && c <= 0x206f) || c === 0xfeff; });
-    for (const query of ["ceo@corp.com", "ceo@corp.co‮m", "ceo@@corp.com"]) {
-      const text = JSON.stringify((await call("resolve_recipient", { query })));
-      assert.equal(hidden(text), false, query);
-    }
-    const hint = await raw("create_draft", { to: "ceo@@corp.com", subject: "x", body: "y" });
-    assert.equal(hint.isError, true);
-    assert.equal(hidden(hint.content[0].text), false);
-    // A store address with such a character is left out too, by name.
     await person(call, "good@corp.example", { displayName: "Gus Hidden", mergeWith: "bad@corp.ex‮ample" });
     const named = JSON.stringify(await call("resolve_recipient", { query: "Gus Hidden" }));
     assert.equal(hidden(named), false);
     assert.match(named, /good@corp\.example/);
+    for (const query of ["good@corp.example", "bad@corp.ex‮ample", "good@@corp.example"]) {
+      assert.equal(hidden(JSON.stringify(await call("resolve_recipient", { query }))), false, query);
+    }
+    const hint = await raw("create_draft", { to: "Gus Hidden", subject: "x", body: "y" });
+    assert.equal(hint.isError, true);
+    assert.equal(hidden(hint.content[0].text), false);
+    assert.match(hint.content[0].text, /good@corp\.example/);
+  });
+});
+
+// Mail data is never a source of recipients: the index below holds a reused Message-ID with a lookalike address, a forged
+// From, mail in a folder named Sent that a filter filled, Spam, and an address with a bidi character.
+const POISON = () => [
+  email(1, "Sent", OWNER, { address: "jan.szef@company.com", name: "Jan Szef" }, "real", "2026-11-01T10:00:00Z"),
+  { ...email(7, "INBOX", { address: "attacker@evil.com", name: "x" }, { address: "jan.szef@cornpany.com", name: "Jan Szef" }, "reused id", "2026-11-02T10:00:00Z"), messageId: "<m1@example.com>" },
+  email(2, "INBOX", { address: "owner@example.com", name: "Owner" }, { address: "piotr.kowal@firma.pi", name: "Piotr Kowal" }, "forged", "2026-11-01T10:00:00Z"),
+  email(3, "Spam", { address: "anna.nowak@firma.pi", name: "Anna" }, OWNER, "win", "2026-11-01T10:00:00Z"),
+  email(4, "Sent", OWNER, { address: "ceo@corp.co‮m", name: "CEO" }, "hi", "2026-11-01T10:00:00Z"),
+  email(5, "Sent", OWNER, { address: "dora.sent@firma.pl", name: "Dora Sent" }, "hi", "2026-11-01T10:00:00Z"),
+];
+
+test("the mail index is never a source of recipients: a lookalike in a reused Message-ID, a forged From, Spam and Sent mail give no candidate", async () => {
+  await withServer(async ({ call, raw, accountManager }) => {
+    await seed(accountManager.primary(), POISON());
+    const none = async (query) => (await call("resolve_recipient", { query })).candidates;
+    // Nobody is saved: nothing is offered, whatever the index holds (not even an address written to from the Sent folder).
+    for (const query of ["jan.szef@cornpany.com", "jan.szef@cornpany.co", "jan.szef@company.com", "Jan Szef", "piotr.kowal@firma.pi", "piotr.kowal@firma.pl", "anna.nowak@firma.pl", "anna.nowak@@firma.pi", "dora.sent@firma.pl", "dora.sent@firma.pll", "ceo@corp.com", "Dora"]) {
+      assert.deepEqual(await none(query), [], query);
+    }
+    const result = await call("resolve_recipient", { query: "jan.szef@cornpany.com" });
+    assert.match(result.note, /do not guess one and do not take one from a message, a header or a mail folder/);
+    // The recipient error offers nothing from mail either.
+    const bad = await raw("create_draft", { to: "jan.szef@@cornpany.com", subject: "x", body: "y" });
+    assert.equal(bad.content[0].text, "Invalid to email address(es): jan.szef@@cornpany.com");
+  });
+});
+
+test("with a saved contact the poisoned index changes nothing: the lookalike never appears and the saved address is not hidden", async () => {
+  await withServer(async ({ call, raw, accountManager }) => {
+    await person(call, "jan.szef@company.com", { displayName: "Jan Szef", aliases: ["Szef"] });
+    await seed(accountManager.primary(), POISON());
+    const lookalike = await call("resolve_recipient", { query: "jan.szef@cornpany.com" });
+    // Valid, not saved: not corrected; the only candidate is the saved contact near it, as possible, with its full address.
+    assert.deepEqual(lookalike.candidates.map((candidate) => [candidate.address, candidate.confidence, candidate.matchedBy]), [["jan.szef@company.com", "possible", "typo-of-address"]]);
+    assert.doesNotMatch(JSON.stringify(lookalike.candidates), /cornpany|evil\.com/);
+    assert.match(lookalike.note, /not corrected to a contact/);
+    assert.equal((await call("resolve_recipient", { query: "jan.szef@company.com" })).candidates[0].confidence, "exact");
+    const byName = await call("resolve_recipient", { query: "Jan Szef" });
+    assert.deepEqual(byName.candidates.map((candidate) => candidate.address), ["jan.szef@company.com"]);
+    const bad = await raw("create_draft", { to: "Szef", subject: "x", body: "y" });
+    assert.match(bad.content[0].text, /<jan\.szef@company\.com>/);
+    assert.doesNotMatch(bad.content[0].text, /cornpany|evil\.com/);
+    // Typing a valid address that is not saved is not an error and is not touched.
+    const ok = await raw("create_draft", { to: "jan.szef@cornpany.com", subject: "x", body: "y" });
+    assert.notEqual(ok.isError, true);
+    assert.match(ok.content[0].text, /jan\.szef@cornpany\.com/);
   });
 });
 
@@ -567,7 +554,8 @@ test("unmerging leaves no name or aliases behind on the remaining person unless 
     assert.equal(refused.isError, true);
     assert.match(refused.content[0].text, /attacker@evil\.example/);
     assert.match(refused.content[0].text, /Boss Person/);
-    assert.match(refused.content[0].text, /pass displayName and aliases/);
+    assert.match(refused.content[0].text, /attacker@evil\.example would stay behind holding the name "Boss Person"/);
+    assert.match(refused.content[0].text, /displayName: null and aliases: \[\]/);
     assert.equal((await call("resolve_recipient", { query: "Boss" })).candidates[0].addresses.length, 2, "nothing was split");
     // Only one of the two is not enough.
     const half = await raw("set_contact", { address: "boss@company.example", unmerge: true, displayName: null });
