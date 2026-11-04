@@ -598,7 +598,7 @@ test("the notes are shown up to 500 characters, and the question says when they 
     await call("set_contact", { address: "a@example.com", notes: "n".repeat(600) });
     const shown = line(asked.at(-1), "Notes");
     assert.ok(shown.includes("n".repeat(500)) && !shown.includes("n".repeat(501)), "500 characters");
-    assert.match(shown, /\(shown cut at 500 of 600 characters; the whole text is stored, up to 2000\)$/);
+    assert.match(shown, /\(shown cut at 500 of 600 characters; the whole text is stored\)$/);
     await call("set_contact", { address: "a@example.com", notes: "short note" });
     assert.equal(line(asked.at(-1), "Notes"), 'Notes: "short note"');
   }, { answer: "accept" });
@@ -694,7 +694,7 @@ test("notes made of quote characters are cut to the room that is left and always
     assert.ok(!result.isError, result.content[0].text);
     const question = asked.at(-1);
     const notes = line(question, "Notes");
-    assert.match(notes, /\(shown cut at \d+ of 1500 characters; the whole text is stored, up to 2000\)$/, "the remark is never lost");
+    assert.match(notes, /\(shown cut at \d+ of 1500 characters; the whole text is stored\)$/, "the remark is never lost");
     const shown = Number(/shown cut at (\d+)/.exec(notes)[1]);
     assert.ok(shown >= 1 && shown <= 500);
     assert.ok(question.indexOf("After the call: ") < question.indexOf("Notes: "));
@@ -724,14 +724,61 @@ test("the tag limit counts distinct tags, before and after a merge", async () =>
   }, { answer: "accept" });
 });
 
-test("merged notes are cleaned like any notes: trimmed after the cut, and storing them again changes nothing", async () => {
+test("a merge whose joined notes would not fit is refused, not cut; shorter notes merge and stay clean", async () => {
   const { cleanContactText } = await import("../dist/utils/contact-text.js");
-  await withServer(async ({ call, dir }) => {
-    await call("set_contact", { address: "a@example.com", notes: "a".repeat(1998) });
-    await call("set_contact", { address: "b@example.com", notes: "b" });
+  await withServer(async ({ call, asked, dir }) => {
+    await call("set_contact", { address: "p@x.example", notes: "A".repeat(1500) });
+    await call("set_contact", { address: "q@x.example", notes: "B".repeat(1500) });
+    const askedBefore = asked.length;
+    const refused = await call("set_contact", { address: "p@x.example", mergeWith: "q@x.example" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /would be refused, so the user was not asked: Merging would give this person notes of 3002 characters \(1500 and 1500, joined\) and at most 2000 are kept\. Shorten the notes of one of them first/);
+    assert.equal(asked.length, askedBefore);
+    assert.equal((await recordOf(dir, "p@x.example")).notes, "A".repeat(1500), "nothing changed");
+    // Setting the notes in the same call is the way through.
+    const through = await call("set_contact", { address: "p@x.example", mergeWith: "q@x.example", notes: "both" });
+    assert.ok(!through.isError, through.content[0].text);
+    // Notes that fit are joined and stored as clean text.
+    await call("set_contact", { address: "a@example.com", notes: "first" });
+    await call("set_contact", { address: "b@example.com", notes: "second" });
     await call("set_contact", { address: "a@example.com", mergeWith: "b@example.com" });
     const notes = (await recordOf(dir, "a@example.com")).notes;
-    assert.equal(notes, "a".repeat(1998), "the blank lines left by the cut are gone");
+    assert.equal(notes, "first\n\nsecond");
     assert.equal(cleanContactText(notes, 2000, true), notes);
+  }, { answer: "accept" });
+});
+
+test("a hand-edited store with 200 aliases and 40 tags cannot cut the effect line, and the notes still get their room", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    await call("set_contact", { address: "p@x.example", addTags: ["vip"] });
+    const path = join(dir, "data", "contacts.json");
+    const file = JSON.parse(await readFile(path, "utf8"));
+    const record = Object.values(file.items)[0];
+    record.aliases = Array.from({ length: 200 }, (_, index) => '"'.repeat(36) + String(index).padStart(3, "0"));
+    record.tags = Array.from({ length: 40 }, (_, index) => `t${index}`.padEnd(32, "z"));
+    await writeFile(path, JSON.stringify(file));
+    asked.length = 0;
+    const result = await call("set_contact", { address: "p@x.example", notes: "check me" });
+    assert.ok(!result.isError, result.content[0].text);
+    const question = asked[0];
+    assert.ok(!question.endsWith("…"), `not cut (${question.length})`);
+    const effect = line(question, "After the call");
+    assert.match(effect, /aliases .* and 190 more, tags .* and 20 more, addresses "p@x\.example"$/);
+    assert.equal(line(question, "Notes"), 'Notes: "check me"');
+  }, { answer: "accept" });
+});
+
+test("the notes remark counts what would be stored: N of M, with newlines kept, and says when the typed text is longer than what is stored", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "a@example.com", notes: `line one\nline two\n\n\n\nline three${"x".repeat(600)}` });
+    const shown = line(asked.at(-1), "Notes");
+    const total = "line one\nline two\n\nline three".length + 600;
+    assert.ok(shown.startsWith('Notes: "line one\\nline two\\n\\nline three'), "newlines are shown as stored (collapsed to one blank line)");
+    assert.match(shown, new RegExp(`\\(shown cut at 500 of ${total} characters; the whole text is stored\\)$`));
+    // Something shorter than the limit is shown whole and without a remark; typed text beyond 2000 is called out.
+    await call("set_contact", { address: "a@example.com", notes: "short\nnote" });
+    assert.equal(line(asked.at(-1), "Notes"), 'Notes: "short\\nnote"');
+    await call("set_contact", { address: "a@example.com", notes: "z".repeat(2500) });
+    assert.match(line(asked.at(-1), "Notes"), /\(shown cut at 500 of 2000 characters; the whole text is stored; what was typed is 2500 characters and only the first 2000 are stored\)$/);
   }, { answer: "accept" });
 });

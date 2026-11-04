@@ -12,9 +12,9 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { FORWARD_DAILY_LIMIT, type EffectiveRule } from "../services/rules-service.js";
 import { contactPreviewDigest, importPreviewDigest, type ContactImportOutcome, type ContactPreview, type ImportRow, type PersonView } from "../services/contact-service.js";
-import { CONTACT_NAME_MAX } from "./vcard.js";
+import { CONTACT_NAME_MAX, CONTACT_NOTES_MAX } from "./vcard.js";
 import type { AutoresponderRule } from "../services/autoresponder-service.js";
-import { wellFormed } from "./contact-text.js";
+import { cleanContactText, wellFormed } from "./contact-text.js";
 import { normalizeBoolean } from "./helpers.js";
 import { isGatedAction } from "./mail-security.js";
 
@@ -83,14 +83,16 @@ const NOTES_REMARK_ROOM = 120;
 /** The longest an address can be (RFC 5321), shown in full: an address cut short is not the address that will be used. */
 const ADDRESS_WIDTH = 254;
 const MAX_SHOWN_TAGS = 20;
+const MAX_SHOWN_ALIASES = 10;
 
 /**
- * A person as the store would hold them after the call. In an effect line every alias and tag is listed (the store allows 10
- * and 20) and up to 5 addresses in full, the rest counted; in an import row (`compact`) 3 of each.
+ * A person as the store would hold them after the call. In an effect line up to 10 aliases and 20 tags (what the store allows;
+ * a hand-edited store can hold more) and up to 5 addresses in full are listed, the rest counted ("and N more"); in an import
+ * row (`compact`) 3 of each. That bounds the line, so an effect line can never grow past the cap.
  */
 function personText(person: PersonView | undefined, absent: string, compact = false): string {
   if (!person) return absent;
-  const aliases = person.aliases.length ? listed(person.aliases, compact ? 3 : person.aliases.length) : "none";
+  const aliases = person.aliases.length ? listed(person.aliases, compact ? 3 : MAX_SHOWN_ALIASES) : "none";
   const tags = person.tags.length ? listed(person.tags, compact ? 3 : MAX_SHOWN_TAGS) : "none";
   return `name ${storedName(person)}, aliases ${aliases}, tags ${tags}, addresses ${listed(person.addresses, compact ? 3 : SHOWN_ADDRESSES, ADDRESS_WIDTH)}`;
 }
@@ -440,7 +442,8 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       const preview: ContactPreview | undefined = await within(() => lookups.contactPreview(args));
       bound = { kind: "contact", digest: preview && !preview.refused ? contactPreviewDigest(preview) : undefined };
       const unmerge = normalizeBoolean(args.unmerge, false);
-      // The notes are typed text with a length of their own: after the effect lines (which are never cut) and before the people the call started from.
+      // The notes are typed text with a length of their own: they come after the effect lines and before the people the call
+      // started from, and they get what is left of the cap (the effect lines are bounded, see personText, so there is always some).
       let notesAdded = false;
       const addNotes = () => {
         if (notesAdded || args.notes === undefined) return;
@@ -450,13 +453,17 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
           add("Notes", "cleared");
           return;
         }
-        // As much of the notes as the room left allows (quote characters take two characters each once quoted), never more than
-        // NOTES_SHOWN, and always with the remark when it is less than what was typed.
-        const everything = [...cleanForPrompt(notes, 1_000_000)];
+        // What would be stored, as stored (newlines show as \n in the quoted line); N of M counts that text, so N < M means cut.
+        const storedChars = [...cleanContactText(notes, CONTACT_NOTES_MAX, true).replace(/[\u2028\u2029]/g, " ")];
         const room = MAX_CONTACT_MESSAGE_CHARS - lines.join("\n").length - "\nNotes: ".length - NOTES_REMARK_ROOM;
-        let shown = everything.slice(0, NOTES_SHOWN);
+        let shown = storedChars.slice(0, NOTES_SHOWN);
         while (shown.length > 0 && JSON.stringify(shown.join("")).length > room) shown = shown.slice(0, Math.floor(shown.length * 0.9));
-        add("Notes", `${JSON.stringify(shown.join(""))}${shown.length < everything.length ? ` (shown cut at ${shown.length} of ${everything.length} characters; the whole text is stored, up to 2000)` : ""}`);
+        const typedChars = [...cleanContactText(notes, 1_000_000, true)].length;
+        const remarks = [
+          shown.length < storedChars.length ? `shown cut at ${shown.length} of ${storedChars.length} characters; the whole text is stored` : "",
+          typedChars > storedChars.length ? `what was typed is ${typedChars} characters and only the first ${CONTACT_NOTES_MAX} are stored` : "",
+        ].filter(Boolean);
+        add("Notes", `${JSON.stringify(shown.join(""))}${remarks.length ? ` (${remarks.join("; ")})` : ""}`);
       };
       if (!preview) {
         // Not asked: a yes to something that cannot be shown could never be bound to what is stored, and the call would only fail afterwards.
@@ -478,7 +485,7 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         if (Array.isArray(args.aliases)) {
           const stored = holder?.aliases ?? [];
           const typed = args.aliases.map(String);
-          add("Aliases", `${stored.length ? listed(stored, stored.length) : "cleared"}${JSON.stringify(typed) !== JSON.stringify(stored) ? CHANGED : ""}`);
+          add("Aliases", `${stored.length ? listed(stored, MAX_SHOWN_ALIASES) : "cleared"}${JSON.stringify(typed) !== JSON.stringify(stored) ? CHANGED : ""}`);
         }
         // The effect first (it must never be what a length cut takes away), the people it started from last.
         const merging = typeof args.mergeWith === "string" && args.mergeWith.trim() !== "";
@@ -492,6 +499,9 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
           add("Stays behind", personText(preview.after.splitFrom, "no one: nothing is left to store for the remaining address"));
         } else {
           add("After the call", personText(preview.after.contact, "nothing is stored for this address any more"));
+        }
+        if (lines.join("\n").length > MAX_CONTACT_MESSAGE_CHARS - NOTES_SHOWN * 2 - NOTES_REMARK_ROOM) {
+          refused = "what this call would store is too long to show you in full, so there is nothing safe to ask about and nothing was changed.";
         }
         addNotes();
         if (merging) {

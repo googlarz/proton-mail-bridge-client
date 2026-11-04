@@ -279,9 +279,12 @@ function applyPatch(store: ContactFile, address: string, patch: ContactPatch, no
         throw new InvalidArgumentError(`Merging would give this person ${merged.length} aliases and at most ${MAX_ALIASES} are allowed; ${overflow} would not fit. Remove aliases from one of them first (or pass aliases in this call to set the list yourself).`);
       }
       if (merged.length) record.aliases = merged.slice(0, MAX_ALIASES);
-      // Cleaned like any notes (cut without splitting a pair, trimmed), so storing them again changes nothing.
-      const notes = cleanContactText([record.notes, other.notes].filter(Boolean).join("\n\n"), CONTACT_NOTES_MAX, true);
-      if (notes) record.notes = notes;
+      // Notes are not cut quietly either: when both together are too long the merge is refused (unless the call sets the notes itself).
+      const joined = [record.notes, other.notes].filter(Boolean).join("\n\n");
+      if (joined.length > CONTACT_NOTES_MAX && patch.notes === undefined) {
+        throw new InvalidArgumentError(`Merging would give this person notes of ${joined.length} characters (${record.notes?.length ?? 0} and ${other.notes?.length ?? 0}, joined) and at most ${CONTACT_NOTES_MAX} are kept. Shorten the notes of one of them first (or pass notes in this call to set them yourself).`);
+      }
+      if (joined) record.notes = joined;
       delete store.items[other.id];
     }
   }
