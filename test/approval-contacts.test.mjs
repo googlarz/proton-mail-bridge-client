@@ -131,7 +131,7 @@ test("import_contacts: a file that cannot be read is said so, not left out", asy
     // Nothing to show means nothing to ask: refused, with the reason, and no question.
     assert.equal(asked.length, 0);
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /would be refused, so the user was not asked: the file could not be read/);
+    assert.match(result.content[0].text, /would be refused, so the user was not asked: Cannot open .*missing\.vcf: ENOENT/);
   });
   const { buildApprovalMessage } = await import("../dist/utils/approval.js");
   const question = await buildApprovalMessage("import_contacts", { path: "/x/missing.vcf" }, { account: () => "owner@example.com", vcard: async () => { throw new Error("gone"); } });
@@ -528,4 +528,78 @@ test("when what a call would store cannot be worked out, it is refused without a
   );
   assert.equal(asked, 0);
   assert.equal(args.confirmed, undefined);
+});
+
+test("an import with a mistake the caller can fix gets its real reason, not a generic refusal", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const reason = async (args) => {
+      const result = await call("import_contacts", args);
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /would be refused, so the user was not asked: /);
+      return result.content[0].text;
+    };
+    assert.match(await reason({ path: "contacts.vcf" }), /path must be an absolute path to a \.vcf file/);
+    await writeFile(join(dir, "notes.txt"), "x");
+    assert.match(await reason({ path: join(dir, "notes.txt") }), /path must name a \.vcf \(vCard\) file/);
+    assert.match(await reason({ path: join(dir, "missing", "contacts.vcf") }), /Cannot open .*ENOENT/);
+    await writeFile(join(dir, "big.vcf"), Buffer.alloc(5 * 1024 * 1024 + 10, 97));
+    assert.match(await reason({ path: join(dir, "big.vcf") }), /at most 5 MB is imported/);
+    await writeFile(join(dir, "ok.vcf"), card("Ann", "ann@example.com"));
+    // An unknown account is refused by the question itself, with its own message.
+    const unknown = await call("import_contacts", { path: join(dir, "ok.vcf"), account: "nobody@example.net" });
+    assert.equal(unknown.isError, true);
+    assert.match(unknown.content[0].text, /Unknown account "nobody@example\.net"/);
+    assert.equal(asked.length, 0);
+  });
+});
+
+test("lone surrogates are replaced, so a name cannot swell to six characters per letter and push the effect out of the question", async () => {
+  const { cleanContactText, wellFormed } = await import("../dist/utils/contact-text.js");
+  const { cleanForPrompt } = await import("../dist/utils/approval.js");
+  assert.equal(wellFormed("a\ud800b\udc00c"), "a�b�c");
+  assert.equal(wellFormed("😀"), "😀", "a real pair stays");
+  assert.equal(cleanContactText("Ann\ud800", 100), "Ann�");
+  assert.equal(cleanForPrompt("x\udc00y"), "x�y");
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "boss@company.example", addTags: ["vip"] });
+    await call("set_contact", { address: "x@evil.example", mergeWith: "y@evil.example" });
+    const lone = "\ud800";
+    const result = await call("set_contact", { address: "boss@company.example", mergeWith: "x@evil.example", displayName: lone.repeat(99) + "N", aliases: Array.from({ length: 10 }, (_, index) => lone.repeat(39) + index) });
+    assert.ok(!result.isError, result.content[0].text);
+    const question = asked.at(-1);
+    assert.doesNotMatch(question, /\\ud[89a-f][0-9a-f]{2}/i, "no escaped surrogate in the question");
+    const effect = line(question, "After the call");
+    assert.match(effect, /x@evil\.example/);
+    assert.match(effect, /y@evil\.example/);
+    assert.match(effect, /"vip"/);
+    assert.ok(!question.endsWith("…"));
+  }, { answer: "accept" });
+});
+
+test("a merge that would give more than 20 tags is refused naming the tags that do not fit, not cut quietly", async () => {
+  await withServer(async ({ call, asked }) => {
+    const tags = (prefix) => Array.from({ length: 11 }, (_, index) => `${prefix}${index}`);
+    await call("set_contact", { address: "a@example.com", addTags: tags("a") });
+    await call("set_contact", { address: "b@example.com", addTags: tags("b") });
+    const askedBefore = asked.length;
+    const refused = await call("set_contact", { address: "a@example.com", mergeWith: "b@example.com" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /would be refused, so the user was not asked: Merging would give this person 22 tags and at most 20 are allowed; "b9", "b10" would not fit/);
+    assert.equal(asked.length, askedBefore);
+    // Removing tags in the same call is the way through; the question then shows all the tags that remain.
+    const done = await call("set_contact", { address: "a@example.com", mergeWith: "b@example.com", removeTags: ["a0", "b0"] });
+    assert.ok(!done.isError, done.content[0].text);
+    assert.equal(asked.at(-1).split("\n").find((entry) => entry.startsWith("After the call")).match(/"[ab]\d+"/g).length, 20);
+  }, { answer: "accept" });
+});
+
+test("the notes are shown up to 500 characters, and the question says when they are cut", async () => {
+  await withServer(async ({ call, asked }) => {
+    await call("set_contact", { address: "a@example.com", notes: "n".repeat(600) });
+    const shown = line(asked.at(-1), "Notes");
+    assert.ok(shown.includes("n".repeat(499)) && !shown.includes("n".repeat(500)), "499 characters and an ellipsis");
+    assert.match(shown, /\(shown cut at 500 of 600 characters; the whole text is stored, up to 2000\)$/);
+    await call("set_contact", { address: "a@example.com", notes: "short note" });
+    assert.equal(line(asked.at(-1), "Notes"), 'Notes: "short note"');
+  }, { answer: "accept" });
 });

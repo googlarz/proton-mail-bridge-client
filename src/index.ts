@@ -82,6 +82,13 @@ function declaredArguments(name: string): ReadonlySet<string> {
   return new Set(Object.keys(properties ?? {}));
 }
 
+// The message of an error that is the caller's to fix (an argument that cannot be used), or undefined for anything else.
+function fixableReason(error: unknown): string | undefined {
+  if (error instanceof InvalidArgumentError) return error.message;
+  if (error instanceof McpError && error.code === ErrorCode.InvalidParams) return error.message.replace(/^(?:MCP error -?\d+: )+/, "");
+  return undefined;
+}
+
 // What the approval question may say about a call, read from the server's own stores (never from the model's description).
 function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLookups {
   return {
@@ -115,17 +122,25 @@ function approvalLookups(ctx: ReturnType<typeof createToolContext>): ApprovalLoo
         const { address, patch } = contactPatchFromArgs(args);
         return await (ctx.resolveAccountArg(args) ?? ctx.primaryBundle).contactService.preview(address, patch);
       } catch (error) {
-        if (error instanceof InvalidArgumentError) return { refused: error.message, before: {}, after: {} };
+        const reason = fixableReason(error);
+        if (reason) return { refused: reason, before: {}, after: {} };
         throw error;
       }
     },
     vcard: async (path, args) => {
-      const text = await readVcfFile(path);
-      const parsed = parseVcf(text);
-      const bundle = ctx.resolveAccountArg(args) ?? ctx.primaryBundle;
-      const cards = cardsForImport(parsed.cards, bundle.ownAddresses);
-      const preview = await bundle.contactService.previewImport(cards);
-      return { cards: parsed.cards.length, digest: contentDigest(text), rows: preview.rows, total: cards.length, outcome: preview.outcome };
+      try {
+        const text = await readVcfFile(path);
+        const parsed = parseVcf(text);
+        const bundle = ctx.resolveAccountArg(args) ?? ctx.primaryBundle;
+        const cards = cardsForImport(parsed.cards, bundle.ownAddresses);
+        const preview = await bundle.contactService.previewImport(cards);
+        return { cards: parsed.cards.length, digest: contentDigest(text), rows: preview.rows, total: cards.length, outcome: preview.outcome };
+      } catch (error) {
+        // A mistake in the arguments (path, extension, size, account) has a message the caller can act on; I/O failures stay generic.
+        const reason = fixableReason(error);
+        if (reason) return { refused: reason };
+        throw error;
+      }
     },
     draft: async (id) => {
       const { bundle, rest } = ctx.resolveAccountForDraftId(id);

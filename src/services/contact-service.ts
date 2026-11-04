@@ -266,7 +266,8 @@ function applyPatch(store: ContactFile, address: string, patch: ContactPatch, no
       }
       record.org ??= other.org;
       const tags = [...new Set([...(record.tags ?? []), ...(other.tags ?? [])])];
-      if (tags.length) record.tags = tags.slice(0, MAX_TAGS);
+      // More than the store allows is refused after the call's own tag changes (see the end of applyPatch), never cut quietly.
+      if (tags.length) record.tags = tags;
       const merged = [...new Map([...(record.aliases ?? []), ...(other.aliases ?? [])].map((alias) => [foldText(alias), alias])).values()];
       // A merge never drops an alias quietly: when they do not all fit (and the call does not replace the list), it is refused.
       if (merged.length > MAX_ALIASES && aliases === undefined) {
@@ -295,6 +296,10 @@ function applyPatch(store: ContactFile, address: string, patch: ContactPatch, no
     if (tags.length > MAX_TAGS) throw new InvalidArgumentError(`A person can have at most ${MAX_TAGS} tags.`);
     if (tags.length) record.tags = tags;
     else delete record.tags;
+  }
+  if ((record.tags?.length ?? 0) > MAX_TAGS) {
+    const overflow = (record.tags ?? []).slice(MAX_TAGS).map((tag) => `"${tag}"`).join(", ");
+    throw new InvalidArgumentError(`Merging would give this person ${record.tags?.length} tags and at most ${MAX_TAGS} are allowed; ${overflow} would not fit. Remove tags from one of them first (or pass removeTags in this call).`);
   }
   record.updatedAt = now;
   if (says(record)) {

@@ -6,9 +6,14 @@ const CONTROL = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 export const INVISIBLE = /[\u00AD\u061C\u115F\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\u2800\u3164\uFEFF\uFFA0\uFFF9-\uFFFB\u{E0000}-\u{E007F}]|[\u034F\u180B-\u180D\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]|\u17B4|\u17B5|\u1160|\p{Cf}/gu;
 const ADDRESS = /^[^\s@<>()",;:\\[\]]+@[^\s@<>()",;:\\[\]]+\.[^\s@<>()",;:\\[\]]+$/;
 
+/** A string with every lone surrogate replaced by U+FFFD (what String.prototype.toWellFormed does; the build targets ES2022, which has no typing for it). A lone surrogate is not text and JSON writes it as a 6 character escape. */
+export function wellFormed(value: string): string {
+  return value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD");
+}
+
 /** Without control, bidi and zero-width characters, whitespace collapsed (newlines kept only when asked), at most `max` characters. */
 export function cleanContactText(value: string, max: number, keepNewlines = false): string {
-  const text = value.replace(/\r\n?/g, "\n").replace(INVISIBLE, "");
+  const text = wellFormed(value).replace(/\r\n?/g, "\n").replace(INVISIBLE, "");
   const cleaned = keepNewlines
     ? text.split("\n").map((line) => line.replace(CONTROL, " ").replace(/\s+/g, " ").trim()).join("\n").replace(/\n{3,}/g, "\n\n").trim()
     : text.replace(CONTROL, " ").replace(/\s+/g, " ").trim();

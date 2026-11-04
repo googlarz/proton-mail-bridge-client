@@ -14,6 +14,7 @@ import { FORWARD_DAILY_LIMIT, type EffectiveRule } from "../services/rules-servi
 import { contactPreviewDigest, importPreviewDigest, type ContactImportOutcome, type ContactPreview, type ImportRow, type PersonView } from "../services/contact-service.js";
 import { CONTACT_NAME_MAX } from "./vcard.js";
 import type { AutoresponderRule } from "../services/autoresponder-service.js";
+import { wellFormed } from "./contact-text.js";
 import { normalizeBoolean } from "./helpers.js";
 import { isGatedAction } from "./mail-security.js";
 
@@ -52,7 +53,7 @@ export function needsApproval(name: string, args: Record<string, unknown>, decla
 
 /** Mail text on one line, without control, format (bidi, zero-width) or line-separator characters, cut to `max` characters. */
 export function cleanForPrompt(value: unknown, max = 120): string {
-  const text = String(value ?? "").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+  const text = wellFormed(String(value ?? "")).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
   const chars = [...text];
   return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : text;
 }
@@ -76,6 +77,7 @@ function importRowText(row: ImportRow): string {
 }
 
 const SHOWN_ADDRESSES = 5;
+const NOTES_SHOWN = 500;
 /** The longest an address can be (RFC 5321), shown in full: an address cut short is not the address that will be used. */
 const ADDRESS_WIDTH = 254;
 const MAX_SHOWN_TAGS = 20;
@@ -136,7 +138,7 @@ export interface ApprovalLookups {
   /** What a set_contact call would store (names with their source, aliases, addresses, or why it is refused), from the contact service's own dry run. */
   contactPreview(args: Record<string, unknown>): Promise<ContactPreview | undefined>;
   /** What an import would store, card by card, from the contact service's own dry run, with the file's card count and a digest of its text. */
-  vcard(path: string, args: Record<string, unknown>): Promise<{ cards: number; digest: string; rows: ImportRow[]; total: number; outcome: ContactImportOutcome } | undefined>;
+  vcard(path: string, args: Record<string, unknown>): Promise<{ refused: string } | { cards: number; digest: string; rows: ImportRow[]; total: number; outcome: ContactImportOutcome } | undefined>;
   draft(id: string): Promise<DigestableDraft | undefined>;
   plan(planId: string, args: Record<string, unknown>): Promise<PlanItemForApproval[] | undefined>;
   /** The automatic reply as it would be after the call: the stored one with the call's changes applied. */
@@ -433,7 +435,10 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       for (const [label, tags] of [["Add tags", strings(args.addTags)], ["Remove tags", strings(args.removeTags)]] as const) if (tags.length) add(label, listed(tags));
       if (typeof args.mergeWith === "string" && args.mergeWith.trim()) add("Merge with", quoted(args.mergeWith, ADDRESS_WIDTH));
       // The notes are typed text: before the part that can run long, so a length cut never takes them.
-      if (args.notes !== undefined) add("Notes", args.notes === null || args.notes === "" ? "cleared" : quoted(args.notes, 80));
+      if (args.notes !== undefined) {
+        const notes = args.notes === null || args.notes === "" ? undefined : String(args.notes);
+        add("Notes", notes === undefined ? "cleared" : `${quoted(notes, NOTES_SHOWN)}${[...notes].length > NOTES_SHOWN ? ` (shown cut at ${NOTES_SHOWN} of ${[...notes].length} characters; the whole text is stored, up to 2000)` : ""}`);
+      }
       // Everything below is what the contact store itself says it would store: the same code as the call, run on a copy.
       const preview: ContactPreview | undefined = await within(() => lookups.contactPreview(args));
       bound = { kind: "contact", digest: preview && !preview.refused ? contactPreviewDigest(preview) : undefined };
@@ -482,12 +487,15 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
     }
     case "import_contacts": {
       const path = typeof args.path === "string" ? args.path : "";
-      const file = path ? await within(() => lookups.vcard(path, args)) : undefined;
+      const looked = path ? await within(() => lookups.vcard(path, args)) : undefined;
+      // A mistake the caller can fix (a relative path, the wrong extension, a missing or too large file, an unknown account) comes with its own reason.
+      const fixable = looked && "refused" in looked ? looked.refused : undefined;
+      const file = looked && !("refused" in looked) ? looked : undefined;
       bound = { kind: "vcard", digest: file?.digest, store: file ? importPreviewDigest(file) : undefined };
       add("File", quoted(basename(path), 80)); add("Cards", file ? String(file.cards) : "unknown (the file could not be read)");
       if (!file) {
         // As for set_contact: nothing to show, nothing to bind a yes to.
-        refused = "the file could not be read, or what it would add to the contacts could not be worked out, so there is nothing to show you and nothing was imported.";
+        refused = fixable ?? "the file could not be read in time, or what it would add to the contacts could not be worked out, so there is nothing to show you and nothing was imported.";
       } else {
         add("Effect", `adds ${file.outcome.added} people, adds to ${file.outcome.updated} existing ones, leaves ${file.outcome.unchanged} cards as they are`);
         // The rows that fit under the cap are listed and counted; the "More" line, before them, counts the rest of the cards.
