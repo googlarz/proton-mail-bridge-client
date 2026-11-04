@@ -782,3 +782,54 @@ test("the notes remark counts what would be stored: N of M, with newlines kept, 
     assert.match(line(asked.at(-1), "Notes"), /\(shown cut at 500 of 2000 characters; the whole text is stored; what was typed is 2500 characters and only the first 2000 are stored\)$/);
   }, { answer: "accept" });
 });
+
+// A fake preview at the limits the store allows: two people of 25 addresses of 254 characters, quote-character aliases and a name.
+function worstCase(account = "owner@example.com") {
+  const A = (prefix, index) => (`${prefix}${String(index).padStart(2, "0")}${"x".repeat(300)}`).slice(0, 242) + "@example.com";
+  const alias = (index) => '"'.repeat(38) + String(index).padStart(2, "0");
+  const tag = (index) => ("t" + String(index).padStart(2, "0")).repeat(11).slice(0, 32);
+  const name = '"'.repeat(100);
+  const P = { name, nameSource: "you", aliases: [0, 1, 2, 3, 4].map(alias), tags: [...Array(10).keys()].map(tag), addresses: [...Array(25).keys()].map((index) => A("a", index)) };
+  const Q = { aliases: [5, 6, 7, 8, 9].map(alias), tags: [10, 11, 12, 13, 14].map(tag), addresses: [...Array(25).keys()].map((index) => A("b", index)) };
+  const after = { name, nameSource: "you", aliases: [...Array(10).keys()].map(alias), tags: [...Array(20).keys()].map(tag), addresses: [...P.addresses, ...Q.addresses] };
+  const preview = { target: A("a", 0), before: { address: P, mergeWith: Q }, after: { contact: after } };
+  const args = {
+    address: A("a", 0), mergeWith: A("b", 0), displayName: name + " ", aliases: after.aliases.map((entry, index) => (index === 0 ? entry + " " : entry)),
+    addTags: [15, 16, 17, 18, 19].map(tag), removeTags: [40, 41, 42, 43, 44].map(tag),
+  };
+  return { args, lookups: { account: () => account, contactPreview: async () => preview } };
+}
+
+test("the notes remark is never cut off at the cap, whatever the account name adds", async () => {
+  const { buildApprovalMessage } = await import("../dist/utils/approval.js");
+  for (const pad of [0, 5, 10, 15, 20, 25]) {
+    const { args, lookups } = worstCase("o".repeat(pad) + "owner@example.com");
+    const message = await buildApprovalMessage("set_contact", { ...args, notes: '"'.repeat(3000) }, lookups);
+    const notes = line(message, "Notes");
+    assert.match(notes, /\(shown cut at \d+ of 2000 characters; the whole text is stored; what was typed is 3000 characters and only the first 2000 are stored\)$/, `pad ${pad}`);
+    assert.ok(message.length <= 7000);
+  }
+});
+
+test("the notes remark counts in characters throughout, emoji included", async () => {
+  const { buildApprovalMessage } = await import("../dist/utils/approval.js");
+  const lookups = { account: () => "owner@example.com", contactPreview: async () => ({ target: "p@x.example", before: {}, after: { contact: { aliases: [], tags: [], addresses: ["p@x.example"] } } }) };
+  const emoji = await buildApprovalMessage("set_contact", { address: "p@x.example", notes: "\u{1F600}".repeat(1500) }, lookups);
+  assert.match(line(emoji, "Notes"), /\(shown cut at 500 of 1000 characters; the whole text is stored; what was typed is 1500 characters and only the first 1000 are stored\)$/);
+  const plain = await buildApprovalMessage("set_contact", { address: "p@x.example", notes: "a".repeat(3000) }, lookups);
+  assert.match(line(plain, "Notes"), /\(shown cut at 500 of 2000 characters; the whole text is stored; what was typed is 3000 characters and only the first 2000 are stored\)$/);
+});
+
+test("room for the notes is kept only when the call has notes: a long but valid call without them is asked about", async () => {
+  const { applyApprovalPolicy } = await import("../dist/utils/approval.js");
+  let asked = 0;
+  const server = { getClientCapabilities: () => ({ elicitation: {} }), elicitInput: async () => { asked += 1; return { action: "decline" }; } };
+  const declared = new Set(["address", "mergeWith", "displayName", "aliases", "addTags", "removeTags", "notes"]);
+  const attempt = async (args, lookups) => applyApprovalPolicy({ mode: "elicit", server, name: "set_contact", args, declared, lookups }).then(() => "asked", (error) => error.message);
+  // The account name lengthens the effect lines to about 5900 characters: too long to leave room for notes, fine without them.
+  const { args, lookups } = worstCase("o".repeat(60) + "owner@example.com");
+  assert.match(await attempt({ ...args }, lookups), /declined/);
+  assert.equal(asked, 1, "no notes: the question was put to the person");
+  assert.match(await attempt({ ...args, notes: "short" }, lookups), /would be refused, so the user was not asked: what this call would store is too long to show you in full/);
+  assert.equal(asked, 1, "with notes there is no room for them: refused without a question");
+});

@@ -79,7 +79,7 @@ function importRowText(row: ImportRow): string {
 const SHOWN_ADDRESSES = 5;
 const NOTES_SHOWN = 500;
 // Room kept for the remark that says the notes are shown cut.
-const NOTES_REMARK_ROOM = 120;
+const NOTES_REMARK_ROOM = 160;
 /** The longest an address can be (RFC 5321), shown in full: an address cut short is not the address that will be used. */
 const ADDRESS_WIDTH = 254;
 const MAX_SHOWN_TAGS = 20;
@@ -461,7 +461,7 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         const typedChars = [...cleanContactText(notes, 1_000_000, true)].length;
         const remarks = [
           shown.length < storedChars.length ? `shown cut at ${shown.length} of ${storedChars.length} characters; the whole text is stored` : "",
-          typedChars > storedChars.length ? `what was typed is ${typedChars} characters and only the first ${CONTACT_NOTES_MAX} are stored` : "",
+          typedChars > storedChars.length ? `what was typed is ${typedChars} characters and only the first ${storedChars.length} are stored` : "",
         ].filter(Boolean);
         add("Notes", `${JSON.stringify(shown.join(""))}${remarks.length ? ` (${remarks.join("; ")})` : ""}`);
       };
@@ -500,7 +500,9 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
         } else {
           add("After the call", personText(preview.after.contact, "nothing is stored for this address any more"));
         }
-        if (lines.join("\n").length > MAX_CONTACT_MESSAGE_CHARS - NOTES_SHOWN * 2 - NOTES_REMARK_ROOM) {
+        // Room for the notes is kept only when the call has notes to show.
+        const notesRoom = typeof args.notes === "string" && args.notes !== "" ? NOTES_SHOWN * 2 + NOTES_REMARK_ROOM : 0;
+        if (lines.join("\n").length > MAX_CONTACT_MESSAGE_CHARS - notesRoom) {
           refused = "what this call would store is too long to show you in full, so there is nothing safe to ask about and nothing was changed.";
         }
         addNotes();
