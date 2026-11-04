@@ -54,6 +54,9 @@ export interface ContactImportOutcome {
   /** Addresses of a card that names a known person but are not that person's yet (or belong to another one); left out. A file never attaches an address to a person: merging is set_contact's mergeWith. First 20; `conflictCount` is the total. */
   conflicts: string[];
   conflictCount: number;
+  /** Names of cards left out because the name is an alias of another person (a nickname must not become a stranger's name). The card's addresses are still imported. First 20; `nameConflictCount` is the total. */
+  nameConflicts: string[];
+  nameConflictCount: number;
   /** Cards not imported because the store is full. */
   overLimit: number;
 }
@@ -186,7 +189,7 @@ export class ContactService {
         // the call has to say what the remaining person is called, or clear it.
         if ((existing.displayName && patch.displayName === undefined) || (existing.aliases?.length && aliases === undefined)) {
           const held = [existing.displayName ? `the name "${existing.displayName}"` : "", existing.aliases?.length ? `the aliases ${existing.aliases.map((alias) => `"${alias}"`).join(", ")}` : ""].filter(Boolean).join(" and ");
-          throw new InvalidArgumentError(`${staying.join(", ")} would keep ${held}. Say who they are: pass displayName and aliases in the same call (the current values to keep them, or null and [] to clear them).`);
+          throw new InvalidArgumentError(`${staying.join(", ")} would stay behind holding ${held}. Check whose they are: the name and aliases may belong to the address you are splitting out, or to no one you know. Clear them by passing displayName: null and aliases: [] in the same call, then set them again where they belong (passing the same values only keeps them with ${staying.join(", ")}).`);
         }
         if (patch.displayName !== undefined) {
           const name = patch.displayName === null ? "" : cleanContactText(patch.displayName, CONTACT_NAME_MAX);
@@ -273,10 +276,14 @@ export class ContactService {
     return this.withLock(async () => {
       const store = await this.loadUnlocked();
       const now = new Date().toISOString();
-      const outcome: ContactImportOutcome = { added: 0, updated: 0, unchanged: 0, conflicts: [], conflictCount: 0, overLimit: 0 };
+      const outcome: ContactImportOutcome = { added: 0, updated: 0, unchanged: 0, conflicts: [], conflictCount: 0, nameConflicts: [], nameConflictCount: 0, overLimit: 0 };
       // Thousands of cards against thousands of records: looked up in a map, not by scanning the store per address.
       const byAddress = new Map<string, ContactRecord>();
-      for (const record of Object.values(store.items)) for (const address of record.addresses) byAddress.set(address, record);
+      const aliasOwners = new Map<string, ContactRecord>();
+      for (const record of Object.values(store.items)) {
+        for (const address of record.addresses) byAddress.set(address, record);
+        for (const alias of record.aliases ?? []) aliasOwners.set(foldText(alias), record);
+      }
       for (const card of cards) {
         const owners = card.emails.map((address) => byAddress.get(address));
         const existing = owners.find(Boolean);
@@ -295,8 +302,16 @@ export class ContactService {
           }
         });
         if (card.name && !record.displayName) {
-          record.displayName = cleanContactText(card.name, CONTACT_NAME_MAX);
-          if (record.displayName) record.displayNameFrom = "import";
+          const name = cleanContactText(card.name, CONTACT_NAME_MAX);
+          // The same rule as set_contact: a name that is another person's alias would send mail meant for them to this person.
+          const owner = name ? aliasOwners.get(foldText(name)) : undefined;
+          if (owner && owner !== record) {
+            outcome.nameConflictCount += 1;
+            if (outcome.nameConflicts.length < 20) outcome.nameConflicts.push(name);
+          } else if (name) {
+            record.displayName = name;
+            record.displayNameFrom = "import";
+          }
         }
         if (card.org && !record.org) record.org = cleanContactText(card.org, CONTACT_ORG_MAX);
         if (card.note && !record.notes) record.notes = cleanContactText(card.note, CONTACT_NOTES_MAX, true);

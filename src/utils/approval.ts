@@ -12,6 +12,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { FORWARD_DAILY_LIMIT, type EffectiveRule } from "../services/rules-service.js";
 import type { AutoresponderRule } from "../services/autoresponder-service.js";
+import { normalizeContactAddress } from "./contact-text.js";
 import { normalizeBoolean } from "./helpers.js";
 import { isGatedAction } from "./mail-security.js";
 
@@ -404,16 +405,19 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
       }
       if (normalizeBoolean(args.unmerge, false)) {
         add("Unmerge", "yes");
-        // The name and aliases stay with the addresses that remain, not with the one split out.
+        // The name and aliases stay with the addresses that remain, not with the one split out. When the store cannot be read
+        // the question still says that, and says the people and their names are unknown, rather than leaving the lines out.
+        const split = typeof args.address === "string" ? (normalizeContactAddress(args.address) ?? args.address.trim().toLowerCase()) : "";
         const info = typeof args.address === "string" ? await within(() => lookups.contact(args.address as string, args)) : undefined;
-        if (info) {
-          const target = (args.address as string).trim().toLowerCase();
-          add("Addresses that stay together", listed(info.addresses.filter((address) => address !== target), info.addresses.length));
-          const name = args.displayName !== undefined ? (args.displayName === null || args.displayName === "" ? undefined : String(args.displayName)) : info.name;
-          const aliases = Array.isArray(args.aliases) ? strings(args.aliases) : info.aliases;
-          add("Name and aliases stay with them", `name ${name ? quoted(name, 80) : "none"}, aliases ${aliases.length ? listed(aliases, aliases.length) : "none"}${args.displayName !== undefined || Array.isArray(args.aliases) ? " (as set in this call)" : ""}`);
-          add("Split out", quoted(target, 80));
-        }
+        add("Split out", quoted(split, 80));
+        add("Addresses that stay together", info ? listed(info.addresses.filter((address) => address !== split), info.addresses.length) : "unknown (no stored person for this address, or the store could not be read)");
+        const named = args.displayName !== undefined;
+        const name = named ? (typeof args.displayName === "string" ? args.displayName.trim() : "") : info?.name;
+        const aliasesSet = Array.isArray(args.aliases);
+        const aliases = aliasesSet ? strings(args.aliases) : info?.aliases;
+        const nameText = !named && !info ? "unknown" : name ? quoted(name, 80) : "none";
+        const aliasText = !aliasesSet && !info ? "unknown" : aliases?.length ? listed(aliases, aliases.length) : "none";
+        add("Name and aliases stay with them", `name ${nameText}, aliases ${aliasText}${named || aliasesSet ? " (as set in this call)" : ""}`);
       }
       clearable("Notes", args.notes);
       break;

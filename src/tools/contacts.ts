@@ -6,7 +6,7 @@ import type { AccountBundle } from "../services/account-manager.js";
 import type { ContactRecord } from "../services/contact-service.js";
 import type { EmailAddress, EmailSummary } from "../types/index.js";
 import { cleanContactText, foldText, lowerAscii, normalizeContactAddress } from "../utils/contact-text.js";
-import { InvalidArgumentError, isSelfAddress, normalizeBoolean, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
+import { InvalidArgumentError, isSelfAddress, isValidEmail, normalizeBoolean, normalizeLimit, withAccountPrefix } from "../utils/helpers.js";
 import { assertApprovedContentUnchanged, contentDigest } from "../utils/approval.js";
 import { assessMail } from "../utils/mail-security.js";
 import { ensureMailboxWriteAllowed } from "../utils/runtime-policy.js";
@@ -15,7 +15,7 @@ import { requireString } from "./args.js";
 import { withAudit } from "./audit.js";
 import type { ToolContext } from "./context.js";
 import { refreshIndexForSearch } from "./index-refresh.js";
-import { RESOLVE_NOTE, resolveInAccount } from "./recipient-resolver.js";
+import { NOT_IN_CONTACTS_NOTE, queryAddress, RESOLVE_NOTE, resolveInAccount, VALID_ADDRESS_NOTE } from "./recipient-resolver.js";
 import { createTextResult, type ToolResult } from "./results.js";
 
 // Contacts as people: find_contact merges what the local index knows about an address (names in headers, counts both
@@ -252,14 +252,8 @@ export async function handleContactTool(name: string, args: Record<string, unkno
       const query = requireString(args, "query").trim();
       if (query.length < 2 || query.length > 200) throw new InvalidArgumentError("query must be 2-200 characters: a name, a nickname, a part of a name, or an address.");
       const limit = normalizeLimit(args.limit, 5, 1, 20);
-      const found = (
-        await Promise.all(
-          selectedBundles(args).map(async (bundle) => {
-            if (query.includes("@")) await refreshIndexForSearch(bundle);
-            return resolveInAccount(bundle, query, ctx, { useIndex: query.includes("@") });
-          }),
-        )
-      ).flat();
+      // The contact store only: nothing is read from the mail index, so no message, header or folder can offer a recipient.
+      const found = (await Promise.all(selectedBundles(args).map((bundle) => resolveInAccount(bundle, query, ctx)))).flat();
       const order = { exact: 0, likely: 1, possible: 2 };
       const candidates = found.sort((a, b) => order[a.confidence] - order[b.confidence]).slice(0, limit);
       return createTextResult({
@@ -269,9 +263,9 @@ export async function handleContactTool(name: string, args: Record<string, unkno
         // True when more than one person fits well. False never means "no need to ask": the user is asked about a single candidate too.
         multipleFits: candidates.filter((candidate) => candidate.confidence !== "possible").length > 1,
         ...(candidates.length ? { askBeforeUse: true } : {}),
-        note: candidates.length
-          ? RESOLVE_NOTE
-          : "No one in the contact store (or, for an address, the local index) matches. Ask the user for the address; do not guess one. Fill the store with import_contacts or set_contact.",
+        note: !candidates.length
+          ? NOT_IN_CONTACTS_NOTE
+          : [RESOLVE_NOTE, ...(isValidEmail(queryAddress(query) ?? "") && !candidates.some((candidate) => candidate.matchedBy === "address") ? [VALID_ADDRESS_NOTE] : [])].join(" "),
       });
     }
 
