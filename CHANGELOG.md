@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.19.0] — 2026-11-05
+
 ### Added
 
 - **Contact aliases and `resolve_recipient`** (CLI `resolve-recipient`). `set_contact` takes `aliases` (up to 10 nicknames per person, 1-40 characters, no `@`; an empty list clears them; an alias another person already uses is refused with that person named; an alias may not be another person's display name nor a display name another person's alias), `find_contact` matches and shows them, and the `set_contact` approval question lists all of them and, for a merge, both people (names, aliases, addresses) and which address becomes primary, and for an unmerge the addresses that stay together and the name and aliases that stay with them. A merge that would exceed 10 aliases is refused, an `unmerge` that would leave the remaining people holding a name or aliases is refused unless the call clears or sets them (`displayName: null`, `aliases: []`), `import_contacts` leaves out a name that is another person's alias and reports it under `nameConflicts`, names from a vCard import are labelled `imported`, and names and aliases in a hand-edited store are cleaned on load.
