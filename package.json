@@ -1,6 +1,6 @@
 {
   "name": "proton-mail-bridge-client",
-  "version": "2.19.0",
+  "version": "2.19.1",
   "description": "Proton Mail Bridge Client — CLI and Claude Desktop MCP for Proton Mail via Proton Bridge. Can be set to read-only or drafts mode, to ask for your approval before anything is sent or deleted, and keeps a tamper-evident audit log. The default mode is full (sending allowed). The server and index run locally; text the AI model reads goes to the model provider unless the model is local.",
   "mcpName": "io.github.googlarz/proton-mail-bridge-client",
   "type": "module",

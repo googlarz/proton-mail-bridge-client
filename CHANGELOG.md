@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.19.1] — 2026-11-06
+
 ### Fixed
 
 - **A contact merge no longer drops the merged-in person's organisation without saying so.** The first person's organisation stays (an organisation can only come from an import, so refusing a merge of two different ones would leave no way out), and the approval question now shows both organisations (`org` in each person's line) and names the one that is not kept (`Organisation not kept`). It comes from the contact store's own preview, so the question, the digest the answer is bound to, and what is stored agree.
