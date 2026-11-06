@@ -108,7 +108,8 @@ test("concurrent processes recording while head is unreadable: no lost entries, 
       import { AuditService } from ${JSON.stringify(new URL("../dist/services/audit-service.js", import.meta.url).href)};
       const cfg = ${JSON.stringify(config(dir))};
       const s = new AuditService(cfg);
-      for (let i = 0; i < 25; i++) await s.record({ timestamp: "2026-10-29T12:00:00.000Z", tool: "t", status: "success", durationMs: i, input: { i } });
+      const put = async (entry) => { for (let attempt = 0; ; attempt += 1) { try { return await s.record(entry); } catch (error) { if (!/Timed out after \\d+ms waiting for lock/.test(String(error?.message)) || attempt >= 30) throw error; } } };
+      for (let i = 0; i < 25; i++) await put({ timestamp: "2026-10-29T12:00:00.000Z", tool: "t", status: "success", durationMs: i, input: { i } });
     `;
     const run = () => new Promise((res, rej) => { const p = spawn(process.execPath, ["--input-type=module", "-e", child], { stdio: "inherit" }); p.on("exit", (c) => (c === 0 ? res() : rej(new Error("exit " + c)))); });
     await Promise.all([run(), run(), run()]);

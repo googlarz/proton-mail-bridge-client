@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { applySignature, injectBccHeader, sanitizeHeader, SMTPService } from "../dist/services/smtp-service.js";
 
 test("sanitizeHeader replaces CR and LF with spaces", () => {
@@ -20,7 +23,7 @@ function createConfig() {
       password: "secret",
     },
     imap: { host: "127.0.0.1", port: 1143, secure: false, username: "owner@example.com", password: "secret" },
-    dataDir: "/tmp/protonmail-pro-mcp-test",
+    dataDir: mkdtempSync(join(tmpdir(), "protonmail-smtp-")),
     debug: false,
     cacheEnabled: true,
     analyticsEnabled: true,

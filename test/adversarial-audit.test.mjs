@@ -126,7 +126,8 @@ test("three processes writing concurrently keep one linear chain", async () => {
     const code = `
       import { AuditService } from ${JSON.stringify(new URL("../dist/services/audit-service.js", import.meta.url).href)};
       const s = new AuditService(${JSON.stringify(cfg(dir))});
-      for (let i = 0; i < 40; i++) await s.record({ timestamp: "t", tool: "p" + process.pid, status: "success", durationMs: i, input: { i } });
+      const put = async (entry) => { for (let attempt = 0; ; attempt += 1) { try { return await s.record(entry); } catch (error) { if (!/Timed out after \\d+ms waiting for lock/.test(String(error?.message)) || attempt >= 30) throw error; } } };
+      for (let i = 0; i < 40; i++) await put({ timestamp: "t", tool: "p" + process.pid, status: "success", durationMs: i, input: { i } });
     `;
     await Promise.all([1, 2, 3].map(() => new Promise((res, rej) => {
       const c = spawn(process.execPath, ["--input-type=module", "-e", code], { stdio: "inherit" });

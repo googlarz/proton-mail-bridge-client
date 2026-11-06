@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BackgroundSyncService } from "../dist/services/background-sync-service.js";
 
 function createConfig() {
@@ -18,7 +21,7 @@ function createConfig() {
       username: "owner@example.com",
       password: "secret",
     },
-    dataDir: "/tmp/protonmail-pro-mcp-test",
+    dataDir: mkdtempSync(join(tmpdir(), "protonmail-bgsync-")), // its own directory: the sync leader lock lives there
     debug: false,
     cacheEnabled: true,
     analyticsEnabled: true,

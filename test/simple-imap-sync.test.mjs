@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
 import { readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   describeImapError,
@@ -31,7 +33,7 @@ function createConfig() {
       username: "owner@example.com",
       password: "secret",
     },
-    dataDir: "/tmp/protonmail-pro-mcp-test",
+    dataDir: mkdtempSync(join(tmpdir(), "protonmail-imap-sync-")),
     debug: false,
     cacheEnabled: true,
     analyticsEnabled: true,
@@ -1271,7 +1273,7 @@ function createServiceForAttachmentTest(dataDir, raw) {
 }
 
 test("saveAttachments does not silently overwrite two same-named attachments saved in one call (no outputPath)", async () => {
-  const dataDir = "/tmp/protonmail-pro-mcp-test-attach-batch";
+  const dataDir = mkdtempSync(join(tmpdir(), "protonmail-attach-batch-"));
   await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   const raw = buildRawWithSameNameAttachments("<batch@example.com>");
   const service = createServiceForAttachmentTest(dataDir, raw);
@@ -1296,7 +1298,7 @@ test("saveAttachments does not silently overwrite two same-named attachments sav
 });
 
 test("saveAttachments does not silently overwrite a file left over from a prior save (no outputPath)", async () => {
-  const dataDir = "/tmp/protonmail-pro-mcp-test-attach-prior";
+  const dataDir = mkdtempSync(join(tmpdir(), "protonmail-attach-prior-"));
   await rm(dataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 
   // First save: a message with a single attachment named report.txt.

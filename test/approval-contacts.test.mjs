@@ -833,3 +833,66 @@ test("room for the notes is kept only when the call has notes: a long but valid 
   assert.match(await attempt({ ...args, notes: "short" }, lookups), /would be refused, so the user was not asked: what this call would store is too long to show you in full/);
   assert.equal(asked, 1, "with notes there is no room for them: refused without a question");
 });
+
+test("a merge shows both organisations, keeps the first person's, and says which is not kept", async () => {
+  await withServer(async ({ call, asked, dir }) => {
+    const org = (name, address, organisation) => `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\n${organisation ? `ORG:${organisation}\r\n` : ""}EMAIL:${address}\r\nEND:VCARD\r\n`;
+    await writeFile(join(dir, "orgs.vcf"), [
+      org("Same One", "same1@x.example", "Acme"), org("Same Two", "same2@x.example", "acme"),
+      org("Diff One", "diff1@x.example", "Acme"), org("Diff Two", "diff2@x.example", "Globex"),
+      org("Only One", "only1@x.example", "Acme"), org("Only Two", "only2@x.example"),
+      org("Late One", "late1@x.example"), org("Late Two", "late2@x.example", "Globex"),
+      org("None One", "none1@x.example"), org("None Two", "none2@x.example"),
+    ].join(""));
+    await call("import_contacts", { path: join(dir, "orgs.vcf") });
+    const merge = async (first, second) => {
+      const result = await call("set_contact", { address: first, mergeWith: second });
+      assert.ok(!result.isError, result.content[0].text);
+      return asked.at(-1);
+    };
+    const orgOf = async (address) => (await recordOf(dir, address)).org;
+
+    // The same organisation (case aside): nothing is lost and nothing is said.
+    let question = await merge("same1@x.example", "same2@x.example");
+    assert.equal(line(question, "Organisation not kept"), undefined);
+    assert.match(line(question, "After the call"), /, org "Acme", addresses/);
+    assert.equal(await orgOf("same1@x.example"), "Acme");
+
+    // Different organisations: the first stays, the other is named as not kept, and the question and the store agree.
+    question = await merge("diff1@x.example", "diff2@x.example");
+    assert.match(line(question, "Organisation not kept"), /^Organisation not kept: "Globex" \(the merged person's; the first person's stays/);
+    assert.match(line(question, "Person of address"), /, org "Acme", addresses/);
+    assert.match(line(question, "Person of mergeWith"), /, org "Globex", addresses/);
+    assert.match(line(question, "After the call"), /, org "Acme", addresses/);
+    assert.equal(await orgOf("diff1@x.example"), "Acme");
+
+    // Only one has an organisation: it is kept, whichever side it is on.
+    question = await merge("only1@x.example", "only2@x.example");
+    assert.equal(line(question, "Organisation not kept"), undefined);
+    assert.equal(await orgOf("only1@x.example"), "Acme");
+    question = await merge("late1@x.example", "late2@x.example");
+    assert.equal(line(question, "Organisation not kept"), undefined);
+    assert.match(line(question, "After the call"), /, org "Globex", addresses/);
+    assert.equal(await orgOf("late1@x.example"), "Globex");
+
+    // Neither has one: no organisation segment at all.
+    question = await merge("none1@x.example", "none2@x.example");
+    assert.equal(line(question, "Organisation not kept"), undefined);
+    assert.doesNotMatch(line(question, "After the call"), /org /);
+    assert.equal(await orgOf("none1@x.example"), undefined);
+  }, { answer: "accept" });
+});
+
+test("the organisation that is not kept is part of what the answer is bound to", async () => {
+  await withServer(async ({ call, hooks, dir }) => {
+    const org = (name, address, organisation) => `BEGIN:VCARD\r\nVERSION:3.0\r\nFN:${name}\r\nORG:${organisation}\r\nEMAIL:${address}\r\nEND:VCARD\r\n`;
+    await writeFile(join(dir, "orgs.vcf"), org("One", "one@x.example", "Acme") + org("Two", "two@x.example", "Globex"));
+    await call("import_contacts", { path: join(dir, "orgs.vcf") });
+    // While the person decides, the merged-in person's organisation changes: what was shown is stale, the merge is refused.
+    hooks.onAsk = async () => { await editStore(dir, (records) => { records.find((entry) => entry.addresses.includes("two@x.example")).org = "Initech"; }); };
+    const result = await call("set_contact", { address: "one@x.example", mergeWith: "two@x.example" });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /contacts changed after you were asked/);
+    assert.equal((await recordOf(dir, "one@x.example")).addresses.length, 1, "not merged");
+  }, { answer: "accept" });
+});

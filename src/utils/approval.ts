@@ -84,6 +84,7 @@ const NOTES_REMARK_ROOM = 160;
 const ADDRESS_WIDTH = 254;
 const MAX_SHOWN_TAGS = 20;
 const MAX_SHOWN_ALIASES = 10;
+const ORG_WIDTH = 200;
 
 /**
  * A person as the store would hold them after the call. In an effect line up to 10 aliases and 20 tags (what the store allows;
@@ -94,7 +95,8 @@ function personText(person: PersonView | undefined, absent: string, compact = fa
   if (!person) return absent;
   const aliases = person.aliases.length ? listed(person.aliases, compact ? 3 : MAX_SHOWN_ALIASES) : "none";
   const tags = person.tags.length ? listed(person.tags, compact ? 3 : MAX_SHOWN_TAGS) : "none";
-  return `name ${storedName(person)}, aliases ${aliases}, tags ${tags}, addresses ${listed(person.addresses, compact ? 3 : SHOWN_ADDRESSES, ADDRESS_WIDTH)}`;
+  const org = person.org ? `, org ${quoted(person.org, ORG_WIDTH)}` : "";
+  return `name ${storedName(person)}, aliases ${aliases}, tags ${tags}${org}, addresses ${listed(person.addresses, compact ? 3 : SHOWN_ADDRESSES, ADDRESS_WIDTH)}`;
 }
 
 function listed(values: string[], max = 5, width = 80): string {
@@ -499,6 +501,9 @@ async function buildApproval(name: string, args: Record<string, unknown>, lookup
           add("Stays behind", personText(preview.after.splitFrom, "no one: nothing is left to store for the remaining address"));
         } else {
           add("After the call", personText(preview.after.contact, "nothing is stored for this address any more"));
+        }
+        if (preview.droppedOrganisation) {
+          add("Organisation not kept", `${quoted(preview.droppedOrganisation, ORG_WIDTH)} (the merged person's; the first person's stays, and set_contact cannot set an organisation)`);
         }
         // Room for the notes is kept only when the call has notes to show.
         const notesRoom = typeof args.notes === "string" && args.notes !== "" ? NOTES_SHOWN * 2 + NOTES_REMARK_ROOM : 0;

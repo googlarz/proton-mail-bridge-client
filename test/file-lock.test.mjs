@@ -78,6 +78,13 @@ test("a slow holder whose lock was stolen as stale can't delete the new owner's 
   const lockPath = `${storePath}.lock`;
   const B_HOLD_MS = 200;
   const windows = {};
+  // The order of events is signalled, not timed: A says when it holds the lock, B says when it has stolen it. Fixed
+  // sleeps (A held 80 ms, B started 15 ms later) broke on a loaded machine, where C could legitimately go before a late B.
+  let aHasLock;
+  const aHolds = new Promise((resolve) => { aHasLock = resolve; });
+  let bHasLock;
+  const bHolds = new Promise((resolve) => { bHasLock = resolve; });
+  const within = (promise, label) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} did not happen in time`)), 20_000))]);
 
   try {
     const holderA = withFileLock(storePath, async () => {
@@ -89,13 +96,16 @@ test("a slow holder whose lock was stolen as stale can't delete the new owner's 
       await writeFile(lockPath, "999999-impersonated-dead-holder");
       const old = new Date(Date.now() - 60_000);
       await utimes(lockPath, old, old).catch(() => undefined);
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      aHasLock();
+      // A stays slow until B has really stolen the lock from it.
+      await within(bHolds, "B stealing the lock");
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    await within(aHolds, "A taking the lock");
 
     const holderB = withFileLock(storePath, async () => {
       windows.bStart = Date.now();
+      bHasLock();
       await new Promise((resolve) => setTimeout(resolve, B_HOLD_MS));
       windows.bEnd = Date.now();
     });

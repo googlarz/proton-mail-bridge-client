@@ -143,6 +143,8 @@ export interface PersonView {
   name?: string;
   /** "imported": the name came from an imported vCard file; "you": the user set it. */
   nameSource?: "imported" | "you";
+  /** The organisation (only an import sets one). */
+  org?: string;
   aliases: string[];
   tags: string[];
   addresses: string[];
@@ -155,6 +157,8 @@ export interface ContactPreview {
   refused?: string;
   /** The people the call names, as stored now. */
   before: { address?: PersonView; mergeWith?: PersonView };
+  /** The organisation of the merged-in person that the merge does not keep (the first person's stays; an organisation cannot be set with set_contact, so there is no way to keep both). */
+  droppedOrganisation?: string;
   /** What would be stored: the person holding `address` afterwards (none when nothing is stored for it) and, after an unmerge, the person who stays behind. */
   after: { contact?: PersonView; splitFrom?: PersonView };
 }
@@ -190,6 +194,7 @@ export function personView(record: ContactRecord | undefined): PersonView | unde
   if (!record) return undefined;
   return {
     ...(record.displayName ? { name: record.displayName, nameSource: record.displayNameFrom === "import" ? ("imported" as const) : ("you" as const) } : {}),
+    ...(record.org ? { org: record.org } : {}),
     aliases: [...(record.aliases ?? [])],
     tags: [...(record.tags ?? [])],
     addresses: [...record.addresses],
@@ -202,7 +207,10 @@ function previewOn(store: ContactFile, address: string, patch: ContactPatch): Co
   const before = { address: personView(target ? recordOf(store, target) : undefined), mergeWith: personView(other ? recordOf(store, other) : undefined) };
   try {
     const result = applyPatch(structuredClone(store), address, patch, new Date().toISOString());
-    return { target: target ?? undefined, before, after: { contact: personView(result.contact), splitFrom: personView(result.splitFrom) } };
+    // A merge keeps the first person's organisation; the merged-in person's, when there is one that differs, is lost.
+    const theirs = before.mergeWith?.org;
+    const dropped = patch.mergeWith && theirs && result.contact && foldText(result.contact.org ?? "") !== foldText(theirs) ? theirs : undefined;
+    return { target: target ?? undefined, ...(dropped ? { droppedOrganisation: dropped } : {}), before, after: { contact: personView(result.contact), splitFrom: personView(result.splitFrom) } };
   } catch (error) {
     if (error instanceof InvalidArgumentError) return { target: target ?? undefined, refused: error.message, before, after: {} };
     throw error;
@@ -268,6 +276,7 @@ function applyPatch(store: ContactFile, address: string, patch: ContactPatch, no
         record.displayName = other.displayName;
         if (other.displayNameFrom) record.displayNameFrom = other.displayNameFrom;
       }
+      // The first person's organisation stays; the other's is kept only when the first has none (the question says when one is dropped).
       record.org ??= other.org;
       const tags = [...new Set([...(record.tags ?? []), ...(other.tags ?? [])])];
       // More than the store allows is refused after the call's own tag changes (see the end of applyPatch), never cut quietly.
