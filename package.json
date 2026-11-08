@@ -76,10 +76,10 @@
     "@modelcontextprotocol/sdk": "^1.31.0",
     "better-sqlite3": "^13.0.3",
     "imapflow": "2.9.1",
-    "mailparser": "^3.9.33",
+    "mailparser": "^3.14.2",
     "nodemailer": "^10.0.15",
     "sanitize-html": "^2.18.0",
-    "turndown": "^7.2.4",
+    "turndown": "^7.2.5",
     "unpdf": "2.0.0"
   },
   "devDependencies": {
