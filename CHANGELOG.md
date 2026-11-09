@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.19.2] — 2026-11-09
+
+### Changed
+
+- **Dependencies updated:** imapflow 2.9.1 → 2.11.0, mailparser 3.12 → 3.14.2, nodemailer 10.2 → 10.3.1, turndown 7.2.5, unpdf 2.1.0, biome 2.6.5 (dev) (and their sub-dependencies). The full test suite passes on them; no change to the tools themselves.
+
+### Fixed
+
+- **A test no longer depends on the machine being fast.** The indexed-search test assumed the index was ready when the search ran; on a slow runner the search's own 3-second refresh limit passed and it answered from an empty index. The test now fills the index first. The product behaviour (search never waits long for Bridge) is unchanged.
+
 ## [2.19.1] — 2026-11-06
 
 ### Fixed

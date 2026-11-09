@@ -121,7 +121,11 @@ test("a retried approval is refused, a malformed selection is rejected, and Tras
 test("undo does not invent state: a message that was already read stays read", needsOpenssl, async () => {
   await withServer({}, async ({ call, folders }) => {
     const seen = folders.INBOX.messages.find((m) => m.subject === "Read newsletter");
+    // The search only waits ~3 s for its own refresh and then serves the local index, which a slow
+    // runner turns into an empty answer. Fill the index first, without that time limit.
+    await call("sync_emails", { folder: "INBOX" });
     const listed = await call("search_indexed_emails", { folder: "INBOX", query: "Read newsletter" });
+    assert.ok(listed.emails?.length, JSON.stringify(listed));
     const id = listed.emails[0].id;
     const plan = await call("plan_inbox", { scan: false, items: [{ emailId: id, action: "mark_read", reason: "tidy" }] });
     assert.equal((await call("approve_plan", { planId: plan.planId })).applied, 1);
