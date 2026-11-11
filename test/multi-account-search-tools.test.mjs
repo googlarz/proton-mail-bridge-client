@@ -77,6 +77,10 @@ async function withServer(fn) {
     await client.close();
     await server.close();
     await closeTrackedIndexes();
+    // A search refresh that outlived its 3 s limit (a stalled runner) can open an index after the close above, and
+    // Windows then refuses to delete the file (EBUSY). Give it a moment to land, then close once more.
+    await new Promise((r) => setTimeout(r, 200));
+    await closeTrackedIndexes();
     await rm(d1, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     await rm(d2, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
