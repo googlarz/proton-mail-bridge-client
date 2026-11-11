@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.19.3] — 2026-11-11
+
+### Fixed
+
+- **A server whose client was killed now exits instead of spinning at full CPU.** When an MCP client was killed, the server kept running with its stdio pipes unread. The next log line failed with EPIPE on stderr, the uncaught-exception handler logged a warning to the same dead stderr, which failed the same way, and the loop never ended. One user found eight such servers on a Mac, the oldest six days old, at 80–100% CPU and up to 3.2 GB of memory. Write errors on stderr are now ignored, so the server reaches its normal shutdown when stdin closes. Thanks to msz for finding and fixing this (#73). Not changed: a server that is stuck this way still needs SIGKILL, not SIGTERM, if it is already running from an older version.
+
 ## [2.19.2] — 2026-11-09
 
 ### Changed
