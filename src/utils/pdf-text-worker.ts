@@ -1,17 +1,24 @@
-import { parentPort, workerData } from "node:worker_threads";
 import { extractPdfTextDirect, PdfTextError } from "./pdf-text.js";
 
-// Runs one PDF parse for extractPdfText and reports the outcome as a plain message.
-const { content, maxPages, timeoutMs, ocrPages } = workerData as { content: Uint8Array; maxPages: number; timeoutMs: number; ocrPages: number };
+// Child process entry for extractPdfText (see child-job.ts): takes one job as an IPC message, sends the outcome
+// back as a plain message, then idles until the parent kills it. It also leaves when the parent goes away.
+process.on("disconnect", () => process.exit(0));
 
-try {
-  const result = await extractPdfTextDirect(Buffer.from(content), { maxPages, timeoutMs, ocrPages });
-  parentPort?.postMessage({ ok: true, result });
-} catch (error) {
-  const known = error instanceof PdfTextError;
-  parentPort?.postMessage({
-    ok: false,
-    reason: known ? error.reason : "invalid",
-    message: error instanceof Error ? error.message : String(error),
+process.once("message", async (job) => {
+  const { content, maxPages, timeoutMs, ocrPages } = job as { content: Uint8Array; maxPages: number; timeoutMs: number; ocrPages: number };
+  let reply: unknown;
+  try {
+    const result = await extractPdfTextDirect(Buffer.from(content), { maxPages, timeoutMs, ocrPages });
+    reply = { ok: true, result };
+  } catch (error) {
+    const known = error instanceof PdfTextError;
+    reply = {
+      ok: false,
+      reason: known ? error.reason : "invalid",
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  process.send?.(reply, (error) => {
+    if (error) process.exit(1);
   });
-}
+});

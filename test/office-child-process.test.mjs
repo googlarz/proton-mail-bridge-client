@@ -1,0 +1,49 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import test from "node:test";
+import { promisify } from "node:util";
+import { extractOfficeTextAsync } from "../dist/utils/office-text.js";
+import { childPids } from "./helpers/child-processes.mjs";
+import { buildDocx } from "./helpers/office-fixtures.mjs";
+
+const run = promisify(execFile);
+const script = new URL("./helpers/child-job-scripts.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const posix = { skip: process.platform === "win32" ? "needs pgrep" : false };
+
+test("a timeout kills the child process, the parent survives and the next read works", { ...posix, timeout: 30000 }, async () => {
+  const heavy = buildDocx("<w:r></w:r>".repeat(2_800_000)); // seconds of scanning, ends in "no text"
+  const seen = new Set();
+  const watcher = setInterval(() => { for (const pid of childPids()) seen.add(pid); }, 5);
+  const results = await Promise.allSettled([1, 2, 3].map(() => extractOfficeTextAsync(heavy, "docx", { timeoutMs: 250 })));
+  clearInterval(watcher);
+  assert.ok(results.every((r) => r.status === "rejected" && r.reason.reason === "timeout"), JSON.stringify(results.map((r) => r.reason?.reason)));
+  assert.ok(seen.size >= 1, "the jobs really ran in child processes");
+  // The promise settles only once the child is gone: no waiting needed.
+  assert.deepEqual(childPids(), []);
+  assert.deepEqual([...seen].filter(alive), [], "every child that was started is dead");
+  await settle(50);
+  assert.match((await extractOfficeTextAsync(buildDocx("<w:p><w:r><w:t>still fine</w:t></w:r></w:p>"), "docx")).text, /still fine/);
+  assert.deepEqual(childPids(), []);
+});
+
+test("killing the job at many random early moments never aborts the process that reads documents", { timeout: 60000 }, async () => {
+  // The regression behind the move from worker_threads: terminate during zlib construction aborts the whole process
+  // (SIGABRT). It runs in its own process, so an abort shows as a non-zero exit here and not as a dead test runner.
+  // On the worker_threads code, 200 jobs killed at 1-60 ms aborted in about 16 of 20 runs.
+  const { stdout } = await run(process.execPath, [script, "terminate-loop", "200", "60"], { timeout: 55000 });
+  assert.match(stdout, /^LOOP-DONE 200$/m);
+});
+
+test("a read writes nothing to the parent's stdout", { timeout: 30000 }, async () => {
+  const { stdout } = await run(process.execPath, [script, "stdout-marker"], { timeout: 25000 });
+  assert.equal(stdout, "ONLY-THIS-LINE\n");
+});
