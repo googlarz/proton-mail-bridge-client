@@ -4,11 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.19.6] — 2026-11-11
+
+### Fixed
+
+- **An Office document whose reader ran out of memory was reported as damaged.** The PDF reader got the right message in 2.19.5 ("too large or complex"); the Office reader still said "the file looks damaged" for any crash. It now says "The document is too large or complex to read." when the reader was killed by a signal (or exited with code 134 on Windows). The 2.19.5 note that Office files "get the same correct classification" was wrong about the message: only the PDF reader changed then. Reported by zotabee.
+
 ## [2.19.5] — 2026-11-11
 
 ### Fixed
 
-- **On Windows, a PDF whose reader ran out of memory was reported as damaged.** Windows has no signals, so the memory abort shows as exit code 134 with no signal, and the check for "killed by a signal" missed it. It is now treated as the abort it is: "The PDF is too large or complex to read." (Office files get the same correct classification.) Found by a Windows 11 / Node 26 test of 2.19.4.
+- **On Windows, a PDF whose reader ran out of memory was reported as damaged.** Windows has no signals, so the memory abort shows as exit code 134 with no signal, and the check for "killed by a signal" missed it. It is now treated as the abort it is: "The PDF is too large or complex to read." (Office was not changed in 2.19.5; see 2.19.6.) Found by a Windows 11 / Node 26 test of 2.19.4.
 
 ## [2.19.4] — 2026-11-11
 

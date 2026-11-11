@@ -78,7 +78,9 @@ async function runInWorker(content: Buffer, kind: OfficeKind, maxChars: number |
     throw new OfficeTextError(end.message.reason, end.message.message);
   }
   if (!end.started) throw new OfficeTextError("invalid", "The document reader could not start.");
-  // Out of memory or any other crash while parsing.
+  // Killed by a signal: in practice the abort that follows hitting the memory cap.
+  if (end.signal) throw new OfficeTextError("invalid", "The document is too large or complex to read.");
+  // Any other crash while parsing.
   if (end.crashed) throw new OfficeTextError("invalid", "The document could not be read; the file looks damaged.");
   throw new OfficeTextError("invalid", `The document reader stopped unexpectedly (exit code ${end.code}).`);
 }
