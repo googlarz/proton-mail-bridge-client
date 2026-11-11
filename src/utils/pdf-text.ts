@@ -91,11 +91,16 @@ async function runPdfJob(content: Buffer, options: PdfTextOptions): Promise<PdfT
     if (end.message.ok) return end.message.result;
     throw new PdfTextError(end.message.reason, end.message.message);
   }
-  if (!end.started) throw new PdfTextError("invalid", "The PDF reader could not start.");
+  throw pdfDeathError(end);
+}
+
+/** What to tell the caller when the reader ended without an answer. Exported for tests. */
+export function pdfDeathError(end: { started: boolean; crashed: boolean; code: number | null; signal: NodeJS.Signals | null; error?: unknown }): Error {
+  if (!end.started) return new PdfTextError("invalid", "The PDF reader could not start.");
   // Killed by a signal: in practice the abort that follows hitting the memory cap.
-  if (end.signal) throw new PdfTextError("invalid", "The PDF is too large or complex to read.");
-  if (end.crashed) throw toPdfTextError(end.error);
-  throw new PdfTextError("invalid", `The PDF reader stopped unexpectedly (exit code ${end.code}).`);
+  if (end.signal) return new PdfTextError("invalid", "The PDF is too large or complex to read.");
+  if (end.crashed) return toPdfTextError(end.error);
+  return new PdfTextError("invalid", `The PDF reader stopped unexpectedly (exit code ${end.code}).`);
 }
 
 /** The actual parse. Runs inside the child process; exported for it only. */

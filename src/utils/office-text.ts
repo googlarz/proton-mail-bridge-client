@@ -77,12 +77,17 @@ async function runInWorker(content: Buffer, kind: OfficeKind, maxChars: number |
     if (end.message.ok) return end.message.result;
     throw new OfficeTextError(end.message.reason, end.message.message);
   }
-  if (!end.started) throw new OfficeTextError("invalid", "The document reader could not start.");
+  throw officeDeathError(end);
+}
+
+/** What to tell the caller when the reader ended without an answer. Exported for tests. */
+export function officeDeathError(end: { started: boolean; crashed: boolean; code: number | null; signal: NodeJS.Signals | null }): OfficeTextError {
+  if (!end.started) return new OfficeTextError("invalid", "The document reader could not start.");
   // Killed by a signal: in practice the abort that follows hitting the memory cap.
-  if (end.signal) throw new OfficeTextError("invalid", "The document is too large or complex to read.");
+  if (end.signal) return new OfficeTextError("invalid", "The document is too large or complex to read.");
   // Any other crash while parsing.
-  if (end.crashed) throw new OfficeTextError("invalid", "The document could not be read; the file looks damaged.");
-  throw new OfficeTextError("invalid", `The document reader stopped unexpectedly (exit code ${end.code}).`);
+  if (end.crashed) return new OfficeTextError("invalid", "The document could not be read; the file looks damaged.");
+  return new OfficeTextError("invalid", `The document reader stopped unexpectedly (exit code ${end.code}).`);
 }
 
 /**

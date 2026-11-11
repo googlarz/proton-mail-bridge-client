@@ -4,9 +4,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { runJob } from "../dist/utils/child-job.js";
-import { extractOfficeTextAsync } from "../dist/utils/office-text.js";
+import { extractOfficeTextAsync, officeDeathError } from "../dist/utils/office-text.js";
 import { childPids } from "./helpers/child-processes.mjs";
-import { extractPdfText } from "../dist/utils/pdf-text.js";
+import { extractPdfText, pdfDeathError } from "../dist/utils/pdf-text.js";
 import { buildDocx, buildImagePdf } from "./helpers/office-fixtures.mjs";
 
 const run = promisify(execFile);
@@ -89,4 +89,21 @@ test("PDFs are read in a bounded pool too: 2 at a time, 16 waiting, the rest ans
   assert.equal(results.filter((r) => r === "ok").length, 18);
   assert.ok(peak >= 1 && peak <= 2, `peak child processes ${peak}`);
   assert.deepEqual(childPids(), []);
+});
+
+// A real memory abort cannot be provoked with a file inside the unzip budget, so the mapping from "how the child
+// ended" to the message is tested directly, for both readers.
+test("how a reader that ended without an answer is described to the caller", () => {
+  const base = { started: true, crashed: false, code: 0, signal: null };
+  const cases = [
+    { end: { ...base, started: false }, office: /could not start/, pdf: /could not start/ },
+    { end: { ...base, crashed: true, code: null, signal: "SIGABRT" }, office: /too large or complex/, pdf: /too large or complex/ },
+    { end: { ...base, crashed: true, code: 134, signal: "SIGABRT" }, office: /too large or complex/, pdf: /too large or complex/ },
+    { end: { ...base, crashed: true, code: 1 }, office: /damaged/, pdf: /damaged/ },
+    { end: { ...base, code: 7 }, office: /stopped unexpectedly \(exit code 7\)/, pdf: /stopped unexpectedly \(exit code 7\)/ },
+  ];
+  for (const { end, office, pdf } of cases) {
+    assert.match(officeDeathError(end).message, office, JSON.stringify(end));
+    assert.match(pdfDeathError(end).message, pdf, JSON.stringify(end));
+  }
 });
