@@ -39,6 +39,9 @@ test("queries: several wordings are searched and fused; a message found by more 
     return result.isError ? { error: text } : JSON.parse(text);
   };
   try {
+    // The search only waits ~3 s for its own refresh, then serves the local index: a slow runner
+    // turns that into an empty answer. Fill the index first, without that time limit.
+    await client.callTool({ name: "sync_emails", arguments: { folder: "INBOX" } });
     const plain = await call({ query: "kaucja" });
     assert.deepEqual(plain.emails.map((e) => e.subject), ["Zwrot kaucji"], "one wording finds one mail");
     assert.equal(plain.matchedBy, undefined);
