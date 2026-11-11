@@ -107,3 +107,16 @@ test("how a reader that ended without an answer is described to the caller", () 
     assert.match(pdfDeathError(end).message, pdf, JSON.stringify(end));
   }
 });
+
+// The real thing: the same file reads with the shipped 256 MB cap and, with the cap lowered to 8 MB, the reader runs out
+// of memory and the caller is told so (not "damaged"). The file is a 30 MB document.xml of one-letter paragraphs, which
+// stays inside the unzip budget and under the 500,000-character text limit.
+test("a reader that runs out of memory says the document is too large or complex, not damaged", { timeout: 60000 }, async () => {
+  const docx = buildDocx("<w:p><w:t>a</w:t></w:p>".repeat(1_300_000));
+  const normal = await extractOfficeTextAsync(docx, "docx");
+  assert.ok(normal.text.length > 0, "the shipped cap reads this file");
+  await assert.rejects(extractOfficeTextAsync(docx, "docx", { memoryMb: 8 }), (error) => {
+    assert.equal(error.message, "The document is too large or complex to read.");
+    return true;
+  });
+});

@@ -61,16 +61,16 @@ function assertInputSize(content: Buffer): void {
 // two run at once, the rest wait in order, and a long queue is refused instead of growing without bound.
 const slots = new JobSlots(2, 16);
 // The worker_thread limits, as V8 flags for the child: a young generation of 32 MB is three semi-spaces of about 11 MB.
-const CHILD_EXEC_ARGV = ["--max-old-space-size=256", "--max-semi-space-size=11"];
+const OFFICE_MEMORY_MB = 256;
 const WORKER_LIMITS = { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32 };
 
 type OfficeChildMessage = { ok: true; result: OfficeTextResult } | { ok: false; reason: OfficeTextError["reason"]; message: string };
 
-async function runInWorker(content: Buffer, kind: OfficeKind, maxChars: number | undefined, timeoutMs: number): Promise<OfficeTextResult> {
+async function runInWorker(content: Buffer, kind: OfficeKind, maxChars: number | undefined, timeoutMs: number, memoryMb: number): Promise<OfficeTextResult> {
   const end = await runJob<OfficeChildMessage>(
     new URL("./office-text-worker.js", import.meta.url),
     { content, kind, maxChars },
-    { timeoutMs, execArgv: CHILD_EXEC_ARGV, resourceLimits: WORKER_LIMITS },
+    { timeoutMs, execArgv: [`--max-old-space-size=${memoryMb}`, "--max-semi-space-size=11"], resourceLimits: { ...WORKER_LIMITS, maxOldGenerationSizeMb: memoryMb } },
   );
   if (end.kind === "timeout") throw new OfficeTextError("timeout", "Reading the document took too long and was stopped.");
   if (end.kind === "message") {
@@ -98,12 +98,13 @@ export function officeDeathError(end: { started: boolean; crashed: boolean; code
 export async function extractOfficeTextAsync(
   content: Buffer,
   kind: OfficeKind,
-  options: { maxChars?: number; timeoutMs?: number } = {},
+  // memoryMb is the reader's heap cap; only tests pass it, to reach the out-of-memory path with a small file.
+  options: { maxChars?: number; timeoutMs?: number; memoryMb?: number } = {},
 ): Promise<OfficeTextResult> {
   assertInputSize(content);
   const timeoutMs = options.timeoutMs ?? OFFICE_EXTRACTION_TIMEOUT_MS;
   return slots.run(
-    () => runInWorker(content, kind, options.maxChars, timeoutMs),
+    () => runInWorker(content, kind, options.maxChars, timeoutMs, options.memoryMb ?? OFFICE_MEMORY_MB),
     () => new OfficeTextError("busy", "Too many documents are being read at the moment; try again in a few seconds."),
   );
 }
