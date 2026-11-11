@@ -18,8 +18,13 @@ import { isMainThread, parentPort, type ResourceLimits, Worker, workerData } fro
 export type JobEnd<R> =
   | { kind: "message"; message: R }
   | { kind: "timeout" }
-  /** No outcome: `started` is false when the child never got as far as running the script (spawn failed, bad flag, script not found). */
-  | { kind: "died"; started: boolean; crashed: boolean; code: number | null };
+  /**
+   * No outcome. `started` is false when the child never got as far as running the script (spawn failed, bad flag,
+   * script not found); that is only meaningful in fork mode: a worker thread whose script is missing reports
+   * started: true, crashed: true. `signal` is set when a child was killed by one (an out-of-memory abort is SIGABRT).
+   * `error` is the error event's error, when there was one.
+   */
+  | { kind: "died"; started: boolean; crashed: boolean; code: number | null; signal: NodeJS.Signals | null; error?: unknown };
 
 const useWorkerThreads = () => Boolean(process.versions.electron) || process.env.PROTONMAIL_FORCE_WORKER_THREADS === "1";
 
@@ -65,8 +70,8 @@ function runInChild<R>(script: URL, payload: unknown, options: JobOptions): Prom
         execArgv: options.execArgv ?? [],
         env: process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {},
       });
-    } catch {
-      resolve({ kind: "died", started: false, crashed: false, code: null });
+    } catch (error) {
+      resolve({ kind: "died", started: false, crashed: false, code: null, signal: null, error });
       return;
     }
     live.add(child);
@@ -74,11 +79,21 @@ function runInChild<R>(script: URL, payload: unknown, options: JobOptions): Prom
 
     let started = false;
     let errored = false;
+    let failure: unknown;
     let outcome: JobEnd<R> | undefined;
     const done = () => {
       clearTimeout(timer);
       live.delete(child);
-      resolve(outcome ?? { kind: "died", started, crashed: errored || child.signalCode !== null || Boolean(child.exitCode), code: child.exitCode });
+      resolve(
+        outcome ?? {
+          kind: "died",
+          started,
+          crashed: errored || child.signalCode !== null || Boolean(child.exitCode),
+          code: child.exitCode,
+          signal: child.signalCode,
+          error: failure,
+        },
+      );
     };
     // Records the outcome, kills the child and waits for its exit, so the caller's slot is free only once it is gone.
     const end = (result: JobEnd<R>) => {
@@ -96,14 +111,15 @@ function runInChild<R>(script: URL, payload: unknown, options: JobOptions): Prom
       else end({ kind: "message", message: message as R });
     });
     child.once("exit", done);
-    child.on("error", () => {
+    child.on("error", (error) => {
       errored = true;
+      failure ??= error;
       // No pid: the child never started, so there will be no exit event.
       if (child.pid === undefined) done();
-      else end({ kind: "died", started, crashed: true, code: null });
+      else end({ kind: "died", started, crashed: true, code: null, signal: null, error });
     });
     child.send(payload as never, (error) => {
-      if (error) end({ kind: "died", started, crashed: true, code: null });
+      if (error) end({ kind: "died", started, crashed: true, code: null, signal: null, error });
     });
   });
 }
@@ -113,11 +129,10 @@ function runInWorker<R>(script: URL, payload: unknown, options: JobOptions): Pro
     let worker: Worker;
     try {
       worker = new Worker(script, { workerData: payload, resourceLimits: options.resourceLimits });
-    } catch {
-      resolve({ kind: "died", started: false, crashed: false, code: null });
+    } catch (error) {
+      resolve({ kind: "died", started: false, crashed: false, code: null, signal: null, error });
       return;
     }
-    let started = false;
     let settled = false;
     const finish = (result: JobEnd<R>) => {
       if (settled) return;
@@ -128,12 +143,10 @@ function runInWorker<R>(script: URL, payload: unknown, options: JobOptions): Pro
     };
     const timer = setTimeout(() => finish({ kind: "timeout" }), options.timeoutMs);
     timer.unref?.();
-    worker.once("online", () => {
-      started = true;
-    });
+    // No "never started" case for a worker (the old code did not tell one apart): an error event is a crash, as before.
     worker.once("message", (message) => finish({ kind: "message", message: message as R }));
-    worker.once("error", () => finish({ kind: "died", started, crashed: true, code: null }));
-    worker.once("exit", (code) => finish({ kind: "died", started, crashed: false, code }));
+    worker.once("error", (error) => finish({ kind: "died", started: true, crashed: true, code: null, signal: null, error }));
+    worker.once("exit", (code) => finish({ kind: "died", started: true, crashed: false, code, signal: null }));
   });
 }
 

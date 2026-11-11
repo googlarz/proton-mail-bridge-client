@@ -30,7 +30,7 @@ What this project protects, from whom, and where it stops. It is written for som
 
 **2. A message tries to run code or phone home through its content.**
 - Mail is turned to Markdown or plain text before it reaches the model; scripts and styles are dropped. HTML you send is sanitized (scripts, event handlers, remote images and beacons removed) unless you opt out.
-- Attachments are read as text (PDF through a parser in a separate process, a worker thread only inside Electron, with size, page, time and memory limits and a bounded pool), or returned as data; nothing is opened or executed.
+- Attachments are read as text (PDF through a parser in a separate process, a worker thread only inside Electron, with size, page and time limits and a bounded pool; the 512 MB memory cap applies only outside Electron), or returned as data; nothing is opened or executed.
 
 **3. A tool is made to read or write files outside where it should.**
 - Saving an attachment needs `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR`, and every path is resolved against it, including through symbolic links; a path that leaves it is refused. `save_attachment(s)` and `export_email` also refuse a destination inside any account's data directory (its `attachments` folder excepted) or the trusted CA file, even when the download directory contains them.

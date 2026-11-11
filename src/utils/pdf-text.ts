@@ -92,7 +92,9 @@ async function runPdfJob(content: Buffer, options: PdfTextOptions): Promise<PdfT
     throw new PdfTextError(end.message.reason, end.message.message);
   }
   if (!end.started) throw new PdfTextError("invalid", "The PDF reader could not start.");
-  if (end.crashed) throw toPdfTextError(undefined);
+  // Killed by a signal: in practice the abort that follows hitting the memory cap.
+  if (end.signal) throw new PdfTextError("invalid", "The PDF is too large or complex to read.");
+  if (end.crashed) throw toPdfTextError(end.error);
   throw new PdfTextError("invalid", `The PDF reader stopped unexpectedly (exit code ${end.code}).`);
 }
 

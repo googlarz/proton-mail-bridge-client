@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { runJob } from "../dist/utils/child-job.js";
 import { extractOfficeTextAsync } from "../dist/utils/office-text.js";
 import { childPids } from "./helpers/child-processes.mjs";
 import { extractPdfText } from "../dist/utils/pdf-text.js";
@@ -58,6 +59,15 @@ test("by default reads run in child processes; with PROTONMAIL_FORCE_WORKER_THRE
   const threaded = await read({ PROTONMAIL_FORCE_WORKER_THREADS: "1" });
   assert.equal(threaded.children, 0, "worker mode starts no child process");
   assert.ok(threaded.officeChars > 0 && threaded.pdfHasText, JSON.stringify(threaded));
+});
+
+test("a child that runs out of memory is reported as started and killed by a signal, and the parent survives", { ...posix, timeout: 30000 }, async () => {
+  const end = await runJob(new URL("./helpers/oom-job.mjs", import.meta.url), {}, { timeoutMs: 20000, execArgv: ["--max-old-space-size=32"] });
+  assert.equal(end.kind, "died");
+  assert.equal(end.started, true);
+  assert.equal(end.crashed, true);
+  assert.equal(end.signal, "SIGABRT");
+  assert.deepEqual(childPids(), []);
 });
 
 test("PDFs are read in a bounded pool too: 2 at a time, 16 waiting, the rest answer busy", { ...posix, timeout: 60000 }, async () => {
