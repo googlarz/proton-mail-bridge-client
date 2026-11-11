@@ -928,6 +928,10 @@ function fatal(kind: string, error: unknown): void {
   process.exit(1);
 }
 
+// A killed client leaves stderr as a dead pipe. Unhandled, each log line's EPIPE reaches fatal(), whose own log line
+// raises EPIPE again: the server spins at full CPU and never gets to the stdin shutdown above.
+process.stderr.on("error", () => {});
+
 process.on("uncaughtException", (error) => fatal("Uncaught exception", error));
 
 process.on("unhandledRejection", (reason) => fatal("Unhandled rejection", reason));
