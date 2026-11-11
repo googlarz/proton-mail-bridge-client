@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Office and PDF reading now runs in a separate process that is killed on timeout, not in a worker thread.** A worker thread terminated at the wrong moment (while zlib is being set up) makes Node abort the whole process on Node 22, 24 and 26, which meant a timed-out attachment read could kill the server. A process killed with SIGKILL cannot do that. The process never writes to the server's stdout and exits with the server. Same limits, results and error messages as before; each read costs a few tens of milliseconds more to start. PDFs now also go through a pool of 2 at a time with 16 waiting (further ones fail with `busy`) and a 512 MB memory cap. When the server runs inside Electron (Claude Desktop's own runtime), it keeps using a worker thread as before.
+
 ## [2.19.3] — 2026-11-11
 
 ### Fixed

@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { extractOfficeTextAsync } from "../dist/utils/office-text.js";
 import { childPids } from "./helpers/child-processes.mjs";
-import { buildDocx } from "./helpers/office-fixtures.mjs";
+import { extractPdfText } from "../dist/utils/pdf-text.js";
+import { buildDocx, buildImagePdf } from "./helpers/office-fixtures.mjs";
 
 const run = promisify(execFile);
-const script = new URL("./helpers/child-job-scripts.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+const script = fileURLToPath(new URL("./helpers/child-job-scripts.mjs", import.meta.url));
 const settle = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => {
   try {
@@ -46,4 +48,28 @@ test("killing the job at many random early moments never aborts the process that
 test("a read writes nothing to the parent's stdout", { timeout: 30000 }, async () => {
   const { stdout } = await run(process.execPath, [script, "stdout-marker"], { timeout: 25000 });
   assert.equal(stdout, "ONLY-THIS-LINE\n");
+});
+
+test("by default reads run in child processes; with PROTONMAIL_FORCE_WORKER_THREADS (the Electron path) they run in worker threads", { ...posix, timeout: 40000 }, async () => {
+  const read = async (env) => JSON.parse((await run(process.execPath, [script, "read-both"], { timeout: 30000, env: { ...process.env, ...env } })).stdout);
+  const forked = await read({ PROTONMAIL_FORCE_WORKER_THREADS: "" });
+  assert.ok(forked.children >= 1, "default mode forks");
+  assert.ok(forked.officeChars > 0 && forked.pdfHasText, JSON.stringify(forked));
+  const threaded = await read({ PROTONMAIL_FORCE_WORKER_THREADS: "1" });
+  assert.equal(threaded.children, 0, "worker mode starts no child process");
+  assert.ok(threaded.officeChars > 0 && threaded.pdfHasText, JSON.stringify(threaded));
+});
+
+test("PDFs are read in a bounded pool too: 2 at a time, 16 waiting, the rest answer busy", { ...posix, timeout: 60000 }, async () => {
+  const pdf = buildImagePdf(1);
+  let peak = 0;
+  const watcher = setInterval(() => {
+    peak = Math.max(peak, childPids().length);
+  }, 5);
+  const results = await Promise.all(Array.from({ length: 25 }, () => extractPdfText(pdf, { ocrPages: 1 }).then(() => "ok", (error) => error.reason)));
+  clearInterval(watcher);
+  assert.equal(results.filter((r) => r === "busy").length, 25 - 18);
+  assert.equal(results.filter((r) => r === "ok").length, 18);
+  assert.ok(peak >= 1 && peak <= 2, `peak child processes ${peak}`);
+  assert.deepEqual(childPids(), []);
 });

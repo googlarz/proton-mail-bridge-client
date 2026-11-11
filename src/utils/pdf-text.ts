@@ -1,5 +1,5 @@
 import { extractImages, getDocumentProxy } from "unpdf";
-import { runInChild } from "./child-job.js";
+import { JobSlots, runJob } from "./child-job.js";
 import { encodePng } from "./png.js";
 
 // PDF text extraction for get_attachment_text. unpdf ships a serverless build of
@@ -49,7 +49,7 @@ export function formatPdfPages(pageTexts: string[], totalPages: number, maxPages
 /** A PDF that cannot be read as text, with a message meant for the user, not a stack trace. */
 export class PdfTextError extends Error {
   constructor(
-    readonly reason: "encrypted" | "invalid" | "no-text-layer" | "timeout",
+    readonly reason: "encrypted" | "invalid" | "no-text-layer" | "timeout" | "busy",
     message: string,
   ) {
     super(message);
@@ -64,21 +64,35 @@ export function looksLikePdf(content: Buffer, contentType?: string, filename?: s
   return hasPdfHeader && (!contentType || contentType === "application/octet-stream" || /\.pdf$/i.test(filename ?? ""));
 }
 
+// Like the Office reader: at most two parses at once, a queue of 16, then "busy". A PDF parse can take a few hundred MB.
+const slots = new JobSlots(2, 16);
+// PDF children had no memory limit before; this is a generous cap, so that a runaway parse cannot take the machine down.
+const CHILD_EXEC_ARGV = ["--max-old-space-size=512"];
+
 export async function extractPdfText(content: Buffer, options: PdfTextOptions = {}): Promise<PdfTextResult> {
+  return slots.run(
+    () => runPdfJob(content, options),
+    () => new PdfTextError("busy", "Too many documents are being read at the moment; try again in a few seconds."),
+  );
+}
+
+async function runPdfJob(content: Buffer, options: PdfTextOptions): Promise<PdfTextResult> {
   const timeoutMs = options.timeoutMs ?? PDF_EXTRACTION_TIMEOUT_MS;
   const payload = { content, maxPages: options.maxPages ?? DEFAULT_PDF_MAX_PAGES, timeoutMs, ocrPages: options.ocrPages ?? 0 };
-  const end = await runInChild<{ ok: true; result: PdfTextResult } | { ok: false; reason: PdfTextError["reason"]; message: string }>(
+  const end = await runJob<{ ok: true; result: PdfTextResult } | { ok: false; reason: PdfTextError["reason"]; message: string }>(
     new URL("./pdf-text-worker.js", import.meta.url),
     payload,
-    // The child enforces timeoutMs itself; this is the backstop for a parse that cannot be interrupted.
-    { timeoutMs: timeoutMs + 2000 },
+    // The child enforces timeoutMs itself; this is the backstop for a parse that cannot be interrupted. In a worker
+    // thread (Electron) there is no memory limit, as before.
+    { timeoutMs: timeoutMs + 2000, execArgv: CHILD_EXEC_ARGV },
   );
   if (end.kind === "timeout") throw new PdfTextError("timeout", `Reading the PDF took longer than ${Math.round(timeoutMs / 1000)} seconds and was stopped.`);
   if (end.kind === "message") {
     if (end.message.ok) return end.message.result;
     throw new PdfTextError(end.message.reason, end.message.message);
   }
-  if (end.signal || end.code) throw toPdfTextError(undefined);
+  if (!end.started) throw new PdfTextError("invalid", "The PDF reader could not start.");
+  if (end.crashed) throw toPdfTextError(undefined);
   throw new PdfTextError("invalid", `The PDF reader stopped unexpectedly (exit code ${end.code}).`);
 }
 

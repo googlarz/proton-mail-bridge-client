@@ -1,24 +1,19 @@
+import { serveJob } from "./child-job.js";
 import { extractOfficeText, OfficeTextError, type OfficeKind } from "./office-text.js";
 
-// Child process entry for extractOfficeTextAsync (see child-job.ts): takes one job as an IPC message, sends the
-// outcome back as a plain message, then idles until the parent kills it. It also leaves when the parent goes away.
-process.on("disconnect", () => process.exit(0));
-
-process.once("message", (job) => {
+// Entry of the job that extractOfficeTextAsync runs in a child process (or, inside Electron, a worker thread): one
+// Office extraction, reported as a plain message.
+serveJob((job) => {
   const { content, kind, maxChars } = job as { content: Uint8Array; kind: OfficeKind; maxChars?: number };
-  let reply: unknown;
   try {
     const result = extractOfficeText(Buffer.from(content.buffer, content.byteOffset, content.byteLength), kind, { maxChars });
-    reply = { ok: true, result };
+    return { ok: true, result };
   } catch (error) {
     const known = error instanceof OfficeTextError;
-    reply = {
+    return {
       ok: false,
       reason: known ? error.reason : "invalid",
       message: error instanceof Error ? error.message : String(error),
     };
   }
-  process.send?.(reply, (error) => {
-    if (error) process.exit(1);
-  });
 });
