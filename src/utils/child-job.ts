@@ -90,7 +90,9 @@ function runInChild<R>(script: URL, payload: unknown, options: JobOptions): Prom
           started,
           crashed: errored || child.signalCode !== null || Boolean(child.exitCode),
           code: child.exitCode,
-          signal: child.signalCode,
+          // Windows has no signals: V8's out-of-memory abort shows there as exit code 134 and no signal. Report it as
+          // the SIGABRT it is on other systems, so callers do not take it for a damaged file.
+          signal: child.signalCode ?? (child.exitCode === 134 ? "SIGABRT" : null),
           error: failure,
         },
       );

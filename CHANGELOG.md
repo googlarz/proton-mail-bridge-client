@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.19.5] — 2026-11-11
+
+### Fixed
+
+- **On Windows, a PDF whose reader ran out of memory was reported as damaged.** Windows has no signals, so the memory abort shows as exit code 134 with no signal, and the check for "killed by a signal" missed it. It is now treated as the abort it is: "The PDF is too large or complex to read." (Office files get the same correct classification.) Found by a Windows 11 / Node 26 test of 2.19.4.
+
 ## [2.19.4] — 2026-11-11
 
 ### Changed

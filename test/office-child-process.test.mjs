@@ -61,6 +61,13 @@ test("by default reads run in child processes; with PROTONMAIL_FORCE_WORKER_THRE
   assert.ok(threaded.officeChars > 0 && threaded.pdfHasText, JSON.stringify(threaded));
 });
 
+test("exit code 134 without a signal (a memory abort on Windows) is reported as SIGABRT", { timeout: 30000 }, async () => {
+  const end = await runJob(new URL("./helpers/exit-134-job.mjs", import.meta.url), {}, { timeoutMs: 20000 });
+  assert.equal(end.kind, "died");
+  assert.equal(end.started, true);
+  assert.equal(end.signal, "SIGABRT");
+});
+
 test("a child that runs out of memory is reported as started and killed by a signal, and the parent survives", { ...posix, timeout: 30000 }, async () => {
   const end = await runJob(new URL("./helpers/oom-job.mjs", import.meta.url), {}, { timeoutMs: 20000, execArgv: ["--max-old-space-size=32"] });
   assert.equal(end.kind, "died");
