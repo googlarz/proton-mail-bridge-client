@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "proton-mail-bridge-client",
   "display_name": "Proton Mail Bridge",
-  "version": "2.19.6",
+  "version": "2.19.7",
   "description": "Proton Mail for Claude Desktop via Proton Bridge. Can be set to read-only or drafts-only, to ask your approval for sends and deletes, and keeps a tamper-evident audit log. Default is full mode (sending allowed). The server and index run locally; text Claude reads goes to the model provider.",
   "long_description": "Give Claude full access to your Proton Mail inbox: read, search, send, draft, triage threads, manage folders and labels, save attachments, and more — 129 tools in total.\n\nThe server and its index are local: Proton Bridge decrypts your mail and exposes it over local IMAP/SMTP, this server reads that connection and builds a local SQLite search index, and Claude Desktop talks to it as a local stdio process. The text of mail that Claude reads goes to the model provider (unless the model is local); mail leaves your machine otherwise only through your own Proton account when you send.\n\nThe default mode is full (sending allowed, no approval). The safety settings below can restrict it: read-only, drafts, assisted, or approval of sends and deletes.\n\nRequires Proton Bridge to be installed, signed in, and running first — see proton.me/mail/bridge.",
   "author": {

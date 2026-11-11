@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.19.7] — 2026-11-11
+
+### Changed
+
+- **No change to what the tools do.** Tests only: the choice between "too large or complex" and "damaged" for a reader that ended without an answer is now tested for Office and PDF, and a test reads a real 30 MB Office document with the reader's memory cap lowered to 8 MB and expects "The document is too large or complex to read." (the same file reads with the shipped 256 MB cap). To make that possible the Office and PDF readers' end-of-job messages moved into `officeDeathError` / `pdfDeathError` (same messages) and `extractOfficeTextAsync` takes an internal `memoryMb` option that only the test passes.
+
 ## [2.19.6] — 2026-11-11
 
 ### Fixed
