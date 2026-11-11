@@ -30,7 +30,7 @@ What this project protects, from whom, and where it stops. It is written for som
 
 **2. A message tries to run code or phone home through its content.**
 - Mail is turned to Markdown or plain text before it reaches the model; scripts and styles are dropped. HTML you send is sanitized (scripts, event handlers, remote images and beacons removed) unless you opt out.
-- Attachments are read as text (PDF through a parser in a worker thread with size, page and time limits), or returned as data; nothing is opened or executed.
+- Attachments are read as text (PDF through a parser in a separate process, a worker thread only inside Electron, with size, page and time limits and a bounded pool; the 512 MB memory cap applies only outside Electron), or returned as data; nothing is opened or executed.
 
 **3. A tool is made to read or write files outside where it should.**
 - Saving an attachment needs `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR`, and every path is resolved against it, including through symbolic links; a path that leaves it is refused. `save_attachment(s)` and `export_email` also refuse a destination inside any account's data directory (its `attachments` folder excepted) or the trusted CA file, even when the download directory contains them.
@@ -54,7 +54,7 @@ What this project protects, from whom, and where it stops. It is written for som
 
 **8. An Office file or an image is built to harm the reader.** `get_attachment_text` reads DOCX, XLSX and PPTX, and (only when you set `PROTONMAIL_OCR_COMMAND`) images.
 - Office files are ZIPs read in memory by a small built-in reader: limits on entries (5000), size per part (32 MB) and in total (64 MB), 20 MB for the file and 500000 characters of text; encrypted parts are skipped. The XML is scanned linearly, a DTD is refused and no entity beyond the predefined ones is expanded, so entity-expansion ("billion laughs") has nothing to expand. Nothing is executed and no macro runs.
-- Office text is extracted in a bounded pool of worker threads (2 at a time, a queue of 16, a further job fails with `busy`, memory limits on each worker) with a 10 second limit per job counted from its start, with control characters dropped and entity, cell, shared-string and row sizes capped while the text is built.
+- Office text is extracted in a bounded pool of separate processes (worker threads only inside Electron; 2 at a time, a queue of 16, a further job fails with `busy`, a memory limit on each; a process that runs out of time is killed with SIGKILL) with a 10 second limit per job counted from its start, with control characters dropped and entity, cell, shared-string and row sizes capped while the text is built.
 - OCR runs the program you configured (`PROTONMAIL_OCR_COMMAND` may carry arguments, split on spaces with quotes grouping, with no shell, variable or glob expansion), started with an argument list, on a private temporary file, with a 60 second timeout (the process is killed with SIGKILL) and a cap on its output, and the file is removed afterwards. The program is yours: the server trusts it as much as the rest of your machine.
 - The text that comes out is untrusted mail text: the injection patterns are checked in it like in any attachment text.
 - **Limit:** a bug in the ZIP or XML reader is still a bug in code that parses attacker data; the limits bound the damage, they do not prove it absent. A hostile OCR program, or an image that exploits the one you installed, is outside what this server can stop.

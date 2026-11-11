@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { Worker } from "node:worker_threads";
+import { JobSlots, runJob } from "./child-job.js";
 import { openZip, ZipError, type ZipArchive, type ZipLimits } from "./zip-reader.js";
 
 // Text from Word, Excel and PowerPoint files (DOCX, XLSX, PPTX) for get_attachment_text and attachment indexing.
@@ -57,46 +57,36 @@ function assertInputSize(content: Buffer): void {
   }
 }
 
-// Each worker can expand a document to tens of MB, so a burst of attachments must not mean a burst of threads: at most
+// Each child can expand a document to tens of MB, so a burst of attachments must not mean a burst of processes: at most
 // two run at once, the rest wait in order, and a long queue is refused instead of growing without bound.
-const MAX_WORKERS = 2;
-const MAX_QUEUED = 16;
+const slots = new JobSlots(2, 16);
+// The worker_thread limits, as V8 flags for the child: a young generation of 32 MB is three semi-spaces of about 11 MB.
+const CHILD_EXEC_ARGV = ["--max-old-space-size=256", "--max-semi-space-size=11"];
 const WORKER_LIMITS = { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32 };
-let running = 0;
-const waiting: Array<() => void> = [];
 
-function runInWorker(content: Buffer, kind: OfficeKind, maxChars: number | undefined, timeoutMs: number): Promise<OfficeTextResult> {
-  return new Promise<OfficeTextResult>((resolve, reject) => {
-    // The worker gets a copy: the caller keeps its buffer.
-    const worker = new Worker(new URL("./office-text-worker.js", import.meta.url), {
-      workerData: { content: new Uint8Array(content), kind, maxChars },
-      resourceLimits: WORKER_LIMITS,
-    });
-    let settled = false;
-    const finish = (action: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      void worker.terminate();
-      action();
-    };
-    const timer = setTimeout(
-      () => finish(() => reject(new OfficeTextError("timeout", "Reading the document took too long and was stopped."))),
-      timeoutMs,
-    );
-    timer.unref?.();
-    worker.once("message", (message: { ok: true; result: OfficeTextResult } | { ok: false; reason: OfficeTextError["reason"]; message: string }) =>
-      finish(() => (message.ok ? resolve(message.result) : reject(new OfficeTextError(message.reason, message.message)))),
-    );
-    worker.once("error", () => finish(() => reject(new OfficeTextError("invalid", "The document could not be read; the file looks damaged."))));
-    worker.once("exit", (code) => finish(() => reject(new OfficeTextError("invalid", `The document reader stopped unexpectedly (exit code ${code}).`))));
-  });
+type OfficeChildMessage = { ok: true; result: OfficeTextResult } | { ok: false; reason: OfficeTextError["reason"]; message: string };
+
+async function runInWorker(content: Buffer, kind: OfficeKind, maxChars: number | undefined, timeoutMs: number): Promise<OfficeTextResult> {
+  const end = await runJob<OfficeChildMessage>(
+    new URL("./office-text-worker.js", import.meta.url),
+    { content, kind, maxChars },
+    { timeoutMs, execArgv: CHILD_EXEC_ARGV, resourceLimits: WORKER_LIMITS },
+  );
+  if (end.kind === "timeout") throw new OfficeTextError("timeout", "Reading the document took too long and was stopped.");
+  if (end.kind === "message") {
+    if (end.message.ok) return end.message.result;
+    throw new OfficeTextError(end.message.reason, end.message.message);
+  }
+  if (!end.started) throw new OfficeTextError("invalid", "The document reader could not start.");
+  // Out of memory or any other crash while parsing.
+  if (end.crashed) throw new OfficeTextError("invalid", "The document could not be read; the file looks damaged.");
+  throw new OfficeTextError("invalid", `The document reader stopped unexpectedly (exit code ${end.code}).`);
 }
 
 /**
- * The same extraction in a worker thread, so a heavy file cannot stall the server's event loop, with a hard time limit
- * (the worker is terminated). The parse itself is extractOfficeText; the worker runs it inside office-text-worker.js.
- * The limit counts from the start of the job, not from the wait for a free worker.
+ * The same extraction in a separate process, so a heavy file cannot stall the server's event loop, with a hard time
+ * limit (the process is killed). The parse itself is extractOfficeText; the child runs it inside office-text-worker.js.
+ * The limit counts from the start of the job, not from the wait for a free slot.
  */
 export async function extractOfficeTextAsync(
   content: Buffer,
@@ -105,20 +95,10 @@ export async function extractOfficeTextAsync(
 ): Promise<OfficeTextResult> {
   assertInputSize(content);
   const timeoutMs = options.timeoutMs ?? OFFICE_EXTRACTION_TIMEOUT_MS;
-  if (running >= MAX_WORKERS) {
-    if (waiting.length >= MAX_QUEUED) throw new OfficeTextError("busy", "Too many documents are being read at the moment; try again in a few seconds.");
-    // A finishing job hands its slot straight to the next one, so `running` stays at the limit.
-    await new Promise<void>((resolve) => waiting.push(resolve));
-  } else {
-    running++;
-  }
-  try {
-    return await runInWorker(content, kind, options.maxChars, timeoutMs);
-  } finally {
-    const next = waiting.shift();
-    if (next) next();
-    else running--;
-  }
+  return slots.run(
+    () => runInWorker(content, kind, options.maxChars, timeoutMs),
+    () => new OfficeTextError("busy", "Too many documents are being read at the moment; try again in a few seconds."),
+  );
 }
 
 export function extractOfficeText(content: Buffer, kind: OfficeKind, options: { maxChars?: number } = {}): OfficeTextResult {

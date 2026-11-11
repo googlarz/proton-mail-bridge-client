@@ -2017,7 +2017,7 @@ export class SimpleIMAPService {
   // limit (PROTONMAIL_PDF_MAX_MB) and page limit (PROTONMAIL_PDF_MAX_PAGES) and
   // go through unpdf, which is pure JavaScript (no native binding, no install
   // script). Only this tool extracts PDF text; getAttachmentContent's text field
-  // stays text/* only. DOCX, XLSX and PPTX are read in a worker thread (office-text.ts).
+  // stays text/* only. DOCX, XLSX and PPTX are read in a child process (office-text.ts).
   // With PROTONMAIL_OCR_COMMAND set, images and PDF pages without text go through
   // that program; without it, both fail as before.
   async getAttachmentText(emailId: string, attachmentId: string): Promise<{

@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 import { MailTaint, withRiskScan } from "../dist/utils/mail-security.js";
 import { EventLogService } from "../dist/services/event-log-service.js";
 import { AuditService } from "../dist/services/audit-service.js";
 import { extractOfficeTextAsync } from "../dist/utils/office-text.js";
+import { childCount } from "./helpers/child-processes.mjs";
 import { buildDocx } from "./helpers/office-fixtures.mjs";
 
 // Independent attacks on the 2.17 wave A additions. Each test asserts the behaviour that should hold; the defects
@@ -95,13 +95,12 @@ test("audit: dropping the newest entry while keeping audit.head is reported", as
   });
 });
 
-test("office: many concurrent extractions keep a bounded number of worker threads", async () => {
+test("office: many concurrent extractions keep a bounded number of child processes", { skip: process.platform === "win32" }, async () => {
   const body = "<w:p><w:r><w:t>x</w:t></w:r></w:p>".repeat(900_000);
   const docx = buildDocx(body);
-  const threads = () => Number(execSync(`ps -M ${process.pid} | wc -l`).toString()) - 1;
   let peak = 0;
-  const timer = setInterval(() => { peak = Math.max(peak, threads()); }, 20);
+  const timer = setInterval(() => { peak = Math.max(peak, childCount()); }, 20);
   await Promise.allSettled(Array.from({ length: 40 }, () => extractOfficeTextAsync(docx, "docx", { timeoutMs: 8000 })));
   clearInterval(timer);
-  assert.ok(peak <= 16, `peak OS threads ${peak}`);
+  assert.ok(peak <= 2, `peak child processes ${peak}`);
 });

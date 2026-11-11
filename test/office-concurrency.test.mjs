@@ -1,28 +1,21 @@
 import assert from "node:assert/strict";
-import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { extractOfficeTextAsync } from "../dist/utils/office-text.js";
+import { childCount } from "./helpers/child-processes.mjs";
 import { buildDocx } from "./helpers/office-fixtures.mjs";
 
-const threads = () => {
-  if (process.platform === "linux") return Number(/Threads:\s+(\d+)/.exec(readFileSync("/proc/self/status", "utf8"))?.[1]);
-  return Number(execSync(`ps -M ${process.pid} | wc -l`).toString()) - 1;
-};
-
-test("many concurrent extractions keep threads and memory bounded and every call settles cleanly", { skip: process.platform === "win32" }, async () => {
+test("many concurrent extractions keep child processes and memory bounded and every call settles cleanly", { skip: process.platform === "win32" }, async () => {
   // About 90 KB compressed, tens of MB expanded: the worst case for a worker.
   const docx = buildDocx("<w:p><w:r><w:t>x</w:t></w:r></w:p>".repeat(900_000));
-  const base = threads();
   let peakThreads = 0;
   let peakRss = 0;
   const timer = setInterval(() => {
-    peakThreads = Math.max(peakThreads, threads());
+    peakThreads = Math.max(peakThreads, childCount());
     peakRss = Math.max(peakRss, process.memoryUsage().rss);
   }, 20);
   const results = await Promise.allSettled(Array.from({ length: 40 }, () => extractOfficeTextAsync(docx, "docx")));
   clearInterval(timer);
-  assert.ok(peakThreads - base <= 8, `peak extra threads ${peakThreads - base}`);
+  assert.ok(peakThreads <= 2, `peak child processes ${peakThreads}`);
   assert.ok(peakRss < 1.5 * 1024 ** 3, `peak rss ${Math.round(peakRss / 1024 ** 2)} MB`);
   const done = results.filter((r) => r.status === "fulfilled").length;
   assert.ok(done >= 2, "some calls complete");
