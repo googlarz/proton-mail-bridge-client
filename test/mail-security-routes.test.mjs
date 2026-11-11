@@ -83,6 +83,9 @@ test("reading the message as a resource arms the confirmation gate and says why"
 
 test("a list with previews arms the gate", needsOpenssl, async () => {
   await freshSession(async ({ client, textOf, attemptSend }) => {
+    // The search only waits ~3 s for its own refresh, then serves the local index: a slow runner
+    // turns that into an empty answer. Fill the index first, without that time limit.
+    await client.callTool({ name: "sync_emails", arguments: { folder: "INBOX" } });
     const listed = await client.callTool({ name: "search_indexed_emails", arguments: { folder: "INBOX", includeSnippet: true } });
     const emails = JSON.parse(textOf(listed)).emails;
     const flagged = emails.filter((e) => e.risk);

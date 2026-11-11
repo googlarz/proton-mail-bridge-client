@@ -80,6 +80,9 @@ async function startServer(dir, bridge, embeddings) {
     return result.isError ? { error: text } : JSON.parse(text);
   };
   const search = (args) => call("search_indexed_emails", args);
+  // The search only waits ~3 s for its own refresh, then serves the local index: a slow runner
+  // turns that into an empty answer. Fill the index first, without that time limit.
+  const sync = () => call("sync_emails", { folder: "INBOX" });
   const embeddingsStatus = async () => (await call("get_index_status")).embeddings;
   const waitFor = async (check, label) => {
     const deadline = Date.now() + 15_000;
@@ -91,7 +94,7 @@ async function startServer(dir, bridge, embeddings) {
     }
   };
   const close = async () => { await client.close(); await server.close(); await closeTrackedIndexes(); };
-  return { search, embeddingsStatus, waitFor, close };
+  return { search, sync, embeddingsStatus, waitFor, close };
 }
 
 const builtAll = (dims) => (status) => status.vectors === MESSAGES.length && status.pending === 0 && !status.building && (dims === undefined || status.dimensions === dims);
@@ -115,6 +118,7 @@ test("unset PROTONMAIL_EMBEDDINGS_URL: nothing runs, no file, the search result 
   await withSetup("semantic-inert-", async ({ dir, bridge, embedder }) => {
     const app = await startServer(dir, bridge, undefined);
     try {
+      await app.sync();
       const plain = await app.search({ query: "deposit" });
       assert.deepEqual(subjects(plain).sort(), ["Deposit refund", "Rental agreement"]);
       assert.equal(plain.mode, undefined);
@@ -193,6 +197,7 @@ test("vectors are built in the background; hybrid finds a message that shares no
   await withSetup("semantic-hybrid-", async ({ dir, bridge, embedder }) => {
     const app = await startServer(dir, bridge, { url: `http://127.0.0.1:${embedder.port}/api/embed`, api: "ollama", model: "fake-16", allowRemote: false });
     try {
+      await app.sync();
       await app.search({ query: "deposit" });
       const status = await app.waitFor(builtAll(16), "the first build");
       assert.equal(status.model, "fake-16");
@@ -254,6 +259,7 @@ test("an endpoint that is down from the start: words only with a note, the build
     await embedder.close();
     const app = await startServer(dir, bridge, { url: `http://127.0.0.1:${embedder.port}/api/embed`, api: "ollama", model: "fake-16", allowRemote: false });
     try {
+      await app.sync();
       const first = await app.search({ query: "deposit" });
       assert.equal(first.mode, "lexical");
       assert.equal(first.semanticNotes.length, 1);
@@ -278,6 +284,7 @@ test("a corrupt or cut-off sidecar is rebuilt, and a new model replaces the vect
     await writeFile(sidecar, "this is not an embeddings file");
     let app = await startServer(dir, bridge, { url, api: "openai", model: "fake-16", allowRemote: false });
     try {
+      await app.sync();
       const result = await app.search({ query: "deposit" });
       assert.equal(result.error, undefined);
       await app.waitFor(builtAll(16), "the rebuild over garbage");
