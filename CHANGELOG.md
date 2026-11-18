@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.19.8] — 2026-11-18
+
+### Changed
+
+- **Dependency updates, no change to what the tools do.** nodemailer 10.3.1 → 10.5.0 (upstream describes 10.5.0 as a security patch for two cases where the recipient domain delivered to could differ from the one an application had validated; the other changes are an `AbortSignal` option per send and a new well-known service, which this server does not use), better-sqlite3 13.0.3 → 13.1.1 (the `allowScripts` pin follows), mailparser 3.14.2 → 3.14.3, sanitize-html 2.18.1 → 2.18.2, and the biome linter 2.6.5 → 2.6.7 (development only). All tests pass on every platform in CI; I did not check whether this server's own sending code was affected by the nodemailer issue.
+
 ## [2.19.7] — 2026-11-11
 
 ### Changed
