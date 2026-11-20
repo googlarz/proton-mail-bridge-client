@@ -17,7 +17,7 @@ All notable changes to this project are documented here.
 - **The `core` tool set (`PROTONMAIL_TOOLSET=core`, `PROTONMAIL_TOOL_TIER=core`) is now 22 tools built for the `drafts` mode.** Removed: `send_email`, `send_draft`, `reply_to_email`, `reply_all_email`, `forward_email`, `trash_email`, `archive_email`, `move_email` (the default mode refused them anyway). Added: `create_reply_draft`, `create_forward_draft`, `get_brief`, `get_style_profile`, `get_attachment_text`. Anyone on `core` who sends or moves mail needs `PROTONMAIL_TOOLSET=full`. The default (`full`) is unchanged.
 - Tool definition cost, estimated (characters / 4, not a tokenizer): about 8k tokens for `core`, about 37k for `full`. The README's earlier 21k was out of date.
 - The `create_draft` and `delete_draft` descriptions said drafts live in SQLite; they live in `drafts.json`.
-- CI also runs Node 22 on macOS and Windows. `RELEASING.md` has a manual, read-only real-Bridge check (`test/live/readonly-smoke.mjs`) before a release.
+- CI also runs Node 22 on macOS and Windows, with npm 11 installed first. With npm 10 (what Node 22 ships), `npm ci` compiles better-sqlite3 from source instead of using its prebuilt binary, which fails without a C++ toolchain (Visual Studio on Windows). Contributors on Node 22 who run `npm ci` need npm 11 or a toolchain. Installing the published package with npm 10 did not compile anything in a check on macOS; not checked on Windows. `RELEASING.md` has a manual, read-only real-Bridge check (`test/live/readonly-smoke.mjs`) before a release.
 
 ## [2.19.8] — 2026-11-18
 

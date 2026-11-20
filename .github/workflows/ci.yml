@@ -50,6 +50,13 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
+      # Node 22 ships npm 10, whose `npm ci` runs `node-gyp rebuild` for better-sqlite3 (it ignores the
+      # prebuilt binaries the package ships) and fails on a runner without Visual Studio. Installing
+      # the published package with npm 10 does not do this (checked on macOS); only `npm ci` does.
+      - name: Use npm 11
+        if: matrix.node-version == 22
+        run: npm install -g npm@11
+
       - name: Install dependencies
         run: npm ci
 
