@@ -4,6 +4,8 @@ A screen recording that shows one idea: you decide what the assistant may do, an
 
 Everything below uses commands and settings that exist in this repository ([README](../README.md), [CLI reference](cli.md), `src/cli.ts`). Record against a **test Proton account**, not your real mailbox. The refusal text and the `runtime-status` mode field were checked against a live Bridge on 2026-11-02 (read-only, SMTP pointed at a dead port); the rest of the output text is still unchecked, so confirm it on the day.
 
+Version: written for 2.19.8. On 2026-11-20 every command below was matched against [CLI reference](cli.md) by name (`doctor`, `emails`, `send`, `runtime-status`, `get-audit-logs`, `verify-audit-log`, `setup-claude-desktop`); none was run again for this update. The MCP tool behind each is `get_connection_status`/`run_doctor`, `get_emails`, `send_email`, `get_runtime_status`, `get_audit_logs` and `verify_audit_log`. Check `proton-mail-bridge-client --version` prints 2.19.8 before recording, and say the version on the title card only if it still matches.
+
 ## Before recording
 
 - Proton Bridge running and signed in; `proton-mail-bridge-client doctor` passes.

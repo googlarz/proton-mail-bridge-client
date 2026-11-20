@@ -201,6 +201,10 @@ export interface EmailSummary {
   flags: string[];
   size?: number;
   preview?: string;
+  // Message text beyond the preview, for the full-text index only (PROTONMAIL_INDEX_BODY_CHARS above its default).
+  // Carried in memory from the IMAP service to recordSnapshot; never returned by a tool and not part of the cached
+  // summary.
+  indexText?: string;
   hasAttachments: boolean;
   attachments: EmailAttachmentSummary[];
   attachmentText?: string;
@@ -425,7 +429,21 @@ export interface BulkOperationResult {
     ok: boolean;
     error?: string;
     notApplied?: string[];
+    /** bulk_move: where the message is now (absent when the server gave no new UID). */
+    targetEmailId?: string;
   }>;
+  /** Set on a real run that recorded undo data (see UndoSummary). */
+  undo?: UndoSummary;
+}
+
+/** What a bulk operation tells its caller about undoing it. */
+export interface UndoSummary {
+  undoId: string;
+  expiresAt: string;
+  /** Messages undo_plan can put back, and changes it cannot (a permanent delete, a forward). */
+  reversible: number;
+  irreversible: number;
+  note?: string;
 }
 
 export interface SenderFrequency {
@@ -591,6 +609,8 @@ export interface ProtonRuntimeConfig {
   ocrCommand?: string;
   /** Also index the text of PDF, DOCX, XLSX and PPTX attachments for search_indexed_emails (PROTONMAIL_INDEX_ATTACHMENTS, default false). */
   indexAttachments?: boolean;
+  /** Characters of each message's text kept in the local index for full-text search (PROTONMAIL_INDEX_BODY_CHARS, default 220 = the preview only, at most 20000). Changing it rebuilds the index. */
+  indexBodyChars?: number;
   /** Most triage plans kept (PROTONMAIL_MAX_TRIAGE_PLANS, default 200). Applied plans are never dropped to make room. */
   maxTriagePlans?: number;
   opDelayMs: number;

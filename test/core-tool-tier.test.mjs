@@ -13,16 +13,22 @@ test("core tool tier keeps only one of search_emails/search_indexed_emails", () 
   assert.ok(!CORE_TOOL_NAMES.has("search_emails"), "search_emails should not duplicate search_indexed_emails in core");
 });
 
-// Regression test (v2.1.10): found live that core was missing the "review a
-// draft before sending" step (list_drafts/get_draft/update_draft) despite
-// having both endpoints around it (create_draft, send_draft), was missing
-// reply_all_email/forward_email despite reply_to_email being core (no real
-// reason for the asymmetry), and had no way to see configured accounts
-// (list_accounts) at all under multi-account setups. All confirmed as
-// routine, not niche, by this session's own daily-scenarios testing.
-test("core tool tier includes the draft review/edit step and multi-account visibility", () => {
-  for (const name of ["list_drafts", "get_draft", "update_draft", "reply_all_email", "forward_email", "list_accounts"]) {
+// Core is drafts-first so it matches the default "drafts" mode: the draft review/edit step and multi-account
+// visibility stay (v2.1.10), reply and forward are offered as drafts, and the style/brief helpers a drafter needs are in.
+test("core tool tier includes the draft workflow and multi-account visibility", () => {
+  for (const name of [
+    "create_draft", "create_reply_draft", "create_forward_draft", "list_drafts", "get_draft", "update_draft",
+    "get_style_profile", "get_brief", "get_attachment_text", "list_accounts",
+  ]) {
     assert.ok(CORE_TOOL_NAMES.has(name), `${name} should be in core`);
+  }
+});
+
+// The default mode (drafts, what the setup wizard picks) refuses sending and move/archive/trash, so core must not
+// list them: a listed tool invites the model to call it and get a refusal.
+test("core tool tier lists no tool the drafts mode refuses", () => {
+  for (const name of ["send_email", "send_draft", "schedule_draft", "reply_to_email", "reply_all_email", "forward_email", "trash_email", "archive_email", "move_email"]) {
+    assert.ok(!CORE_TOOL_NAMES.has(name), `${name} is refused in drafts mode and must not be in core`);
   }
 });
 

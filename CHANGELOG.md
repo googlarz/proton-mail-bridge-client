@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.20.0] — 2026-11-20
+
+### Added
+
+- **Undo for bulk actions.** `bulk_move`, `bulk_update_flags` and a manual `apply_rules` return an `undoId`, and `undo_plan` with that `undoId` takes back what the call really changed. The journal lives in `undo-journals.json` (7 days, at most 100). A moved message is found again by its new id, then by Message-ID when exactly one matches. Undo uses the same mode and approval checks as the original. Permanent deletes, forwards and `empty_folder` are marked as not reversible. Not journaled yet: `bulk_delete` to Trash, label changes, `batch_email_action`, thread actions, rules that run after a sync. Tested against a fake Bridge only, not a real one.
+- **`PROTONMAIL_INDEX_BODY_CHARS`** (default 220, up to 20000): how much of each message body the local index keeps, so search can find words deep in a message. The default does not change anything. Raising it stores more plain text on disk (0600, not encrypted), and changing the value clears the index and rebuilds it. `get_brief` and embeddings still use the first 220 characters. Index size was not measured.
+- `docs/lumo-desktop.md`: how to connect this server to Proton's Lumo Desktop. Written from Proton's public pages; not tested in Lumo.
+
+### Changed
+
+- **The `core` tool set (`PROTONMAIL_TOOLSET=core`, `PROTONMAIL_TOOL_TIER=core`) is now 22 tools built for the `drafts` mode.** Removed: `send_email`, `send_draft`, `reply_to_email`, `reply_all_email`, `forward_email`, `trash_email`, `archive_email`, `move_email` (the default mode refused them anyway). Added: `create_reply_draft`, `create_forward_draft`, `get_brief`, `get_style_profile`, `get_attachment_text`. Anyone on `core` who sends or moves mail needs `PROTONMAIL_TOOLSET=full`. The default (`full`) is unchanged.
+- Tool definition cost, estimated (characters / 4, not a tokenizer): about 8k tokens for `core`, about 37k for `full`. The README's earlier 21k was out of date.
+- The `create_draft` and `delete_draft` descriptions said drafts live in SQLite; they live in `drafts.json`.
+- CI also runs Node 22 on macOS and Windows. `RELEASING.md` has a manual, read-only real-Bridge check (`test/live/readonly-smoke.mjs`) before a release.
+
 ## [2.19.8] — 2026-11-18
 
 ### Changed

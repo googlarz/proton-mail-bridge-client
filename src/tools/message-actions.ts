@@ -7,6 +7,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { ensureMoveTargetAllowed, isMissingTargetFolderError, applyBatchEmailAction, emailSourceFromActionResult } from "./actions.js";
 import { withAudit } from "./audit.js";
 import { createTextResult } from "./results.js";
+import { runWithUndo, undoResponse, type BulkJournalParams } from "./undo.js";
 import { requireString, optionalString, parseStringListArg, requireEmailAction } from "./args.js";
 import { normalizeBoolean, parseEmailId, withAccountPrefix } from "../utils/helpers.js";
 import { ensureEmailActionAllowed, ensureDestructiveConfirmed, ensureMailboxWriteAllowed, ensureFlagChangeAllowed } from "../utils/runtime-policy.js";
@@ -352,6 +353,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         bundle: AccountBundle;
         notFound: BulkExcludedEmailId[];
         run: () => Promise<BulkOperationResult>;
+        journal: BulkJournalParams;
       }> = [];
       for (const [slug, group] of groups) {
         // Each account's ids say their own folder, so ids from different accounts may sit in different folders.
@@ -383,6 +385,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
               uidValidity: currentUidValidity,
               dryRun,
             }),
+          journal: { tool: "bulk_move", folder, uids, uidValidity: currentUidValidity, targetFolder },
         });
       }
       ensureBulkBatchSize(totalUids, max);
@@ -391,10 +394,10 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
         const outputSlug = group.slug === primaryBundle.account.slug ? undefined : group.slug;
-        const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, group.run);
+        const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, () => runWithUndo(group.bundle, group.journal, group.run));
         outputs.push(withBulkNotFound(prefixBulkResult(raw, outputSlug), prefixNotFound(group.notFound, outputSlug)));
       }
-      return createTextResult(mergeBulkResults(outputs));
+      return createTextResult({ ...mergeBulkResults(outputs), ...undoResponse(outputs.flatMap((output) => (output.undo ? [output.undo] : []))) });
     }
 
     case "bulk_delete": {
@@ -439,6 +442,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         bundle: AccountBundle;
         notFound: BulkExcludedEmailId[];
         run: () => Promise<BulkOperationResult>;
+        journal: BulkJournalParams;
       }> = [];
       for (const [slug, group] of groups) {
         // Each account's ids say their own folder, so ids from different accounts may sit in different folders.
@@ -474,6 +478,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
               uidValidity: currentUidValidity,
               dryRun,
             }),
+          journal: { tool: "bulk_delete", folder, uids, uidValidity: currentUidValidity },
         });
       }
       ensureBulkBatchSize(totalUids, max);
@@ -482,10 +487,10 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
         const outputSlug = group.slug === primaryBundle.account.slug ? undefined : group.slug;
-        const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, group.run);
+        const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, () => (permanent ? runWithUndo(group.bundle, group.journal, group.run) : group.run()));
         outputs.push(withBulkNotFound(prefixBulkResult(raw, outputSlug), prefixNotFound(group.notFound, outputSlug)));
       }
-      return createTextResult(mergeBulkResults(outputs));
+      return createTextResult({ ...mergeBulkResults(outputs), ...undoResponse(outputs.flatMap((output) => (output.undo ? [output.undo] : []))) });
     }
 
     case "bulk_update_flags": {
@@ -528,6 +533,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
         bundle: AccountBundle;
         notFound: BulkExcludedEmailId[];
         run: () => Promise<BulkOperationResult>;
+        journal: BulkJournalParams;
       }> = [];
       for (const [slug, group] of groups) {
         // Each account's ids say their own folder, so ids from different accounts may sit in different folders.
@@ -558,6 +564,7 @@ export async function handleMessageActionTool(name: string, args: Record<string,
               uidValidity: currentUidValidity,
               dryRun,
             }),
+          journal: { tool: "bulk_update_flags", folder, uids, uidValidity: currentUidValidity, flagsToAdd, flagsToRemove },
         });
       }
       ensureBulkBatchSize(totalUids, max);
@@ -566,10 +573,10 @@ export async function handleMessageActionTool(name: string, args: Record<string,
       const outputs: BulkOperationResult[] = [];
       for (const group of prepared) {
         const outputSlug = group.slug === primaryBundle.account.slug ? undefined : group.slug;
-        const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, group.run);
+        const raw = dryRun ? await group.run() : await withAudit(group.bundle.auditService, name, args, () => runWithUndo(group.bundle, group.journal, group.run));
         outputs.push(withBulkNotFound(prefixBulkResult(raw, outputSlug), prefixNotFound(group.notFound, outputSlug)));
       }
-      return createTextResult(mergeBulkResults(outputs));
+      return createTextResult({ ...mergeBulkResults(outputs), ...undoResponse(outputs.flatMap((output) => (output.undo ? [output.undo] : []))) });
     }
 
     case "bulk_update_labels": {

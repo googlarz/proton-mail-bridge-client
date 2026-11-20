@@ -21,6 +21,7 @@ import type {
 } from "../types/index.js";
 import { ensureAccountIdentityMatches } from "../utils/account-identity.js";
 import {
+  DEFAULT_INDEX_BODY_CHARS,
   createEmailId,
   dedupeEmails,
   extractDomain,
@@ -180,6 +181,10 @@ const KEY_COLUMN: Record<string, string> = {
 };
 // Version of what message_keys stores; bump when searchKey changes so the table is rebuilt once.
 const MESSAGE_KEY_VERSION = "1";
+
+// The longer text kept for search (message_bodies, see PROTONMAIL_INDEX_BODY_CHARS), for the messages of one search. Beside
+// the summary and not on it, so that it is matched against the query but never reaches a tool's answer.
+const indexedBodies = new WeakMap<EmailSummary, string>();
 
 // WHERE fragment: any of `columns` contains `needle`, ignoring case, accents and spelling variants
 // (Müller/Mueller, see searchKey).
@@ -342,6 +347,7 @@ function matchesIndexedSearch(email: EmailSummary, filters: SearchEmailsInput): 
   const haystacks = [
     email.subject,
     email.preview ?? "",
+    indexedBodies.get(email) ?? "",
     email.attachmentText ?? "",
     email.folder,
     email.labels.join(" "),
@@ -922,6 +928,7 @@ export class LocalIndexService {
       const db = await this.ensureDb();
       const thread = this.loadThreadByKey(db, normalizedFilters.threadId);
       if (thread) {
+        if (normalizedFilters.query) this.attachIndexedBodies(db, thread.messages);
         const threadMessages = sortEmailsByNewest(thread.messages).filter((email) =>
           matchesIndexedSearch(email, { ...normalizedFilters, threadId: undefined }),
         ).sort((left, right) => searchRelevanceScore(right, normalizedFilters) - searchRelevanceScore(left, normalizedFilters));
@@ -951,6 +958,7 @@ export class LocalIndexService {
       );
       if (thread) {
         const freshnessFields = this.indexFreshnessFields(snapshot.updatedAt);
+        if (normalizedFilters.query) this.attachIndexedBodies(await this.ensureDb(), thread.messages);
         const threadMessages = sortEmailsByNewest(thread.messages).filter((email) =>
           matchesIndexedSearch(email, { ...normalizedFilters, threadId: undefined }),
         ).sort((left, right) => searchRelevanceScore(right, normalizedFilters) - searchRelevanceScore(left, normalizedFilters));
@@ -1963,6 +1971,7 @@ export class LocalIndexService {
 
     this.runMigrations(db);
     this.rebuildFtsIfNeeded(db);
+    this.resetIndexIfBodyCharsChanged(db);
     this.db = db;
     await this.maybeImportLegacyIndex(db);
 
@@ -2109,6 +2118,11 @@ export class LocalIndexService {
         email_id, subject, preview, folder, labels, participants, attachment_names
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
+    const upsertBody = db.prepare(`
+      INSERT INTO message_bodies (email_id, body) VALUES (?, ?)
+      ON CONFLICT(email_id) DO UPDATE SET body = excluded.body
+    `);
+    const readBody = db.prepare(`SELECT body FROM message_bodies WHERE email_id = ?`);
     // The UIDVALIDITY-embedding id format is optional per-caller (createEmailId):
     // a message indexed before that fix lives here under the old 3-field id
     // (<folder>::<uid>::<checksum>, no uidValidity), while a sync running the
@@ -2373,8 +2387,12 @@ export class LocalIndexService {
           bcc_json: JSON.stringify(email.bcc),
           labels_json: JSON.stringify(email.labels),
         });
+        // Like preview, the longer text is kept when a flags-only sync brings none, so the FTS row below is
+        // rebuilt from what is stored.
+        if (email.indexText) upsertBody.run(email.id, email.indexText);
+        const body = (readBody.get(email.id) as { body: string } | undefined)?.body;
         deleteFts.run(email.id);
-        insertFts.run(email.id, ...ftsColumns(email, persisted.preview ?? "", persisted.attachment_text ?? undefined));
+        insertFts.run(email.id, ...ftsColumns(email, body ?? persisted.preview ?? "", persisted.attachment_text ?? undefined));
       }
 
       // Flags-only sweeps: bring read/starred state of every indexed row of the folder in line with the server and
@@ -2509,6 +2527,7 @@ export class LocalIndexService {
       INSERT INTO messages_fts (email_id, subject, preview, folder, labels, participants, attachment_names)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
+    const readBody = db.prepare(`SELECT body FROM message_bodies WHERE email_id = ?`);
     const nextBatch = db.prepare(`SELECT rowid AS _rowid, * FROM messages WHERE rowid > ? ORDER BY rowid LIMIT 500`);
     db.transaction(() => {
       db.exec(`DELETE FROM messages_fts`);
@@ -2522,7 +2541,8 @@ export class LocalIndexService {
           // That message just has no full-text entry until it is synced again.
           try {
             const email = this.rowToEmailSummary(row);
-            insertFts.run(email.id, ...ftsColumns(email, row.preview ?? "", row.attachment_text ?? undefined));
+            const body = (readBody.get(row.email_id) as { body: string } | undefined)?.body;
+            insertFts.run(email.id, ...ftsColumns(email, body ?? row.preview ?? "", row.attachment_text ?? undefined));
           } catch (error) {
             skipped += 1;
             this.log.warn("Skipped a message while rebuilding the full-text index", "LocalIndexService", {
@@ -2537,6 +2557,35 @@ export class LocalIndexService {
       if (skipped > 0) {
         this.log.warn(`${skipped} message(s) were left out of the full-text index`, "LocalIndexService");
       }
+    })();
+  }
+
+  // PROTONMAIL_INDEX_BODY_CHARS differs from the value the index was built with: its rows hold text of the old length
+  // (or none), and a flags-only sync never reads a body again, so keeping them would leave search silently uneven. The
+  // index is only a copy of the mailbox, so start over; a search on the empty index starts a sync, which refills it
+  // (older mail comes back with full syncs, as after clear_index). One transaction: either all of it or nothing.
+  private resetIndexIfBodyCharsChanged(db: Database.Database): void {
+    const configured = this.config.runtime?.indexBodyChars ?? DEFAULT_INDEX_BODY_CHARS;
+    const stored = db.prepare(`SELECT value FROM metadata WHERE key = 'indexBodyChars'`).get() as { value: string } | undefined;
+    // No value: built before the setting existed, so from the preview alone.
+    if (Number(stored?.value ?? DEFAULT_INDEX_BODY_CHARS) === configured) return;
+    const total = Number((db.prepare(`SELECT COUNT(*) AS count FROM messages`).get() as { count: number }).count);
+    if (total > 0) {
+      this.log.warn(
+        `PROTONMAIL_INDEX_BODY_CHARS changed to ${configured}; clearing ${total} indexed messages so they are indexed again with it (the next sync refills the index)`,
+        "LocalIndexService",
+      );
+    }
+    db.transaction(() => {
+      db.exec(`
+        DELETE FROM messages_fts;
+        DELETE FROM messages;
+        DELETE FROM sync_state;
+        UPDATE folders SET last_indexed_at = NULL, last_indexed_count = NULL;
+      `);
+      const setMetadata = db.prepare(`INSERT INTO metadata (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+      setMetadata.run("updatedAt", "");
+      setMetadata.run("indexBodyChars", String(configured));
     })();
   }
 
@@ -2632,6 +2681,13 @@ export class LocalIndexService {
         email_id TEXT PRIMARY KEY REFERENCES messages(email_id) ON DELETE CASCADE,
         subject_key TEXT, preview_key TEXT, from_key TEXT, to_key TEXT,
         cc_key TEXT, bcc_key TEXT, labels_key TEXT, folder_key TEXT
+      );
+
+      -- Text beyond the preview, only for messages synced with PROTONMAIL_INDEX_BODY_CHARS above its default. A table of
+      -- its own so the wide text is not read with every messages row; it is what messages_fts is rebuilt from.
+      CREATE TABLE IF NOT EXISTS message_bodies (
+        email_id TEXT PRIMARY KEY REFERENCES messages(email_id) ON DELETE CASCADE,
+        body TEXT NOT NULL
       );
     `);
     this.ensureMessagesColumns(db);
@@ -2826,10 +2882,27 @@ export class LocalIndexService {
     sqlParts.push(`ORDER BY COALESCE(internal_date, date) DESC, uid DESC LIMIT ?`);
     params.push(limitHint);
 
-    return db
+    const candidates = db
       .prepare(sqlParts.join(" "))
       .all(...params)
       .map((row) => this.rowToEmailSummary(row as MessageRow));
+    if (filters.query) this.attachIndexedBodies(db, candidates);
+    return candidates;
+  }
+
+  // FTS matched these messages on their longer text too, so the query check that follows must see it (see indexedBodies).
+  private attachIndexedBodies(db: Database.Database, emails: EmailSummary[]): void {
+    for (let start = 0; start < emails.length; start += 400) {
+      const chunk = emails.slice(start, start + 400);
+      const rows = db
+        .prepare(`SELECT email_id, body FROM message_bodies WHERE email_id IN (${chunk.map(() => "?").join(", ")})`)
+        .all(...chunk.map((email) => email.id)) as Array<{ email_id: string; body: string }>;
+      const bodies = new Map(rows.map((row) => [row.email_id, row.body]));
+      for (const email of chunk) {
+        const body = bodies.get(email.id);
+        if (body) indexedBodies.set(email, body);
+      }
+    }
   }
 
   private searchFtsIds(

@@ -14,6 +14,7 @@ import { BackgroundSyncService } from "./background-sync-service.js";
 import { AutoresponderService, type AutoresponderDeps } from "./autoresponder-service.js";
 import { RulesService } from "./rules-service.js";
 import { TriagePlanService } from "./triage-plan-service.js";
+import { UndoJournalService } from "./undo-journal-service.js";
 import { CategoryService } from "./category-service.js";
 import { CommitmentService } from "./commitment-service.js";
 import { ContactService } from "./contact-service.js";
@@ -47,6 +48,8 @@ export interface AccountBundle {
   autoresponderService: AutoresponderService;
   rulesService: RulesService;
   triagePlanService: TriagePlanService;
+  /** What bulk operations did, kept so undo_plan can put it back (undoId). */
+  undoJournalService: UndoJournalService;
   categoryService: CategoryService;
   commitmentService: CommitmentService;
   contactService: ContactService;
@@ -120,6 +123,7 @@ function buildAccountBundle(
   const autoresponderService = new AutoresponderService(config, log);
   const rulesService = new RulesService(config, log);
   const triagePlanService = new TriagePlanService(config);
+  const undoJournalService = new UndoJournalService(config);
   const categoryService = new CategoryService(config);
   const commitmentService = new CommitmentService(config);
   const contactService = new ContactService(config, log);
@@ -221,6 +225,7 @@ function buildAccountBundle(
     autoresponderService,
     rulesService,
     triagePlanService,
+    undoJournalService,
     categoryService,
     commitmentService,
     contactService,

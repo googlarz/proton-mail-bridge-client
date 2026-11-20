@@ -30,6 +30,11 @@ jobs:
           # The darwin .mcpb bundle ships to users, so test on macOS too.
           - os: macos-latest
             node-version: 24
+          # The engines floor (Node 22) on macOS and Windows as well, not only on Ubuntu.
+          - os: macos-latest
+            node-version: 22
+          - os: windows-latest
+            node-version: 22
           # ...and the win32 bundle: Windows refuses to delete open files, which
           # is how the missing LocalIndexService.close() was found.
           - os: windows-latest

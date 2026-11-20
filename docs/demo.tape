@@ -1,6 +1,9 @@
 # VHS tape (https://github.com/charmbracelet/vhs) for the CLI part of docs/demo-script.md.
 # Render: vhs docs/demo.tape      (writes docs/demo.gif; nothing is committed or published)
 #
+# Commands checked against docs/cli.md for 2.19.8 (2026-11-20); the tape itself has not been rendered since.
+# Before rendering confirm: proton-mail-bridge-client --version   (expect 2.19.8)
+#
 # Needs Proton Bridge running and signed in, the CLI installed
 # (npm install -g proton-mail-bridge-client) and PROTONMAIL_USERNAME /
 # PROTONMAIL_PASSWORD set in the shell that runs vhs. Use a test account.

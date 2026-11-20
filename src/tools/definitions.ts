@@ -303,7 +303,7 @@ export const TOOLS = [
   },
   {
     name: "create_draft",
-    description: "Save a new outbound message as a local draft in SQLite, optionally syncing it to the Proton Drafts IMAP folder. Use to compose and review before sending. Prefer create_reply_draft when replying to a specific emailId, or create_forward_draft when forwarding. Returns a draftId for later update, sync, or send via send_draft.",
+    description: "Save a new outbound message as a local draft (stored in drafts.json in the data directory), optionally syncing it to the Proton Drafts IMAP folder. Use to compose and review before sending. Prefer create_reply_draft when replying to a specific emailId, or create_forward_draft when forwarding. Returns a draftId for later update, sync, or send via send_draft.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -558,7 +558,7 @@ export const TOOLS = [
   },
   {
     name: "delete_draft",
-    description: "Permanently delete a locally saved draft from SQLite. Use to discard a draft you no longer need. Does NOT remove a matching draft from the Proton Drafts IMAP folder — that requires a separate mailbox action. Irreversible; requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
+    description: "Permanently delete a locally saved draft (from drafts.json in the data directory). Use to discard a draft you no longer need. Does NOT remove a matching draft from the Proton Drafts IMAP folder — that requires a separate mailbox action. Irreversible; requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -969,15 +969,15 @@ export const TOOLS = [
   },
   {
     name: "undo_plan",
-    description: "Put back what approve_plan changed: moved and archived mail returns to its folder, marked-read mail becomes unread, added labels are removed. Items that cannot be put back (the message was moved or deleted since) are reported.",
+    description: "Put back what approve_plan changed: moved and archived mail returns to its folder, marked-read mail becomes unread, added labels are removed. Or, with undoId (from bulk_move, bulk_update_flags or apply_rules), put back what that bulk operation really did: moved mail returns to its folder (found again by its new id, else by Message-ID), flags are restored as they were before. Undo data is kept for 7 days and the runtime policy applies as for the original action. Items that cannot be put back (the message was moved or deleted since) are reported, and a permanent delete or a forward is never undoable. list_plans shows the stored undoIds.",
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {
       type: "object",
       properties: {
-        planId: { type: "string", description: "The planId of an approved plan." },
+        planId: { type: "string", description: "The planId of an approved plan. Give this or undoId." },
+        undoId: { type: "string", description: "The undoId a bulk operation returned (a non-primary account's id starts with its '<slug>::'). Give this or planId." },
         account: { type: "string", description: "Address or slug of the account the plan was made for." },
       },
-      required: ["planId"],
     },
   },
   {
@@ -1214,7 +1214,7 @@ export const TOOLS = [
   },
   {
     name: "apply_rules",
-    description: "Run the enabled rules (or one, ruleId) on mail that is already in the index. By default a PREVIEW (dryRun true): it lists what would be done to which message and changes nothing. With dryRun false it marks, labels, archives, moves, trashes, deletes and forwards through the same permissions as the other tools; deleting for good needs confirmed: true. It works from the local index, so run sync_emails first if it may be stale.",
+    description: "Run the enabled rules (or one, ruleId) on mail that is already in the index. By default a PREVIEW (dryRun true): it lists what would be done to which message and changes nothing. With dryRun false it marks, labels, archives, moves, trashes, deletes and forwards through the same permissions as the other tools; deleting for good needs confirmed: true. It works from the local index, so run sync_emails first if it may be stale. A real run returns an undoId: undo_plan with it puts back moves, archiving, labels and mark-read (not forwards or deletes, which the response counts as irreversible), for 7 days.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -1384,7 +1384,7 @@ export const TOOLS = [
   },
   {
     name: "bulk_move",
-    description: "Move multiple emails to a target folder in one IMAP pass. Accepts either explicit emailIds[] or a match criteria object (XOR). Supports dryRun to preview. For single-message moves use move_email. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused.",
+    description: "Move multiple emails to a target folder in one IMAP pass. Accepts either explicit emailIds[] or a match criteria object (XOR). Supports dryRun to preview. For single-message moves use move_email. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused. A real run returns an undoId (the new ids are in results[].targetEmailId): undo_plan with it moves the messages back, for 7 days.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -1403,7 +1403,7 @@ export const TOOLS = [
   },
   {
     name: "bulk_delete",
-    description: "Delete multiple emails by explicit ID list or by search criteria (from/subject/date/flags). Prefer empty_folder to clear an entire folder. Prefer delete_email for a single message. Prefer batch_email_action when the same set of IDs needs a mix of actions, not just deletion. Use when you have specific IDs to delete or want to filter by sender, subject, or date range. Accepts emailIds[] OR match criteria (XOR). permanent:true permanently expunges; false moves to Trash. Use dryRun to preview. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused.",
+    description: "Delete multiple emails by explicit ID list or by search criteria (from/subject/date/flags). Prefer empty_folder to clear an entire folder. Prefer delete_email for a single message. Prefer batch_email_action when the same set of IDs needs a mix of actions, not just deletion. Use when you have specific IDs to delete or want to filter by sender, subject, or date range. Accepts emailIds[] OR match criteria (XOR). permanent:true permanently expunges; false moves to Trash. Use dryRun to preview. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused. With permanent:true the response carries an undoId only to say, in its note, that this cannot be undone; a move to Trash is not journaled yet.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -1422,7 +1422,7 @@ export const TOOLS = [
   },
   {
     name: "bulk_update_flags",
-    description: "Add or remove IMAP flags on multiple messages simultaneously. Prefer update_message_flags for a single message when you need per-flag server verification. Use when the same flag change (e.g. \\\\Seen, \\\\Flagged) should apply to several messages. Accepts emailIds[] OR match+folder (XOR). Returns notApplied[] per message for flags the server silently dropped. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/bulk_delete: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused.",
+    description: "Add or remove IMAP flags on multiple messages simultaneously. Prefer update_message_flags for a single message when you need per-flag server verification. Use when the same flag change (e.g. \\\\Seen, \\\\Flagged) should apply to several messages. Accepts emailIds[] OR match+folder (XOR). Returns notApplied[] per message for flags the server silently dropped. \\\\Seen/\\\\Flagged/\\\\Deleted are gated the same as mark_email_read/star_email/bulk_delete: each requires the matching action in PROTONMAIL_ALLOWED_ACTIONS, and setting \\\\Deleted also requires confirmed:true when PROTONMAIL_CONFIRM_DESTRUCTIVE is enabled. With `match`, run dryRun first and pass the count as `expectedCount` so a filter that matches more than intended is refused. A real run returns an undoId: undo_plan with it restores the flags the call really changed, for 7 days.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -2353,38 +2353,25 @@ export function listedTools(): Array<(typeof TOOLS)[number]> {
 
 // PROTONMAIL_TOOLSET=core (or the older PROTONMAIL_TOOL_TIER=core) exposes only these — reduces context-window burn
 // significantly on every session. Default is "full" (all tools).
+// Core is drafts-first, matching the default "drafts" mode (no sending; no move, archive or delete): it lists the
+// tools that mode can run (compose, reply and forward as drafts, read, flag) and none it would refuse, so the model
+// never tries them. Sending, moving, archiving and trashing need PROTONMAIL_TOOLSET=full. search_emails (live IMAP)
+// is left out because it overlaps with search_indexed_emails; the core tier exists to reduce tool-selection overlap.
 export const CORE_TOOL_NAMES = new Set([
   "get_emails",
   "get_email_by_id",
-  // search_emails (live IMAP) is deliberately excluded from core — it
-  // overlaps with search_indexed_emails (faster, offline-capable, and
-  // already the "prefer" default per its own description) and the core
-  // tier exists specifically to reduce tool-selection overlap. Still
-  // available under PROTONMAIL_TOOL_TIER=full for stale-index/live-only cases.
   "search_indexed_emails",
-  "send_email",
-  "reply_to_email",
-  // reply_all_email/forward_email were missing here despite reply_to_email
-  // being core — an asymmetry with no real reason behind it (all three are
-  // equally routine day-to-day sends, confirmed by this session's own
-  // multi-account/daily-scenarios testing).
-  "reply_all_email",
-  "forward_email",
+  "get_attachment_text",
   "create_draft",
-  "send_draft",
-  // list_drafts/get_draft/update_draft — found live: these are exactly as
-  // routine as create_draft/send_draft (already core), just for the
-  // review-before-sending step in between. Leaving them full-tier-only meant
-  // "core" covered composing and sending a draft but not looking at or
-  // editing it first.
+  "create_reply_draft",
+  "create_forward_draft",
   "list_drafts",
   "get_draft",
   "update_draft",
-  "trash_email",
-  "archive_email",
+  "get_style_profile",
+  "get_brief",
   "mark_email_read",
   "star_email",
-  "move_email",
   "get_threads",
   "get_thread_brief",
   "get_inbox_digest",
@@ -2392,8 +2379,5 @@ export const CORE_TOOL_NAMES = new Set([
   "get_folders",
   "sync_emails",
   "get_connection_status",
-  // list_accounts — found live: with multi-account support (v2.1.0+), core
-  // had no way to even see which accounts were configured or check their
-  // connection status without switching to the full tier.
   "list_accounts",
 ]);

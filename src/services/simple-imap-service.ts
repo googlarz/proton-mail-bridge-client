@@ -34,6 +34,7 @@ import {
   matchesNonAsciiCriteria,
   splitNonAsciiCriteria,
   nextDay,
+  DEFAULT_INDEX_BODY_CHARS,
   InvalidArgumentError,
   decodeAttachmentText,
   isPathInside,
@@ -2922,6 +2923,7 @@ export class SimpleIMAPService {
       // resolvable post-move reference, so the source folder's own
       // UIDVALIDITY (not the target's) is the correct one to embed.
       let sourceUidValidity: string | undefined;
+      let targetUidValidity: string | undefined;
       try {
         let uidMap: Map<number, number> | undefined;
         let hasUidPlus = false;
@@ -2938,6 +2940,15 @@ export class SimpleIMAPService {
             }
             uidMap = moved.uidMap;
             hasUidPlus = client.capabilities.has("UIDPLUS");
+            // The new ids embed the target folder's own UIDVALIDITY (see moveEmail). Best-effort: without it the
+            // id is still valid, just not checkable for staleness.
+            if (uidMap?.size) {
+              try {
+                targetUidValidity = (await client.status(input.targetFolder, { uidValidity: true }) || undefined)?.uidValidity?.toString();
+              } catch {
+                // the move itself succeeded: report it with the id format that has no UIDVALIDITY
+              }
+            }
           }),
           BULK_BATCH_TIMEOUT_MS,
           `Timed out after ${BULK_BATCH_TIMEOUT_MS}ms moving uid set ${uidSet} The outcome is unknown: the server may have completed the move, so check the folders before retrying.`,
@@ -2960,7 +2971,8 @@ export class SimpleIMAPService {
             continue;
           }
           this.messageCache.delete(emailId);
-          results.push({ uid, emailId, ok: true });
+          const targetUid = uidMap?.get(uid);
+          results.push({ uid, emailId, ok: true, ...(targetUid !== undefined ? { targetEmailId: createEmailId(input.targetFolder, targetUid, targetUidValidity) } : {}) });
           succeeded++;
         }
       } catch (err) {
@@ -2981,6 +2993,36 @@ export class SimpleIMAPService {
     }
     this.lastSyncAt = new Date().toISOString();
     return { dryRun: false, total: uids.length, succeeded, failed, notFound: 0, results };
+  }
+
+  // What undo needs before a bulk operation touches anything: each message's flags and Message-ID as they are now.
+  // A UID that is not in the answer was not found.
+  async snapshotMessages(folder: string, uids: number[], uidValidity?: string): Promise<Map<number, { flags: string[]; messageId?: string }>> {
+    const snapshot = new Map<number, { flags: string[]; messageId?: string }>();
+    if (uids.length === 0) return snapshot;
+    await this.withTimeout(
+      this.withMailbox(folder, true, async (client) => {
+        this.assertMailboxUidValidity(client, uidValidity);
+        for await (const message of client.fetch(uids.join(","), { uid: true, flags: true, envelope: true }, { uid: true })) {
+          snapshot.set(message.uid, { flags: Array.from(message.flags ?? []), messageId: message.envelope?.messageId });
+        }
+      }),
+      BULK_BATCH_TIMEOUT_MS,
+      `Timed out after ${BULK_BATCH_TIMEOUT_MS}ms reading the messages in ${folder} before changing them. Nothing was changed.`,
+    );
+    return snapshot;
+  }
+
+  // UIDs in `folder` whose Message-ID header is `messageId`: how undo finds a message again after a move gave it a new UID.
+  async findUidsByMessageId(folder: string, messageId: string): Promise<number[]> {
+    return this.withTimeout(
+      this.withMailbox(folder, true, async (client) => {
+        const found = await client.search({ header: { "Message-ID": messageId } }, { uid: true });
+        return Array.isArray(found) ? found : [];
+      }),
+      BULK_ITEM_TIMEOUT_MS,
+      `Timed out after ${BULK_ITEM_TIMEOUT_MS}ms looking for a message in ${folder}`,
+    );
   }
 
   async bulkDelete(input: {
@@ -3773,15 +3815,18 @@ export class SimpleIMAPService {
       for await (const message of client.fetch(`${plan.startUid}:${plan.endUid}`, fetchQuery, { uid: true })) {
         const summary = this.toSummary(folder, message, uidValidity);
         let enriched = summary;
+        let indexText: string | undefined;
         if (message.source) {
           const parsed = await this.parseSource(message.source);
           enriched = this.enrichSummaryFromParsed(summary, parsed, input.includeAttachmentText);
+          indexText = this.indexBodyText(parsed);
           const documentText = indexDocuments ? await this.extractDocumentSearchText(parsed) : undefined;
           if (documentText) {
             enriched = { ...enriched, attachmentText: enriched.attachmentText ? `${enriched.attachmentText}\n\n${documentText}` : documentText };
           }
         }
-        emails.push(enriched);
+        // The longer text goes to the index only; the copy kept in the message cache stays as it was.
+        emails.push(indexText ? { ...enriched, indexText } : enriched);
         this.messageCache.set(enriched.id, enriched);
         this.capMessageCache();
       }
@@ -4340,6 +4385,17 @@ export class SimpleIMAPService {
       hasAttachments: summary.hasAttachments || parsedAttachments.length > 0,
       attachmentText: includeAttachmentText ? this.extractAttachmentSearchText(parsed) : undefined,
     };
+  }
+
+  // The text the full-text index keeps beyond the preview (PROTONMAIL_INDEX_BODY_CHARS): the same text, cleaned the
+  // same way as the preview, cut at a larger length. Nothing at the default, where the preview is all there is.
+  private indexBodyText(parsed: ParsedMail): string | undefined {
+    const chars = this.config.runtime?.indexBodyChars ?? DEFAULT_INDEX_BODY_CHARS;
+    if (chars <= DEFAULT_INDEX_BODY_CHARS) {
+      return undefined;
+    }
+    const htmlText = stripHtmlToText(typeof parsed.html === "string" ? parsed.html : undefined);
+    return previewText(redactInlineData(parsed.text) || htmlText, chars);
   }
 
   private async parseSource(source: Buffer): Promise<ParsedMail> {

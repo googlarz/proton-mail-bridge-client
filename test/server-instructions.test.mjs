@@ -37,6 +37,13 @@ test("with the core tier the instructions name only tools the client can see", a
   assert.ok(text);
   for (const word of text.match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? []) assert.ok(exposed.has(word), `${word} is named but the client does not see it`);
   assert.ok(!/never mix ids/i.test(text), "the bulk tools do take ids of two accounts");
+  assert.match(text, /core tool profile/);
+  assert.match(text, /PROTONMAIL_TOOLSET=full/);
+});
+
+test("the full tool list gets no core-profile note", async () => {
+  const { text } = await instructionsFor(undefined);
+  assert.doesNotMatch(text, /core tool profile/);
 });
 
 test("the server hands the client short instructions, and every tool they name exists", async () => {

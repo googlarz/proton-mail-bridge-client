@@ -128,7 +128,7 @@ test("a call to a hidden tool is refused, and a listed one still runs", async ()
 test("a profile does not widen the mode: core still obeys read-only", async () => {
   await withEnv({ PROTONMAIL_TOOLSET: "core" }, async () => {
     await withServer(async (client) => {
-      const result = await client.callTool({ name: "send_email", arguments: { to: "a@example.com", subject: "s", body: "b", confirmed: true } });
+      const result = await client.callTool({ name: "create_draft", arguments: { to: "a@example.com", subject: "s", body: "b" } });
       assert.equal(result.isError, true);
       assert.doesNotMatch(result.content[0].text, /PROTONMAIL_TOOLSET/, "refused by the mode, not by the profile");
     }, { readOnly: true, allowSend: false });

@@ -8,9 +8,12 @@ import { withAudit } from "./audit.js";
 import { requireString } from "./args.js";
 import { maybeRefreshLocalIndex } from "./index-refresh.js";
 import { createTextResult } from "./results.js";
+import { undoJournal } from "./undo.js";
+import { isReversible } from "../services/undo-journal-service.js";
 import type { ToolContext } from "./context.js";
 import type { ToolResult } from "./results.js";
 
+// undo_plan also takes an undoId (see undo.ts) instead of a planId: it puts back what a bulk operation did.
 // plan_inbox / approve_plan / undo_plan / list_plans: tidy the mailbox in one reviewed batch. A plan holds changes that can be taken
 // back (archive, move, mark read, label), from the model's own proposals and from a scan for automatic mail nobody
 // reads. Approving applies the chosen ones and records how to undo each; what was left out is not proposed again.
@@ -62,6 +65,15 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
           items: plan.items.length,
           undoDataHeld: undoItems(plan) > 0,
           undoableItems: undoItems(plan),
+        })),
+        undoJournals: [...(await bundle.undoJournalService.list())].reverse().map((journal) => ({
+          undoId: prefixedIdFor(bundle, journal.id),
+          tool: journal.tool,
+          createdAt: journal.createdAt,
+          expiresAt: bundle.undoJournalService.expiresAt(journal),
+          status: bundle.undoJournalService.isExpired(journal) ? "expired" : journal.status,
+          undoableItems: journal.items.filter(isReversible).length,
+          ...(journal.irreversible ? { irreversible: journal.irreversible } : {}),
         })),
         note: "slotsRemaining is the free room now; evictable counts plans that are not applied or applying, which are dropped to make room when the cap is reached, oldest first (an open plan can be among them). Applied plans hold the undo data and are never dropped; once undo_plan has put a plan back it becomes undone and can be dropped like the rest.",
       });
@@ -185,6 +197,14 @@ export async function handleTriageTool(name: string, args: Record<string, unknow
     }
 
     case "undo_plan": {
+      if (args.undoId !== undefined) {
+        if (args.planId !== undefined) throw new McpError(ErrorCode.InvalidParams, "Give planId or undoId, not both.");
+        // The id carries its account ("<slug>::" for a non-primary one), like every other id.
+        const { bundle: owner, rest } = resolveAccountForEmailId(requireString(args, "undoId"));
+        const outcome = await withAudit(owner.auditService, name, args, () => undoJournal(owner, rest, false));
+        owner.eventLog.emit({ type: "plan.undone", refId: rest, detail: `${outcome.undone} undone (${outcome.tool})` });
+        return createTextResult({ account: owner.account.address, ...outcome, undoId: prefixedIdFor(owner, rest) });
+      }
       const planId = requireString(args, "planId");
       const plan = await plans.get(planId);
       if (!plan?.applied) throw new McpError(ErrorCode.InvalidParams, `Plan ${planId} was not applied, so there is nothing to undo.`);

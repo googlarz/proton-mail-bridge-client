@@ -187,7 +187,12 @@ export function prefixBulkResult(result: BulkOperationResult, slug: string | und
   }
   return {
     ...result,
-    results: result.results.map((entry) => ({ ...entry, emailId: withAccountPrefix(slug, entry.emailId) })),
+    ...(result.undo ? { undo: { ...result.undo, undoId: withAccountPrefix(slug, result.undo.undoId) } } : {}),
+    results: result.results.map((entry) => ({
+      ...entry,
+      emailId: withAccountPrefix(slug, entry.emailId),
+      ...(entry.targetEmailId ? { targetEmailId: withAccountPrefix(slug, entry.targetEmailId) } : {}),
+    })),
   };
 }
 

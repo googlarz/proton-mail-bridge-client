@@ -1,6 +1,6 @@
 # Launch post drafts
 
-Drafts only; nothing has been posted. Edit before use and check each claim against the README at the time you post. Replace `<repo URL>` with the GitHub link.
+Drafts only; nothing has been posted. Facts last checked against version 2.19.8 (2026-11-20). Edit before use and check each claim against the README at the time you post. Replace `<repo URL>` with the GitHub link.
 
 Facts all three rely on (from the README): unofficial, not made by or affiliated with Proton; talks to Proton Bridge on 127.0.0.1; the index and audit log are on your disk; a new install through the setup wizard (2.18.0 and later) starts in `drafts` mode, while the server's own default with `PROTONMAIL_MODE` unset is still `full`; the mail text the AI model reads goes to the model provider unless the model is local.
 
@@ -48,3 +48,15 @@ The part I spent most time on is limits: `PROTONMAIL_MODE` presets (`read-only`,
 Honest limits: the server's default with no setting is `full` (the setup wizard starts new installs in `drafts`), so check which mode you run. Whatever the model reads is sent to the model provider unless you run a local model. The audit log is tamper-evident, not tamper-proof against someone who can write both log files. Prompt-injection defences are mitigations. It needs Bridge running, and I have only tested it on my own setups, so other Bridge versions, operating systems and clients may break.
 
 <repo URL>. I would like to hear where the safety model is wrong or unclear.
+
+## Lumo Desktop thread (SKETCH: use only after verifying in Lumo)
+
+Not for posting yet. Lumo Desktop was not installed when this was written, so nothing here was tried in it. Before using any of it, follow the checklist at the end of [lumo-desktop.md](lumo-desktop.md) and keep only what you saw work. What Proton states publicly (https://proton.me/support/lumo-connectors, https://proton.me/blog/lumo-desktop-features): Lumo Desktop has Connectors, including Proton Mail through Bridge and your own local (stdio) or remote MCP servers; every action defaults to Auto-approve and can be set to Ask human or Deny.
+
+**r/ProtonMail, comment or short post (do not argue with Proton's own connector):**
+Proton's Lumo Desktop now has a Proton Mail through Bridge connector, and it takes custom MCP servers too. If you want mode presets (`read-only`, `drafts`), an audit log or the same server in several clients, this unofficial server can be added as a custom connector; steps in `docs/lumo-desktop.md`. Please set `PROTONMAIL_MODE` first: Lumo's actions start at Auto-approve and this server's own default is `full`. [After verifying: say what worked and what did not in Lumo.] If the native connector is enough for you, use that.
+
+**Show HN or r/ClaudeAI, one extra line at most:**
+Works as a custom stdio MCP server in other clients too, for example Lumo Desktop [only after verifying].
+
+Do not claim: that Lumo supports MCP approval prompts (elicitation), that the tool list loads cleanly, or anything about the native connector's tools beyond what Proton's pages say.

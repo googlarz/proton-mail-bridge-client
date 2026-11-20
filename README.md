@@ -306,7 +306,7 @@ Reload the Cline extension after saving. Proton Mail tools will appear in Cline'
 For a server with no desktop, next to a headless Bridge. The image installs the published npm package and is published for each release to `ghcr.io/googlarz/proton-mail-bridge-client` (`:<version>` and `:latest`, linux/amd64 and linux/arm64). To build it yourself from this repo:
 
 ```bash
-docker build -f docker/Dockerfile --build-arg VERSION=2.19.8 -t proton-mail-bridge-client .
+docker build -f docker/Dockerfile --build-arg VERSION=2.20.0 -t proton-mail-bridge-client .
 docker run -i --rm --network host \
   -e PROTONMAIL_USERNAME=you@proton.me -e PROTONMAIL_PASSWORD_FILE=/run/secrets/bridge \
   -v /path/to/bridge-password:/run/secrets/bridge:ro -v bridge-client-data:/data \
@@ -435,6 +435,8 @@ proton-mail-bridge-client brief --sync --mark-seen --notify
 ## Tidy in one approval (`plan_inbox`)
 
 Ask Claude to tidy the inbox and it prepares a **plan**: a numbered list of changes that can all be taken back (archive, move, mark read, label), from its own proposals and from a scan for automatic mail nobody reads (unread for 3 days, or read and over 14 days old). Nothing changes until you approve. `approve_plan` applies everything, only some numbers, or everything except some; each change goes through the same runtime policy as the single tools. `undo_plan` puts the applied changes back (mail returns to its folder, read marks and labels are reverted). Senders of scanned items you left out are not proposed again. A plan never contains delete or trash.
+
+**Taking back a bulk action.** `bulk_move`, `bulk_update_flags` and a manual `apply_rules` now return an `undoId`; `undo_plan` with that `undoId` puts back what the call really changed (for a move, it finds the message in its new folder by id, then by Message-ID, and only when exactly one message matches). The journal is kept 7 days (at most 100). Undo goes through the same mode and approval checks as the original action. Permanent deletes, forwards and `empty_folder` cannot be taken back and are marked so; `bulk_delete` to Trash, label bulk changes, `batch_email_action`, thread actions and rules that run automatically after a sync are not journaled yet.
 
 ## Commitments ("I'll send it by Friday")
 
@@ -666,6 +668,8 @@ All commands support `--json` for machine-readable output, and any MCP tool is d
 
 `<command> --help` prints that command's usage without running it. Flags accept `--flag value` or `--flag=value` (a value starting with `--` needs the `=` form, or must come after a bare `--`); unknown flags are an error. Exit codes: `0` success, `1` failure (including a failed `doctor` or `connection-status` check, or a failed item in a `batch`/`bulk-*` run), `2` usage error.
 
+**Using Lumo Desktop?** See [docs/lumo-desktop.md](docs/lumo-desktop.md) (set-up and what is not yet verified).
+
 **Full command reference: [docs/cli.md](docs/cli.md)** (a named command for every one of the 129 tools, across read, triage, compose, mailbox actions, folders, drafts, templates, analytics, and diagnostics).
 
 ---
@@ -733,7 +737,7 @@ PROTONMAIL_DATA_DIR="$HOME/.proton-mail-bridge-client"
 
 # Tools
 PROTONMAIL_TOOL_TIER='full'          # 'core' exposes 25 essential tools, incl. draft review/edit and list_accounts (saves context window); 'full' exposes all 129
-PROTONMAIL_TOOLSET='full'            # 'full' (all tools), 'core' (the same 25 as TOOL_TIER=core) or 'reader' (read-only tools only, nothing that writes or sends); hides tools and refuses calls to them, never widens PROTONMAIL_MODE; wins over TOOL_TIER; invalid -> full
+PROTONMAIL_TOOLSET='full'            # 'full' (all tools), 'core' (the same 22 as TOOL_TIER=core) or 'reader' (read-only tools only, nothing that writes or sends); hides tools and refuses calls to them, never widens PROTONMAIL_MODE; wins over TOOL_TIER; invalid -> full
 
 # Safety
 PROTONMAIL_READ_ONLY='false'
@@ -775,6 +779,7 @@ PROTONMAIL_PDF_MAX_MB='10'            # largest PDF get_attachment_text extracts
 PROTONMAIL_PDF_MAX_PAGES='50'         # pages get_attachment_text reads from a PDF (1-2000); a longer PDF is cut off with a note saying how many pages are missing
 PROTONMAIL_OCR_COMMAND=''             # optional: a program run as '<command> <image file> stdout' (tesseract's convention) so get_attachment_text can read images and PDF pages without a text layer. Started without a shell, 60 s limit; unset, such images and scans fail
 PROTONMAIL_INDEX_ATTACHMENTS='false'  # true: text of PDF, DOCX, XLSX and PPTX attachments is added to the local index so search finds it (bounded, no OCR); more disk, slower sync
+PROTONMAIL_INDEX_BODY_CHARS='220'      # how much of each message body the local index keeps for search: 220 (default) to 20000. Higher finds words deep in a message but stores more plain text in mail-index.sqlite (0600, not encrypted) and roughly doubles its size per character; changing it clears the index, which is rebuilt by the next syncs
 PROTONMAIL_MAX_TRIAGE_PLANS='200'      # most plan_inbox plans kept (positive integer; anything else = 200). Applied plans hold the undo data and are never dropped: when all stored plans are applied, plan_inbox refuses until you undo_plan some or raise this
 
 # Semantic search (optional; nothing runs unless the URL is set)
@@ -929,7 +934,7 @@ Measured in October 2026 (v2.7.0) on a copy of the same ~57,000-message index. "
 - Draft and queued-message bodies are shortened to a preview in list and update responses (`bodyTruncated`, `bodyLength`); use `get_draft` for one full draft. Attachment content is never inlined in a listing.
 - Large attachments: set `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` and pass `saveTo`, rather than raising `PROTONMAIL_MAX_INLINE_KB`. **Do not point `PROTONMAIL_ALLOW_FILE_DOWNLOAD_DIR` at a broad directory such as `$HOME`:** `save_attachment` could then overwrite shell startup files, LaunchAgents or `~/.claude/settings.json`. The server refuses destinations inside any account's data directory (its `attachments` folder excepted) and the trusted CA file (`save_attachment(s)`, `export_email`), even when the download directory contains them, but it protects nothing else. This was already true before 2.17.
 - Office files are read in a small pool: at most 2 documents at a time, up to 16 waiting (further ones fail with a `busy` error), each reader memory-limited and each job stopped after 10 seconds from its start. PDFs have their own pool with the same 2 and 16.
-- **`PROTONMAIL_TOOL_TIER=core`** exposes 25 tools instead of 129: about 7k tokens of tool definitions instead of about 21k (measured with 116 tools, before the eleven tools of 2.17 were added and not re-measured; the full set now costs somewhat more) (roughly 67% less; the earlier measurement with a reference tokenizer, 7k against 20k for 96 tools, scaled by the 3.7% the four newest tool definitions add), paid on every conversation that loads the server.
+- **`PROTONMAIL_TOOL_TIER=core`** exposes 22 tools instead of 129: about 8k tokens of tool definitions instead of about 37k, paid on every conversation that loads the server. These are estimates (the JSON of each tool's name, description and input schema, divided by four), not a tokenizer measurement. `core` is built for the `drafts` mode: it can read, search, draft and reply-draft, but has no tool that sends, moves, archives or deletes; set `PROTONMAIL_TOOLSET=full` for those.
 - Repeating an `update_draft` that changes nothing on a draft whose remote copy is already in sync does no store write and no IMAP upload. (A draft whose last sync failed, or that was edited with `syncToRemote:false`, still syncs.)
 
 **Working with drafts**

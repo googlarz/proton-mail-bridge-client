@@ -7,7 +7,7 @@ import { DEFAULT_APPROVAL_TIMEOUT_SECONDS, parseApprovalEnv } from "./utils/appr
 import { parseDelegationEnv } from "./utils/delegation.js";
 import { homedir } from "node:os";
 import { join, isAbsolute } from "node:path";
-import { isValidEmail, slugifyAccountAddress } from "./utils/helpers.js";
+import { DEFAULT_INDEX_BODY_CHARS, MAX_INDEX_BODY_CHARS, isValidEmail, slugifyAccountAddress } from "./utils/helpers.js";
 import { parseListValues } from "./tools/args.js";
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
@@ -100,6 +100,20 @@ export function validatePortEnv(name: string): void {
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) {
     throw new Error(`${name} must be an integer between 1 and 65535, got: ${raw}`);
   }
+}
+
+// Like a port, a value outside the range aborts startup: the limit decides what the index stores and when it is
+// rebuilt, so a typo must not quietly become some other limit.
+export function parseIndexBodyCharsEnv(name: string): number {
+  const raw = process.env[name]?.trim();
+  if (!raw || raw.startsWith("${")) {
+    return DEFAULT_INDEX_BODY_CHARS;
+  }
+  const parsed = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < DEFAULT_INDEX_BODY_CHARS || parsed > MAX_INDEX_BODY_CHARS) {
+    throw new Error(`${name} must be an integer between ${DEFAULT_INDEX_BODY_CHARS} and ${MAX_INDEX_BODY_CHARS}, got: ${raw}`);
+  }
+  return parsed;
 }
 
 // One switch for the safety flags. A mode is a floor: the individual variables can make things stricter, never
@@ -402,6 +416,7 @@ export function buildConfigFromEnv(): ProtonMailConfig {
       pdfMaxPages: parseIntegerEnv("PROTONMAIL_PDF_MAX_PAGES", DEFAULT_PDF_MAX_PAGES, 1, 2000),
       ocrCommand: process.env.PROTONMAIL_OCR_COMMAND?.trim() || undefined,
       indexAttachments: parseBooleanEnv("PROTONMAIL_INDEX_ATTACHMENTS", false),
+      indexBodyChars: parseIndexBodyCharsEnv("PROTONMAIL_INDEX_BODY_CHARS"),
       maxTriagePlans: parsePositiveIntegerEnv("PROTONMAIL_MAX_TRIAGE_PLANS", 200),
       opDelayMs,
       sendDelaySeconds,

@@ -239,7 +239,12 @@ export function mapParsedAddresses(
   }));
 }
 
-export function previewText(value?: string, maxLength = 220): string | undefined {
+// How much of a message's text the local index keeps for full-text search (PROTONMAIL_INDEX_BODY_CHARS). The default is
+// the length of the preview, so out of the box the index holds nothing beyond it.
+export const DEFAULT_INDEX_BODY_CHARS = 220;
+export const MAX_INDEX_BODY_CHARS = 20_000;
+
+export function previewText(value?: string, maxLength = DEFAULT_INDEX_BODY_CHARS): string | undefined {
   if (!value) {
     return undefined;
   }

@@ -1,12 +1,14 @@
 import type { AccountBundle } from "../services/account-manager.js";
 import type { MailRule, PlannedChange, RuleLogEntry } from "../services/rules-service.js";
 import { planChanges } from "../services/rules-service.js";
-import type { EmailSummary, SendEmailInput } from "../types/index.js";
-import { parseEmailId } from "../utils/helpers.js";
+import type { JournalItem } from "../services/undo-journal-service.js";
+import type { EmailSummary, SendEmailInput, UndoSummary } from "../types/index.js";
+import { labelMatchesFolder, parseEmailId } from "../utils/helpers.js";
 import { assessMail } from "../utils/mail-security.js";
 import { logger } from "../utils/logger.js";
 import { ensureEmailActionAllowed, ensureMailboxWriteAllowed, ensureOutboundRecipientsAllowed, ensureSendAllowed } from "../utils/runtime-policy.js";
 import { buildForwardText, prefixedSubject } from "./compose.js";
+import { summarize } from "./undo.js";
 
 // Carrying out what the rules planned: markers, labels, moves and forwards, through the same service methods the
 // tools use and under the same runtime policy. A run by itself on new mail only does what is safe (never trash or
@@ -37,6 +39,8 @@ export interface RunResult {
   forwarded: number;
   skippedByPolicy: string[];
   results: ChangeResult[];
+  /** A real run asked for by hand: how to put its moves, labels and marks back (undo_plan). */
+  undo?: UndoSummary;
 }
 
 /** What a planned change would do; empty when the message is already as the rules want it. */
@@ -126,13 +130,19 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
   const limited = plan.filter((change) => describe(change).length > 0).slice(0, options.limit);
   const result: RunResult = { dryRun: options.dryRun, messages: limited.length, changed: 0, failed: 0, forwarded: 0, skippedByPolicy: [], results: [] };
   if (!options.dryRun && !options.automatic) assertPlanAllowed(bundle, limited);
+  // A run asked for by hand is written to the undo journal before it changes anything; one that runs by itself on new
+  // mail is not (it is the rules working as set up, and nobody is waiting for an undoId).
+  const journaled = !options.dryRun && !options.automatic && limited.length > 0;
+  const entries: JournalItem[] = journaled ? limited.map(({ email }) => ({ emailId: email.id, folder: email.folder, messageId: email.messageId, flagsBefore: email.flags })) : [];
+  const journal = journaled ? await bundle.undoJournalService.begin("apply_rules", entries) : undefined;
   const log: RuleLogEntry[] = [];
   const handled: Array<{ ruleId: string; messageId: string }> = [];
   let forwards = 0;
   const skipped = new Set<string>();
 
-  for (const change of limited) {
+  for (const [index, change] of limited.entries()) {
     const email = change.email;
+    const record: JournalItem | undefined = journal ? entries[index] : undefined;
     const entry: ChangeResult = {
       id: email.id,
       from: email.from[0]?.address ?? "",
@@ -176,6 +186,7 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
         }
         await forwardMessage(bundle, email.id, forward.to, forward.note);
         did.push(`forwarded to ${forward.to.join(", ")}`);
+        if (record) record.irreversible = [...(record.irreversible ?? []), `forwarded to ${forward.to.join(", ")}`];
         forwards += 1;
       }
       for (const label of change.label) {
@@ -183,14 +194,17 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
           skipped.add("label");
           continue;
         }
-        await bundle.imapService.updateMessageLabels(email.id, [label], [], uidValidity);
+        const labelled = await bundle.imapService.updateMessageLabels(email.id, [label], [], uidValidity);
         did.push(`label ${label}`);
+        // Only a label this run really added is taken off again.
+        if (record && labelled.added.length > 0 && !email.labels.some((carried) => labelMatchesFolder(carried, label))) record.labelsAdded = [...(record.labelsAdded ?? []), label];
       }
       if (change.markRead && !email.isRead) {
         if (!allowed(bundle, "mark_read")) skipped.add("mark read");
         else {
           await bundle.imapService.markEmailRead(email.id, true, uidValidity);
           did.push("marked read");
+          if (record) record.flagsAdded = [...(record.flagsAdded ?? []), "\\Seen"];
         }
       }
       const d = change.disposition;
@@ -198,17 +212,21 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
         const action = d.kind === "move" ? "move" : d.kind;
         if (!allowed(bundle, action)) skipped.add(action);
         else if (d.kind === "archive") {
-          await bundle.imapService.archiveEmail(email.id, uidValidity);
+          const moved = await bundle.imapService.archiveEmail(email.id, uidValidity);
           did.push("archived");
+          if (record) record.movedTo = { folder: moved.targetFolder, ...(moved.targetEmailId ? { emailId: moved.targetEmailId } : {}) };
         } else if (d.kind === "move") {
-          await bundle.imapService.moveEmail(email.id, d.target as string, uidValidity);
+          const moved = await bundle.imapService.moveEmail(email.id, d.target as string, uidValidity);
           did.push(`moved to ${d.target}`);
+          if (record) record.movedTo = { folder: moved.targetFolder, ...(moved.targetEmailId ? { emailId: moved.targetEmailId } : {}) };
         } else if (d.kind === "trash") {
-          await bundle.imapService.trashEmail(email.id, uidValidity);
+          const moved = await bundle.imapService.trashEmail(email.id, uidValidity);
           did.push("moved to Trash");
+          if (record) record.movedTo = { folder: moved.targetFolder, ...(moved.targetEmailId ? { emailId: moved.targetEmailId } : {}) };
         } else {
           await bundle.imapService.deleteEmail(email.id, uidValidity);
           did.push("deleted");
+          if (record) record.irreversible = [...(record.irreversible ?? []), "deleted for good"];
         }
       }
       if (did.length) result.changed += 1;
@@ -217,6 +235,12 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
       result.failed += 1;
       entry.error = error instanceof Error ? error.message : String(error);
       logger.warn("A rule could not be applied to a message", "RulesRunner", { id: email.id, error });
+    }
+    if (record) {
+      // What was done before a failure is still recorded as done, so undo can put it back.
+      const changedSomething = Boolean(record.movedTo || record.flagsAdded?.length || record.labelsAdded?.length || record.irreversible?.length);
+      record.ok = !entry.error || changedSomething;
+      if (entry.error) record.error = entry.error;
     }
     result.results.push(entry);
     for (const rule of change.rules) {
@@ -241,6 +265,14 @@ export async function executePlan(bundle: AccountBundle, plan: PlannedChange[], 
   if (!options.dryRun) {
     // reserveForwards already counted the forwards against the day; only the handled messages and the log remain.
     await bundle.rulesService.record(log, handled, 0);
+  }
+  if (journal) {
+    // The run has happened: a failure to write its outcome must not turn it into an error.
+    try {
+      result.undo = summarize(bundle, await bundle.undoJournalService.complete(journal.id, entries));
+    } catch (error) {
+      logger.error("Could not write the undo outcome", "UndoJournal", { tool: "apply_rules", undoId: journal.id, error });
+    }
   }
   return result;
 }
