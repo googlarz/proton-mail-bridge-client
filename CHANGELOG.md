@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Replies sent through Bridge keep their thread again.** Bridge serves every message with a `References: <id@protonmail.internalid>` header, and the client stored the ids from that header lowercased, then sent them back in a reply's `References`. Bridge rejects the lowercased internal id, gives up looking for the parent and sends the reply with no `In-Reply-To` or `References`, so the recipient sees a new thread. Ids from `References` now keep their case (`parseMessageIds`); the index still compares them lowercased (`extractMessageIdList`). This covers `reply_to_email`, `create_reply_draft`, `create_thread_reply_draft`, `respond_to_invite` and the autoresponder. `reply_all_email` only sends the original's Message-ID and wasn't affected. Replies saved as drafts before this change keep their lowercased ids. Checked with one real send through Bridge to a Fastmail address.
+- `reply_to_email`'s `dryRun` shows `inReplyTo` and `references`, as its description already said it did.
+
 ## [2.20.0] — 2026-11-20
 
 ### Added
