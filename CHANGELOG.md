@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dry run shows the message that would be sent.** `send_email`, `reply_to_email`, `reply_all_email`, `forward_email`, `respond_to_invite` and `send_draft` built their `dryRun` answer by hand, apart from what they sent, so the two drifted: `reply_all_email` and `forward_email` showed only recipients and subject, and none showed attachments. Each now builds the payload it hands to SMTP first, and `dryRun` returns that payload under `message`: recipients, subject, `from`, `inReplyTo`, `references`, the body (for replies and forwards with the quote and signature), and attachments by name, type and size, without their bytes. A body over 500 characters is cut and the HTML copy of a Markdown body is left out, as in `list_scheduled_sends`. `wouldSendTo` stays and is `{ to, cc, bcc }` for every tool, `respond_to_invite` included, whose `replyCalendar` is replaced by `message.icalEvent`. The top-level `subject` is gone, and `reply_to_email`'s `inReplyTo` and `references` (added in 2.20.1) and `send_draft`'s `body` and `isHtml` moved into `message`. What `send_email`'s dry run doesn't show: the signature (`appendSignature: true`) and an automatic reply's outgoing note are added when the mail is built, and so is the Message-ID. `forward_email`'s dry run now fetches the original's attachments, as the real forward does. Checked with dry runs through Bridge only.
+
 ## [2.20.1] — 2026-11-22
 
 ### Fixed
