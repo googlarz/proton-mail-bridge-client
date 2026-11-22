@@ -551,7 +551,8 @@ export function foldQuotedHistory(text: string): string {
   return kept ? `${kept}\n\n${marker}` : marker;
 }
 
-export function extractMessageIdList(value?: string | string[]): string[] {
+// The ids in a References-style header as written: Message-IDs are case-sensitive.
+export function parseMessageIds(value?: string | string[]): string[] {
   if (!value) {
     return [];
   }
@@ -559,7 +560,11 @@ export function extractMessageIdList(value?: string | string[]): string[] {
   const raw = Array.isArray(value) ? value.join(" ") : value;
   // A message id never contains angle brackets; excluding "<" also keeps this linear on a long run of "<".
   const matches = raw.match(/<[^<>]+>/g) ?? [];
-  const normalized = matches
+  return [...new Set(matches.map((entry) => entry.replace(/\s+/g, "")))];
+}
+
+export function extractMessageIdList(value?: string | string[]): string[] {
+  const normalized = parseMessageIds(value)
     .map((entry) => normalizeMessageId(entry))
     .filter((entry): entry is string => Boolean(entry));
 

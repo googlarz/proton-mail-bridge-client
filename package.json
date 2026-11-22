@@ -75,15 +75,15 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
     "better-sqlite3": "^13.2.0",
-    "imapflow": "2.11.0",
+    "imapflow": "2.12.1",
     "mailparser": "^3.14.5",
     "nodemailer": "^10.0.15",
     "sanitize-html": "^2.18.2",
     "turndown": "^7.2.5",
-    "unpdf": "2.1.0"
+    "unpdf": "2.2.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.7",
+    "@biomejs/biome": "2.6.8",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.19.1",
     "@types/sanitize-html": "^2.16.1",
@@ -100,7 +100,7 @@
     "access": "public"
   },
   "allowScripts": {
-    "better-sqlite3@13.1.1": true
+    "better-sqlite3@13.2.0": true
   },
   "overrides": {
     "html-to-text": "10.0.1"

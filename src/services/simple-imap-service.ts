@@ -23,7 +23,7 @@ import {
   createEmailId,
   dedupeEmails,
   extractAttachments,
-  extractMessageIdList,
+  parseMessageIds,
   isSelfAddress,
   isTextLikeMimeType,
   mimeHeaderString,
@@ -4366,7 +4366,7 @@ export class SimpleIMAPService {
   ): EmailSummary {
     const parsedAttachments = this.mapParsedAttachments(parsed);
     const htmlText = stripHtmlToText(typeof parsed.html === "string" ? parsed.html : undefined);
-    const references = extractMessageIdList(this.readHeaderValue(parsed, "references"));
+    const references = parseMessageIds(this.readHeaderValue(parsed, "references"));
 
     return {
       ...summary,
