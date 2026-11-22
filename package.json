@@ -75,12 +75,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
     "better-sqlite3": "^13.1.1",
-    "imapflow": "2.11.0",
+    "imapflow": "2.12.1",
     "mailparser": "^3.14.3",
     "nodemailer": "^10.0.15",
     "sanitize-html": "^2.18.2",
     "turndown": "^7.2.5",
-    "unpdf": "2.1.0"
+    "unpdf": "2.2.1"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.7",
