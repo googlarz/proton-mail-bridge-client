@@ -4,10 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.20.1] — 2026-11-22
+
 ### Fixed
 
 - **Replies sent through Bridge keep their thread again.** Bridge serves every message with a `References: <id@protonmail.internalid>` header, and the client stored the ids from that header lowercased, then sent them back in a reply's `References`. Bridge rejects the lowercased internal id, gives up looking for the parent and sends the reply with no `In-Reply-To` or `References`, so the recipient sees a new thread. Ids from `References` now keep their case (`parseMessageIds`); the index still compares them lowercased (`extractMessageIdList`). This covers `reply_to_email`, `create_reply_draft`, `create_thread_reply_draft`, `respond_to_invite` and the autoresponder. `reply_all_email` only sends the original's Message-ID and wasn't affected. Replies saved as drafts before this change keep their lowercased ids. Checked with one real send through Bridge to a Fastmail address.
 - `reply_to_email`'s `dryRun` shows `inReplyTo` and `references`, as its description already said it did.
+
+### Changed
+
+- **Dependency updates, no change to what the tools do.** imapflow 2.11.0 → 2.12.1, unpdf 2.1.0 → 2.2.1, better-sqlite3 13.1.1 → 13.2.0, mailparser 3.14.3 → 3.14.5, nodemailer 10.5.0 → 10.6.0, @biomejs/biome 2.6.7 → 2.6.8 (development only). The suite passes on all eight CI jobs; none of these was tried against a real Bridge.
+- The reply fix above comes from a contribution by @msz (#79). Messages already stored in the local index or cache may still carry the old lowercased references until they are read again; this was not checked.
 
 ## [2.20.0] — 2026-11-20
 
