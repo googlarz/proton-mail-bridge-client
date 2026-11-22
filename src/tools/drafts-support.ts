@@ -79,34 +79,46 @@ export function truncateDraftBodyForResponse<T extends { body: string }>(draft: 
 // or cap any more than list_drafts did). No explicit return-type annotation
 // for the same reason as the function above.
 export function redactQueueRecordAttachments<T extends { payload: SendEmailInput }>(record: T) {
-  const attachments = record.payload.attachments;
-  const body = record.payload.body;
+  const payload = redactSendPayload(record.payload);
+  return payload === record.payload ? record : { ...record, payload };
+}
+
+// A send payload cut down for a tool response: the body to a preview, without the HTML copy or attachment bytes.
+export function redactSendPayload(payload: SendEmailInput) {
+  const { attachments, body } = payload;
   const bodyTooLong = typeof body === "string" && body.length > DRAFT_BODY_PREVIEW_LENGTH;
   // send_email(markdownBody) also stores the full rendered HTML in payload.htmlBody —
   // a parallel copy of the whole message that the body preview alone doesn't cover.
-  const hasHtmlBody = typeof record.payload.htmlBody === "string" && record.payload.htmlBody.length > 0;
+  const hasHtmlBody = typeof payload.htmlBody === "string" && payload.htmlBody.length > 0;
   if ((!attachments || attachments.length === 0) && !bodyTooLong && !hasHtmlBody) {
-    return record;
+    return payload;
   }
   return {
-    ...record,
-    payload: {
-      ...record.payload,
-      ...(bodyTooLong ? truncateDraftBodyForResponse({ body }) : {}),
-      ...(hasHtmlBody ? { htmlBody: undefined, htmlBodyOmitted: true } : {}),
-      ...(attachments && attachments.length > 0
-        ? {
-            attachments: attachments.map((attachment) => ({
-              filename: attachment.filename,
-              contentType: attachment.contentType,
-              cid: attachment.cid,
-              contentDisposition: attachment.contentDisposition,
-              content: "",
-              size: Buffer.byteLength(attachment.content, "base64"),
-            })),
-          }
-        : {}),
-    },
+    ...payload,
+    ...(bodyTooLong ? truncateDraftBodyForResponse({ body }) : {}),
+    ...(hasHtmlBody ? { htmlBody: undefined, htmlBodyOmitted: true } : {}),
+    ...(attachments && attachments.length > 0
+      ? {
+          attachments: attachments.map((attachment) => ({
+            filename: attachment.filename,
+            contentType: attachment.contentType,
+            cid: attachment.cid,
+            contentDisposition: attachment.contentDisposition,
+            content: "",
+            size: Buffer.byteLength(attachment.content, "base64"),
+          })),
+        }
+      : {}),
+  };
+}
+
+// What a send tool's dryRun returns: the payload the real call would hand to SMTPService.sendEmail.
+export function dryRunSendResult(payload: SendEmailInput) {
+  return {
+    dryRun: true,
+    wouldSendTo: { to: payload.to, cc: payload.cc ?? [], bcc: payload.bcc ?? [] },
+    message: redactSendPayload(payload),
+    note: "No email was sent.",
   };
 }
 

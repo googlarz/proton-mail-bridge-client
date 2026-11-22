@@ -3,7 +3,7 @@ import { maybeRefreshLocalIndex } from "./index-refresh.js";
 import { applyBodyEdits } from "../services/draft-store-service.js";
 import { getReplyRecipients, uniqueAddresses, prefixedSubject, buildReplyHtml, buildReplyText, replyReferences, buildForwardHtml, buildForwardText } from "./compose.js";
 import { draftSource, emailSource, threadSource } from "./resources.js";
-import { truncateDraftBodyForResponse, redactDraftAttachmentsForListing, isNoopDraftPatch } from "./drafts-support.js";
+import { truncateDraftBodyForResponse, redactDraftAttachmentsForListing, isNoopDraftPatch, dryRunSendResult } from "./drafts-support.js";
 import { createTextResult } from "./results.js";
 import { syncDraftToRemote, clearRemoteDraft, pickReplyTargetFromThread, verifySentCopy } from "./actions.js";
 import { withAudit, sanitizeAuditValue } from "./audit.js";
@@ -13,6 +13,7 @@ import { parseEmails, ensureValidEmails, isValidEmail, normalizeBoolean, normali
 import { ensureMailboxWriteAllowed, resolveRemoteDraftSync, ensureRemoteDraftSyncAllowed, ensureDestructiveConfirmed, ensureSendAllowed, ensureOutboundRecipientsAllowed } from "../utils/runtime-policy.js";
 import type { ToolContext } from "./context.js";
 import type { ToolResult } from "./results.js";
+import type { SendEmailInput } from "../types/index.js";
 import { sendOutcomeIsUnknown } from "../services/smtp-service.js";
 import { assertApprovedContentUnchanged, draftApprovalDigest } from "../utils/approval.js";
 
@@ -833,15 +834,27 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
       // username mismatch the old inline check's comment warned about.
       ensureOutboundRecipientsAllowed(config.runtime, sendBundleForDraft.config.smtp.username, [...draft.to, ...draft.cc, ...draft.bcc]);
 
+      const draftPayload: SendEmailInput = {
+        to: draft.to,
+        cc: draft.cc,
+        bcc: draft.bcc,
+        subject: draft.subject,
+        body: draft.body,
+        isHtml: draft.isHtml,
+        priority: draft.priority,
+        replyTo: draft.replyTo,
+        from: draft.from,
+        inReplyTo: draft.inReplyTo,
+        references: draft.references,
+        attachments: draft.attachments,
+        // Draft content is already finalized and reviewed — appending a
+        // signature invisibly at send time would change what the user
+        // saw and approved. If a signature is wanted, it belongs in the
+        // draft body itself.
+        appendSignature: false,
+      };
       if (normalizeBoolean(args.dryRun, false)) {
-        return createTextResult({
-          dryRun: true,
-          wouldSendTo: { to: draft.to, cc: draft.cc, bcc: draft.bcc },
-          subject: draft.subject,
-          body: draft.body,
-          isHtml: draft.isHtml,
-          note: "No email was sent.",
-        }, false, [draftSource(draft)]);
+        return createTextResult(dryRunSendResult(draftPayload), false, [draftSource(draft)]);
       }
 
       // A delegation grant's use is spent here, with the recipients of the draft as it is NOW (the ones that go out).
@@ -868,25 +881,7 @@ export async function handleDraftTool(name: string, args: Record<string, unknown
       const sendStartedAt = Date.now();
       let result: Awaited<ReturnType<typeof smtpService.sendEmail>>;
       try {
-        result = await sendBundleForDraft.smtpService.sendEmail({
-          to: draft.to,
-          cc: draft.cc,
-          bcc: draft.bcc,
-          subject: draft.subject,
-          body: draft.body,
-          isHtml: draft.isHtml,
-          priority: draft.priority,
-          replyTo: draft.replyTo,
-          from: draft.from,
-          inReplyTo: draft.inReplyTo,
-          references: draft.references,
-          attachments: draft.attachments,
-          // Draft content is already finalized and reviewed — appending a
-          // signature invisibly at send time would change what the user
-          // saw and approved. If a signature is wanted, it belongs in the
-          // draft body itself.
-          appendSignature: false,
-        });
+        result = await sendBundleForDraft.smtpService.sendEmail(draftPayload);
       } catch (error) {
         // Mirrors SnoozeService.wake()'s catch handler: revert the claim
         // so the draft is retryable instead of stuck in "sending"

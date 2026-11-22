@@ -2,7 +2,7 @@ import { type ParsedInvite, parseInvite, InviteError, findMyAttendee, buildInvit
 import { emailSource } from "./resources.js";
 import { applySignature } from "../services/smtp-service.js";
 import { extractUnsubscribeInfo, getReplyRecipients, uniqueAddresses, buildReplyHtml, buildReplyText, prefixedSubject, replyReferences, buildForwardHtml, buildForwardText } from "./compose.js";
-import { redactQueueRecordAttachments } from "./drafts-support.js";
+import { dryRunSendResult, redactQueueRecordAttachments } from "./drafts-support.js";
 import { sortByDateDesc } from "./merge.js";
 import { verifySentCopy } from "./actions.js";
 import { withAudit } from "./audit.js";
@@ -66,10 +66,6 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
         [...to, ...(cc ?? []), ...(bcc ?? [])],
       );
 
-      if (dryRunSend) {
-        return createTextResult({ dryRun: true, wouldSendTo: { to, cc: cc ?? [], bcc: bcc ?? [] }, subject, note: "No email was sent." });
-      }
-
       const emailPayload: SendEmailInput = {
         to,
         cc,
@@ -90,6 +86,9 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
         requestReadReceipt: normalizeBoolean(args.requestReadReceipt, false),
         appendSignature: normalizeBoolean(args.appendSignature, true),
       };
+      if (dryRunSend) {
+        return createTextResult(dryRunSendResult(emailPayload));
+      }
 
       // Undo-send: PROTONMAIL_SEND_DELAY_SECONDS > 0 queues instead of sending
       // immediately, cancelable via cancel_send until the window elapses.
@@ -339,10 +338,6 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
       // see send_email's comment.
       ensureOutboundRecipientsAllowed(config.runtime, sendBundleForReply.config.smtp.username, [...to, ...cc, ...extraBcc]);
 
-      if (dryRunReply) {
-        return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc: extraBcc }, subject: prefixedSubject(detail.subject, "Re:"), inReplyTo: detail.messageId, references: replyReferences(detail), note: "No email was sent." }, false, [emailSource({ ...detail, id: prefixedIdFor(readBundleReply, detail.id) })]);
-      }
-
       const replyPayload: SendEmailInput = {
           to,
           cc,
@@ -360,6 +355,9 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           // Already applied above, before quote-wrapping.
           appendSignature: false,
       };
+      if (dryRunReply) {
+        return createTextResult(dryRunSendResult(replyPayload), false, [emailSource({ ...detail, id: prefixedIdFor(readBundleReply, detail.id) })]);
+      }
       const undoWindowreply = resolveUndoWindowSeconds(args);
       await ctx.delegation.claim(args, name, sendBundleForReply, [...to, ...cc, ...extraBcc], readBundleReply);
       if (undoWindowreply > 0) {
@@ -429,9 +427,6 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
       // Shared helper, and the sending account's own address as "self" —
       // see send_email's comment.
       ensureOutboundRecipientsAllowed(config.runtime, sendBundleForRa.config.smtp.username, [...toRa, ...ccRa, ...extraBccRa]);
-      if (dryRunRa) {
-        return createTextResult({ dryRun: true, wouldSendTo: { to: toRa, cc: ccRa, bcc: extraBccRa }, subject: prefixedSubject(detailRa.subject, "Re:"), note: "No email was sent." });
-      }
 
       const includeQuoteRa = normalizeBoolean(args.includeQuote, true);
       // Signature goes right after the user's own reply text, before the
@@ -462,6 +457,9 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           // Already applied above, before quote-wrapping.
           appendSignature: false,
       };
+      if (dryRunRa) {
+        return createTextResult(dryRunSendResult(replyAllPayload));
+      }
       const undoWindowreplyAll = resolveUndoWindowSeconds(args);
       await ctx.delegation.claim(args, name, sendBundleForRa, [...toRa, ...ccRa, ...extraBccRa], readBundleRa);
       if (undoWindowreplyAll > 0) {
@@ -557,9 +555,6 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
         previousStatus: myAttendee?.partstat,
         ...(invite.hasRecurrence ? { note: "This invitation repeats; the answer applies to the whole series." } : {}),
       };
-      if (normalizeBoolean(args.dryRun, false)) {
-        return createTextResult({ dryRun: true, wouldSendTo: inviteTo, subject: inviteReply.subject, ...inviteSummary, replyCalendar: inviteReply.ics.split("\r\n").filter(Boolean), note: "No email was sent." });
-      }
       const invitePayload: SendEmailInput = {
         to: inviteTo,
         subject: inviteReply.subject,
@@ -570,6 +565,9 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
         icalEvent: { method: "REPLY", content: inviteReply.ics },
         appendSignature: false,
       };
+      if (normalizeBoolean(args.dryRun, false)) {
+        return createTextResult({ ...inviteSummary, ...dryRunSendResult(invitePayload) });
+      }
       const inviteUndo = resolveUndoWindowSeconds(args);
       if (inviteUndo > 0) {
         return queueUndoSend(inviteSendBundle, invitePayload, inviteUndo, name, args, { to: inviteTo, ...inviteSummary });
@@ -634,10 +632,6 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
       // Shared helper, and the sending account's own address as "self" —
       // see send_email's comment.
       ensureOutboundRecipientsAllowed(config.runtime, sendBundleForFwd.config.smtp.username, [...to, ...cc, ...bcc]);
-      if (dryRunFwd) {
-        return createTextResult({ dryRun: true, wouldSendTo: { to, cc, bcc }, subject: prefixedSubject(detail.subject, "Fwd:"), note: "No email was sent." });
-      }
-
       // args.attachments are new attachments the caller wants to add to the
       // forward — they are NOT the original message's attachments. Despite
       // the tool's own description ("preserving original attachments") and
@@ -682,6 +676,9 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           // Already applied above, before quote-wrapping.
           appendSignature: false,
       };
+      if (dryRunFwd) {
+        return createTextResult(dryRunSendResult(forwardPayload));
+      }
       const undoWindowforward = resolveUndoWindowSeconds(args);
       await ctx.delegation.claim(args, name, sendBundleForFwd, [...to, ...cc, ...bcc], readBundleFwd);
       if (undoWindowforward > 0) {

@@ -98,8 +98,8 @@ test("dryRun shows who would be answered and what the reply says, and sends noth
     assert.equal(result.error, false, result.text);
     assert.deepEqual(sent, []);
     assert.equal(result.json.dryRun, true);
-    assert.deepEqual(result.json.wouldSendTo, ["anna@corp.example"]);
-    assert.ok(result.json.replyCalendar.includes("METHOD:REPLY"));
+    assert.deepEqual(result.json.wouldSendTo, { to: ["anna@corp.example"], cc: [], bcc: [] });
+    assert.match(result.json.message.icalEvent.content, /METHOD:REPLY/);
   });
 });
 
@@ -185,6 +185,6 @@ test("the organizer/sender warning is raised for a stranger, not for Apple's own
     mailbox.ics = ics("owner@example.com").replace("anna@corp.example", "2_TOKEN@imip.me.com");
     const apple = await call("respond_to_invite", { emailId: "INBOX::1", response: "accept", dryRun: true });
     assert.equal(apple.json?.warning, undefined, JSON.stringify(apple.json));
-    assert.equal(apple.json?.wouldSendTo?.[0], "2_TOKEN@imip.me.com");
+    assert.equal(apple.json?.wouldSendTo?.to[0], "2_TOKEN@imip.me.com");
   });
 });
