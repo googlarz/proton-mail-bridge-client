@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.20.3] — 2026-11-24
+
 ### Fixed
 
 - **`reply_all_email` keeps the whole `References` chain.** It sent only the parent's Message-ID, while `reply_to_email` sent the full chain, so a reply-all in a long thread could lose its place in the recipients' mail clients. Both now send the same chain, ids as written (found while reviewing #80).
