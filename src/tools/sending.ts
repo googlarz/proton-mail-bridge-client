@@ -452,7 +452,7 @@ export async function handleSendingTool(name: string, args: Record<string, unkno
           from: fromRa,
           sanitizeHtml: sanitizeHtmlRa,
           inReplyTo: detailRa.messageId,
-          references: detailRa.messageId ? [detailRa.messageId] : undefined,
+          references: replyReferences(detailRa),
           attachments: attachmentsRa,
           // Already applied above, before quote-wrapping.
           appendSignature: false,

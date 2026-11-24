@@ -93,3 +93,13 @@ test("the preview leaves attachment bytes and the HTML copy out, and cuts a long
   assert.equal(preview.bodyLength, 600);
   assert.equal(preview.bodyTruncated, true);
 });
+
+for (const tool of ["reply_to_email", "reply_all_email"]) {
+  test(`${tool}: References carries the whole chain, ids as written`, async () => {
+    await withServer(async ({ call, sent }) => {
+      await call(tool, { emailId: "INBOX::1", body: "Thanks", confirmed: true });
+      assert.deepEqual(sent[0].references, ["<Root@protonmail.internalid>", "<orig@example.com>"]);
+      assert.equal(sent[0].inReplyTo, "<orig@example.com>");
+    });
+  });
+}
