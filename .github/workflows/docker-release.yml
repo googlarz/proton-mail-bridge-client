@@ -31,7 +31,9 @@ jobs:
           version="${TAG#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if npm view "proton-mail-bridge-client@$version" version >/dev/null 2>&1; then exit 0; fi
+            # npm serves the version's metadata before its tarball; the image build downloads the tarball.
+            if npm view "proton-mail-bridge-client@$version" version >/dev/null 2>&1 \
+              && curl -sfI "https://registry.npmjs.org/proton-mail-bridge-client/-/proton-mail-bridge-client-$version.tgz" >/dev/null; then exit 0; fi
             sleep 30
           done
           echo "proton-mail-bridge-client@$version is not on npm yet" >&2
