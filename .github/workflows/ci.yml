@@ -15,26 +15,19 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node-version: [22]
+        node-version: [24]
         include:
-          # The engines floor is Node 22 (package.json, base matrix); Node 24 stays covered too.
-          - os: ubuntu-latest
-            node-version: 24
+          # The engines floor is Node 24 (package.json, base matrix).
           # ubuntu-latest moves from Ubuntu 24.04 to 26.04 between 2026-10-19 and 2026-11-19 (actions/runner-images
           # issue 14748); test the new image now instead of finding out when the label moves.
           - os: ubuntu-26.04
             node-version: 24
-          # package.json says node >=22, so newer lines have to keep working; Node 26 passes the whole suite.
+          # package.json says node >=24, so newer lines have to keep working; Node 26 passes the whole suite.
           - os: ubuntu-latest
             node-version: 26
           # The darwin .mcpb bundle ships to users, so test on macOS too.
           - os: macos-latest
             node-version: 24
-          # The engines floor (Node 22) on macOS and Windows as well, not only on Ubuntu.
-          - os: macos-latest
-            node-version: 22
-          - os: windows-latest
-            node-version: 22
           # ...and the win32 bundle: Windows refuses to delete open files, which
           # is how the missing LocalIndexService.close() was found.
           - os: windows-latest
@@ -49,13 +42,6 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-
-      # Node 22 ships npm 10, whose `npm ci` runs `node-gyp rebuild` for better-sqlite3 (it ignores the
-      # prebuilt binaries the package ships) and fails on a runner without Visual Studio. Installing
-      # the published package with npm 10 does not do this (checked on macOS); only `npm ci` does.
-      - name: Use npm 11
-        if: matrix.node-version == 22
-        run: npm install -g npm@11
 
       - name: Install dependencies
         run: npm ci

@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.21.0] — 2026-11-25
+
+### Changed
+
+- **Node.js 24 or later is required (the floor was 22).** `engines`, the `.mcpb` manifest, both Dockerfiles, the README and the Homebrew formula now say Node 24. The reason is `unpdf` 2.2, which declares Node 24 in its own `engines`; the package used to promise 22 while installing a dependency that asked for 24. On Node 22 `npm install` now warns about the engine, and the `.mcpb` bundle refuses to load. If you are on Node 22, stay on 2.20.3 or upgrade Node. CI now tests Node 24 on Ubuntu 24.04 and 26.04, macOS and Windows, plus Node 26 on Ubuntu; the Node 22 jobs and the npm 11 step they needed are gone (Node 24 ships npm 11).
+
 ## [2.20.3] — 2026-11-24
 
 ### Fixed
