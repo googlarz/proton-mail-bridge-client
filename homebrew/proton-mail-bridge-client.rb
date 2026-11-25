@@ -5,11 +5,11 @@
 class ProtonMailBridgeClient < Formula
   desc "Full-featured CLI and Claude Desktop MCP for Proton Mail via Proton Bridge"
   homepage "https://github.com/googlarz/proton-mail-bridge-client"
-  url "https://registry.npmjs.org/proton-mail-bridge-client/-/proton-mail-bridge-client-2.20.3.tgz"
-  sha256 "50c5f7c89a12d192c21a16bb21ca3aa7070d9329cdd5cee92eb12cc13399f35b"
+  url "https://registry.npmjs.org/proton-mail-bridge-client/-/proton-mail-bridge-client-2.21.0.tgz"
+  sha256 "b22d328faac158e18ab567fd0736751511824044fbe414e539b1558b6a10ac69"
   license "MIT"
 
-  # Needs Node >= 22 (package.json engines). Homebrew has no way to state a minimum version for
+  # Needs Node >= 24 (package.json engines). Homebrew has no way to state a minimum version for
   # the rolling "node" formula; it currently provides a release that satisfies this.
   depends_on "node"
 
@@ -20,7 +20,7 @@ class ProtonMailBridgeClient < Formula
 
   def caveats
     <<~EOS
-      Requires Node.js 22 or newer (brew upgrade node if `node --version` is older).
+      Requires Node.js 24 or newer (brew upgrade node if `node --version` is older).
       Proton Mail Bridge must be running before using this tool.
       Download Bridge at: https://proton.me/mail/bridge
 
@@ -34,6 +34,6 @@ class ProtonMailBridgeClient < Formula
 
   test do
     output = shell_output("#{bin}/proton-mail-bridge-client --version 2>&1")
-    assert_match "2.20.3", output
+    assert_match "2.21.0", output
   end
 end
